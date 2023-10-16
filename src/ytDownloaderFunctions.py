@@ -1,10 +1,13 @@
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import filedialog
+from PIL import Image, ImageTk
+import io
 import yt_dlp
 import os
 import subprocess
 import re
+from urllib.request import urlopen
 
 
 def download_video(url, format_code, output_folder, progress_bar):
@@ -45,7 +48,7 @@ def download_audio(url, output_folder, progress_bar):
     return audio_filename, audio_ext
 
 
-def merge_audio_video(video_file, audio_file, output_file, video_frames,progress_bar):
+def merge_audio_video(video_file, audio_file, output_file, video_frames, progress_bar):
     cmd = [
         'ffmpeg',
         '-i', video_file,
@@ -81,7 +84,7 @@ def merge_audio_video(video_file, audio_file, output_file, video_frames,progress
         print("Error:", e)
 
 
-def get_available_resolutions(url, resolutions_text):
+def get_available_resolutions(url, resolutions_text, thumbnail_label):
     try:
         ydl_opts = {
             'listformats': True,
@@ -89,29 +92,49 @@ def get_available_resolutions(url, resolutions_text):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+
+            # Fetch the video thumbnail URL
+            thumbnail_url = info.get('thumbnail')
+
+            # Read the thumbnail url
+            if thumbnail_url:
+                thumbnail_image = Image.open(io.BytesIO(urlopen(thumbnail_url).read()))
+                thumbnail_image.thumbnail((1280/2.5,720/2.5))
+                thumbnail_imageTK = ImageTk.PhotoImage(thumbnail_image)
+
+                # Display the image in a Label
+                thumbnail_label.config(image=thumbnail_imageTK)
+                thumbnail_label.image=thumbnail_imageTK
+
+            # Fetch all formats of the video
             formats = info.get('formats', [])
 
+            # List all the formats of the video
             for format in formats:
                 if format.get('vcodec') == 'none' or format.get('filesize') is None:
                     continue  # Skip audio-only formats
 
-                format_code = format['format_id']
-                resolution = format.get('resolution', 'Unknown')
-                ext = format.get('ext', 'Unknown')
-                acodec = format.get('acodec')
-                size = format.get('filesize')
+                format_code = format['format_id']  # Format id for input into download function
+                resolution = format.get('resolution', 'Unknown')  # resolution of the video
+                ext = format.get('ext', 'Unknown')  # video extension
+                acodec = format.get('acodec')  # audio_codec of the video
+                size = format.get('filesize')  # file size
 
+                # if the format not webm or mp4 skip
                 if ext not in ('webm', 'mp4'):
                     continue
 
+                # change respone for better view in treeview
                 if acodec == 'none':
                     acodec = 'Yes'
                 else:
                     acodec = 'No'
 
+                # change size from b to Mb
                 size_mb = float(size) / (1024 * 1024)
                 size_display = f'{size_mb:.2f} MB'
 
+                # insert the resolutions in the treeview
                 resolutions_text.insert(parent='', index=tk.END,
                                         values=(resolution, size_display, ext, acodec, format_code))
 
@@ -128,3 +151,5 @@ def progress_hook(progress_bar):
             progress_bar['value'] = 0
 
     return update_progress_bar
+
+
