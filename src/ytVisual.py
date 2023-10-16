@@ -31,21 +31,38 @@ class App(ttk.Window):
 
         get_resolutions_button = ttk.Button(res_frame, text='Get Resolutions',
                                             command=lambda: ytDownloaderFunctions.get_available_resolutions(
-                                                self.url_entry.get().strip(), self.resolutions))
+                                                self.url_entry.get().strip(), self.resolutions, self.thumbnail_label))
 
         get_resolutions_button.pack(side='right', padx=5)
 
         # resolutions viewer
         columns = ('Resolution', 'Size', 'Extension', 'Merge?')
-        self.resolutions = ttk.Treeview(self, columns=columns, show='headings', )
+        self.resolutions = ttk.Treeview(self, columns=columns, show='headings',height=13 )
         for col in columns:
             self.resolutions.heading(col, text=col)
             self.resolutions.column(col, anchor='center')
 
         self.resolutions.bind('<<TreeviewSelect>>', self.item_select)
-        self.resolutions.place(relx=0.5, rely=0.3, anchor='center')
-
+        self.resolutions.place(relx=0.5, rely=0.32, anchor='center',)
         self.format_code = None
+
+        # thumbnail
+        self.thumbnail_label = ttk.Label(border=0, )
+        self.thumbnail_label.place(relx=0.5, rely=0.695, anchor='center')
+
+        # download frame
+        downl_frame = ttk.Frame()
+        downl_frame.place(relx=0.5, rely=0.9, anchor='n')
+        self.progress_bar = ttk.Progressbar(downl_frame, length=300, mode='determinate')
+        self.progress_bar.pack(pady=5)
+
+        download_gif = Image.open('Images/descargar.png').resize((16, 16))
+        download_gifTk = ImageTk.PhotoImage(download_gif)
+
+        self.download_button = ttk.Button(downl_frame, text='Download', bootstyle='success',
+                                          command=self.download_button_clicked, state='enabled', image=download_gifTk,
+                                          compound='left')
+        self.download_button.pack()
 
         # outuput frame
         output_frame = ttk.Frame()
@@ -62,20 +79,6 @@ class App(ttk.Window):
         choose_folder_button = ttk.Button(output_frame, text='Choose Folder', command=self.choose_folder,
                                           image=choose_folder_icoTk)
         choose_folder_button.pack(side='right')
-
-        # download frame
-        downl_frame = ttk.Frame()
-        downl_frame.place(relx=0.5, rely=0.43, anchor='n')
-        self.progress_bar = ttk.Progressbar(downl_frame, length=300, mode='determinate')
-        self.progress_bar.pack(pady=5)
-
-        download_gif = Image.open('Images/descargar.png').resize((16, 16))
-        download_gifTk = ImageTk.PhotoImage(download_gif)
-
-        self.download_button = ttk.Button(downl_frame, text='Download', bootstyle='success',
-                                          command=self.download_button_clicked, state='enabled', image=download_gifTk,
-                                          compound='left')
-        self.download_button.pack()
 
         # run
         self.mainloop()
