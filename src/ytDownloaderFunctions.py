@@ -131,11 +131,11 @@ def get_available_resolutions(url, resolutions_treeview, thumbnail_label):
 
                 # change size from b to Mb
                 size_mb = float(size) / (1024 * 1024)
-                # if size_mb >= 1024:
-                #     size_gb=float(size_mb)/1024
-                #     size_display = f'{size_gb:.2f} Gb'
-                # else:
-                size_display = f'{size_mb:.2f} Mb'
+                if size_mb >= 1024:
+                    size_gb=float(size_mb)/1024
+                    size_display = f'{size_gb:.2f} Gb'
+                else:
+                    size_display = f'{size_mb:.2f} Mb'
 
                 # insert the resolutions in the treeview
                 resolutions_treeview.insert(parent='', index=tk.END,
