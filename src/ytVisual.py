@@ -16,7 +16,7 @@ class App(ttk.Window):
         self.geometry(f'{size[0]}x{size[1]}')
         self.minsize(size[0], size[1])
         self.maxsize(size[0], size[1])
-        self.iconbitmap('Images/download.ico')
+        self.iconbitmap('Images/AlienFumon.jpg')
 
         self.s = ttk.Style()
         self.s.configure('.', font=(font, 12))
@@ -30,7 +30,7 @@ class App(ttk.Window):
         self.url_entry.pack(side='left')
 
         get_resolutions_button = ttk.Button(res_frame, text='Get Resolutions',
-                                            command=lambda: ytDownloaderFunctions.get_available_resolutions(
+                                            command=lambda: ytDownloaderFunctions.delete_and_get_resolutions(
                                                 self.url_entry.get().strip(), self.resolutions, self.thumbnail_label))
 
         get_resolutions_button.pack(side='right', padx=5)
