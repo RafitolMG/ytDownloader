@@ -109,15 +109,15 @@ def get_available_resolutions(url, resolutions_treeview, thumbnail_label):
             formats = info.get('formats', [])
 
             # List all the formats of the video
-            for format in formats:
-                if format.get('vcodec') == 'none' or format.get('filesize') is None:
+            for yt_format in formats:
+                if yt_format.get('vcodec') == 'none' or yt_format.get('filesize') is None:
                     continue  # Skip audio-only formats
 
-                format_code = format['format_id']  # Format id for input into download function
-                resolution = format.get('resolution', 'Unknown')  # resolution of the video
-                ext = format.get('ext', 'Unknown')  # video extension
-                acodec = format.get('acodec')  # audio_codec of the video
-                size = format.get('filesize')  # file size
+                format_code = yt_format['format_id']  # Format id for input into download function
+                resolution = yt_format.get('resolution', 'Unknown')  # resolution of the video
+                ext = yt_format.get('ext', 'Unknown')  # video extension
+                acodec = yt_format.get('acodec')  # audio_codec of the video
+                size = yt_format.get('filesize')  # file size
 
                 # if the format not webm or mp4 skip
                 if ext != 'mp4':  # if ext not in ('webm', 'mp4'): If we want webm also
@@ -132,17 +132,17 @@ def get_available_resolutions(url, resolutions_treeview, thumbnail_label):
                 # change size from b to Mb
                 size_mb = float(size) / (1024 * 1024)
                 if size_mb >= 1024:
-                    size_gb=float(size_mb)/1024
+                    size_gb = float(size_mb) / 1024
                     size_display = f'{size_gb:.2f} Gb'
                 else:
                     size_display = f'{size_mb:.2f} Mb'
 
                 # insert the resolutions in the treeview
                 resolutions_treeview.insert(parent='', index=tk.END,
-                                            values=(resolution, size_display, ext, acodec, format_code))
+                                            values=(resolution, size_display, ext, acodec))
 
     except Exception as e:
-        messagebox.showerror("Error", 'No URL or not valid')
+        messagebox.showerror("Error", f'{e}')
 
 
 def delete_and_get_resolutions(url, resolutions_treeview, thumbnail_label):
