@@ -139,7 +139,7 @@ def get_available_resolutions(url, resolutions_treeview, thumbnail_label):
 
                 # insert the resolutions in the treeview
                 resolutions_treeview.insert(parent='', index=tk.END,
-                                            values=(resolution, size_display, ext, acodec))
+                                            values=(resolution, size_display, ext,acodec, format_code))
 
     except Exception as e:
         messagebox.showerror("Error", f'{e}')

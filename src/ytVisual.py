@@ -89,7 +89,7 @@ class App(ttk.Window):
             self.output_folder.set(folder_selected)
             configFunctions.save_output_folder(folder_selected)
 
-    def item_select(self):
+    def item_select(self,event): # event important no remove
         for i in self.resolutions.selection():
             self.format_code = self.resolutions.item(i)['values'][-1]
 
