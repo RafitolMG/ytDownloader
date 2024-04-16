@@ -1,6 +1,5 @@
 import tkinter as tk
 from tkinter import messagebox
-from tkinter import filedialog
 from PIL import Image, ImageTk
 import io
 import yt_dlp
@@ -84,7 +83,7 @@ def merge_audio_video(video_file, audio_file, output_file, video_frames, progres
         print("Error:", e)
 
 
-def get_available_resolutions(url, resolutions_text, thumbnail_label):
+def get_available_resolutions(url, resolutions_treeview, thumbnail_label):
     try:
         ydl_opts = {
             'listformats': True,
@@ -99,32 +98,32 @@ def get_available_resolutions(url, resolutions_text, thumbnail_label):
             # Read the thumbnail url
             if thumbnail_url:
                 thumbnail_image = Image.open(io.BytesIO(urlopen(thumbnail_url).read()))
-                thumbnail_image.thumbnail((1280/2.5,720/2.5))
+                thumbnail_image.thumbnail((1280 / 2.5, 720 / 2.5))
                 thumbnail_imageTK = ImageTk.PhotoImage(thumbnail_image)
 
                 # Display the image in a Label
                 thumbnail_label.config(image=thumbnail_imageTK)
-                thumbnail_label.image=thumbnail_imageTK
+                thumbnail_label.image = thumbnail_imageTK
 
             # Fetch all formats of the video
             formats = info.get('formats', [])
 
             # List all the formats of the video
-            for format in formats:
-                if format.get('vcodec') == 'none' or format.get('filesize') is None:
+            for yt_format in formats:
+                if yt_format.get('vcodec') == 'none' or yt_format.get('filesize') is None:
                     continue  # Skip audio-only formats
 
-                format_code = format['format_id']  # Format id for input into download function
-                resolution = format.get('resolution', 'Unknown')  # resolution of the video
-                ext = format.get('ext', 'Unknown')  # video extension
-                acodec = format.get('acodec')  # audio_codec of the video
-                size = format.get('filesize')  # file size
+                format_code = yt_format['format_id']  # Format id for input into download function
+                resolution = yt_format.get('resolution', 'Unknown')  # resolution of the video
+                ext = yt_format.get('ext', 'Unknown')  # video extension
+                acodec = yt_format.get('acodec')  # audio_codec of the video
+                size = yt_format.get('filesize')  # file size
 
                 # if the format not webm or mp4 skip
-                if ext not in ('webm', 'mp4'):
+                if ext != 'mp4':  # if ext not in ('webm', 'mp4'): If we want webm also
                     continue
 
-                # change respone for better view in treeview
+                # change response for better view in treeview
                 if acodec == 'none':
                     acodec = 'Yes'
                 else:
@@ -132,14 +131,24 @@ def get_available_resolutions(url, resolutions_text, thumbnail_label):
 
                 # change size from b to Mb
                 size_mb = float(size) / (1024 * 1024)
-                size_display = f'{size_mb:.2f} MB'
+                if size_mb >= 1024:
+                    size_gb = float(size_mb) / 1024
+                    size_display = f'{size_gb:.2f} Gb'
+                else:
+                    size_display = f'{size_mb:.2f} Mb'
 
                 # insert the resolutions in the treeview
-                resolutions_text.insert(parent='', index=tk.END,
-                                        values=(resolution, size_display, ext, acodec, format_code))
+                resolutions_treeview.insert(parent='', index=tk.END,
+                                            values=(resolution, size_display, ext,acodec, format_code))
 
     except Exception as e:
-        messagebox.showerror("Error", 'No URL or not valid')
+        messagebox.showerror("Error", f'{e}')
+
+
+def delete_and_get_resolutions(url, resolutions_treeview, thumbnail_label):
+    for i in resolutions_treeview.get_children():
+        resolutions_treeview.delete(i)
+    get_available_resolutions(url, resolutions_treeview, thumbnail_label)
 
 
 def progress_hook(progress_bar):
@@ -151,5 +160,3 @@ def progress_hook(progress_bar):
             progress_bar['value'] = 0
 
     return update_progress_bar
-
-
