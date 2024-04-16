@@ -16,7 +16,7 @@ class App(ttk.Window):
         self.geometry(f'{size[0]}x{size[1]}')
         self.minsize(size[0], size[1])
         self.maxsize(size[0], size[1])
-        self.iconbitmap('Images/download.ico')
+        self.iconbitmap('Images/AlienFumon.jpg')
 
         self.s = ttk.Style()
         self.s.configure('.', font=(font, 12))
@@ -30,20 +30,20 @@ class App(ttk.Window):
         self.url_entry.pack(side='left')
 
         get_resolutions_button = ttk.Button(res_frame, text='Get Resolutions',
-                                            command=lambda: ytDownloaderFunctions.get_available_resolutions(
+                                            command=lambda: ytDownloaderFunctions.delete_and_get_resolutions(
                                                 self.url_entry.get().strip(), self.resolutions, self.thumbnail_label))
 
         get_resolutions_button.pack(side='right', padx=5)
 
         # resolutions viewer
-        columns = ('Resolution', 'Size', 'Extension', 'Merge?')
-        self.resolutions = ttk.Treeview(self, columns=columns, show='headings',height=13 )
+        columns = ('Resolution', 'Size', 'Extension')
+        self.resolutions = ttk.Treeview(self, columns=columns, show='headings', height=13)
         for col in columns:
             self.resolutions.heading(col, text=col)
             self.resolutions.column(col, anchor='center')
 
         self.resolutions.bind('<<TreeviewSelect>>', self.item_select)
-        self.resolutions.place(relx=0.5, rely=0.32, anchor='center',)
+        self.resolutions.place(relx=0.5, rely=0.32, anchor='center', )
         self.format_code = None
 
         # thumbnail
@@ -59,9 +59,8 @@ class App(ttk.Window):
         download_gif = Image.open('Images/descargar.png').resize((16, 16))
         download_gifTk = ImageTk.PhotoImage(download_gif)
 
-        self.download_button = ttk.Button(downl_frame, text='Download', bootstyle='success',
-                                          command=self.download_button_clicked, state='enabled', image=download_gifTk,
-                                          compound='left')
+        self.download_button = ttk.Button(downl_frame, text='Download', command=self.download_button_clicked,
+                                          state='enabled', image=download_gifTk, compound='left')
         self.download_button.pack()
 
         # outuput frame
@@ -90,7 +89,7 @@ class App(ttk.Window):
             self.output_folder.set(folder_selected)
             configFunctions.save_output_folder(folder_selected)
 
-    def item_select(self, event):
+    def item_select(self,event): # event important no remove
         for i in self.resolutions.selection():
             self.format_code = self.resolutions.item(i)['values'][-1]
 
@@ -111,10 +110,11 @@ class App(ttk.Window):
 
         def download_proccess():
             try:
-                video_filename, video_ext, audio_codec, total_frames = ytDownloaderFunctions.download_video(video_url,
-                                                                                                            chosen_format,
-                                                                                                            self.output_folder,
-                                                                                                            self.progress_bar)
+                video_filename, video_ext, audio_codec, total_frames \
+                    = ytDownloaderFunctions.download_video(video_url,
+                                                           chosen_format,
+                                                           self.output_folder,
+                                                           self.progress_bar)
 
                 if audio_codec == 'none':
                     audio_filename, audio_ext = ytDownloaderFunctions.download_audio(video_url, self.output_folder,
