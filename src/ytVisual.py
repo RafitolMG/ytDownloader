@@ -43,12 +43,12 @@ class App(ttk.Window):
             self.resolutions.column(col, anchor='center')
 
         self.resolutions.bind('<<TreeviewSelect>>', self.item_select)
-        self.resolutions.place(relx=0.5, rely=0.32, anchor='center', )
+        self.resolutions.place(relx=0.5, rely=0.35, anchor='center', )
         self.format_code = None
 
         # thumbnail
         self.thumbnail_label = ttk.Label(border=0, )
-        self.thumbnail_label.place(relx=0.5, rely=0.695, anchor='center')
+        self.thumbnail_label.place(relx=0.5, rely=0.7, anchor='center')
 
         # download frame
         downl_frame = ttk.Frame()
@@ -65,7 +65,7 @@ class App(ttk.Window):
 
         # outuput frame
         output_frame = ttk.Frame()
-        output_frame.place(rely=0.9, relx=0)
+        output_frame.place(rely=0.93, relx=0.01)
         self.output_folder = ttk.StringVar()
         initial_output_folder = configFunctions.load_output_folder()
         self.output_folder.set(initial_output_folder)
@@ -73,7 +73,7 @@ class App(ttk.Window):
                                         width=30)
         output_folder_entry.pack(side='left', padx=5)
 
-        choose_folder_ico = Image.open('Images/agregar-carpeta.png').resize((16, 16))
+        choose_folder_ico = Image.open('Images/agregar-carpeta.png').resize((32, 32))
         choose_folder_icoTk = ImageTk.PhotoImage(choose_folder_ico)
         choose_folder_button = ttk.Button(output_frame, text='Choose Folder', command=self.choose_folder,
                                           image=choose_folder_icoTk)
@@ -89,7 +89,7 @@ class App(ttk.Window):
             self.output_folder.set(folder_selected)
             configFunctions.save_output_folder(folder_selected)
 
-    def item_select(self,event): # event important no remove
+    def item_select(self, event):  # event important no remove
         for i in self.resolutions.selection():
             self.format_code = self.resolutions.item(i)['values'][-1]
 
