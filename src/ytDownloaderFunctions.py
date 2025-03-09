@@ -98,7 +98,7 @@ def get_available_resolutions(url, resolutions_treeview, thumbnail_label):
             # Read the thumbnail url
             if thumbnail_url:
                 thumbnail_image = Image.open(io.BytesIO(urlopen(thumbnail_url).read()))
-                thumbnail_image.thumbnail((1280 / 2.5, 720 / 2.5))
+                thumbnail_image.thumbnail((1280 / 4, 720 / 4))
                 thumbnail_imageTK = ImageTk.PhotoImage(thumbnail_image)
 
                 # Display the image in a Label

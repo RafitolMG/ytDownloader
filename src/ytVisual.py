@@ -16,13 +16,10 @@ class App(ttk.Window):
         self.geometry(f'{size[0]}x{size[1]}')
         self.minsize(size[0], size[1])
         self.maxsize(size[0], size[1])
-        self.iconbitmap('Images/AlienFumon.jpg')
+        self.iconbitmap('Images/u327as.ico')
 
         self.s = ttk.Style()
         self.s.configure('.', font=(font, 12))
-
-        # widgets
-
         # link frame
         res_frame = ttk.Frame()
         res_frame.place(relx=0.5, rely=0.1, anchor='center')
@@ -47,7 +44,7 @@ class App(ttk.Window):
         self.format_code = None
 
         # thumbnail
-        self.thumbnail_label = ttk.Label(border=0, )
+        self.thumbnail_label = ttk.Label(border=0)
         self.thumbnail_label.place(relx=0.5, rely=0.7, anchor='center')
 
         # download frame
