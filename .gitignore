@@ -14,6 +14,9 @@ config.ini
 # Claude Code session data
 .claude/
 
+# Local FFmpeg binary (place ffmpeg.exe here to avoid PATH dependency)
+bin/
+
 # OS
 Thumbs.db
 .DS_Store
