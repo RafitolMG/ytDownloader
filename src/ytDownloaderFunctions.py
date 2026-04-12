@@ -1,19 +1,25 @@
-import tkinter as tk
-from tkinter import messagebox
-from PIL import Image, ImageTk
-import io
+import shutil
 import yt_dlp
 import os
 import subprocess
 import re
-from urllib.request import urlopen
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_LOCAL_FFMPEG = os.path.join(_PROJECT_ROOT, 'bin', 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg')
 
 
-def download_video(url, format_code, output_folder, progress_bar):
+def _get_ffmpeg_path():
+    """Return path to ffmpeg: local bin/ folder first, then system PATH."""
+    if os.path.isfile(_LOCAL_FFMPEG):
+        return _LOCAL_FFMPEG
+    return shutil.which('ffmpeg')
+
+
+def download_video(url, format_code, output_folder, on_progress=None):
     ydl_opts = {
         'format': format_code,
-        'outtmpl': os.path.join(output_folder.get(), '%(title)s.%(ext)s'),
-        'progress_hooks': [progress_hook(progress_bar)]
+        'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
+        'progress_hooks': [_progress_hook(on_progress)]
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -24,19 +30,14 @@ def download_video(url, format_code, output_folder, progress_bar):
         duration = float(result['duration'])
         fps = float(result['fps'])
 
-    return video_filename, video_ext, audio_codec, calculate_total_frames(duration, fps)
+    return video_filename, video_ext, audio_codec, _calculate_total_frames(duration, fps)
 
 
-def calculate_total_frames(duration, fps):
-    total_frames = int(duration * fps)
-    return total_frames
-
-
-def download_audio(url, output_folder, progress_bar):
+def download_audio(url, output_folder, on_progress=None):
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': os.path.join(output_folder.get(), '%(title)s_audio.%(ext)s'),
-        'progress_hooks': [progress_hook(progress_bar)]
+        'outtmpl': os.path.join(output_folder, '%(title)s_audio.%(ext)s'),
+        'progress_hooks': [_progress_hook(on_progress)]
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -47,9 +48,13 @@ def download_audio(url, output_folder, progress_bar):
     return audio_filename, audio_ext
 
 
-def merge_audio_video(video_file, audio_file, output_file, video_frames, progress_bar):
+def merge_audio_video(video_file, audio_file, output_file, video_frames, on_progress=None):
+    ffmpeg = _get_ffmpeg_path()
+    if ffmpeg is None:
+        raise RuntimeError("FFmpeg not found. Place ffmpeg.exe in the bin/ folder or add it to your PATH.")
+
     cmd = [
-        'ffmpeg',
+        ffmpeg,
         '-i', video_file,
         '-i', audio_file,
         '-c:v', 'copy',
@@ -59,104 +64,83 @@ def merge_audio_video(video_file, audio_file, output_file, video_frames, progres
     ]
 
     try:
-        # Start the ffmpeg process and capture its output for real time progress bar
         process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True)
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg not found. Place ffmpeg.exe in the bin/ folder or add it to your PATH.")
 
-        # Define a regex pattern to extract progress information
-        progress_pattern = re.compile(r"frame=(\s*\d+)")
+    progress_pattern = re.compile(r"frame=(\s*\d+)")
 
-        while True:
-            line = process.stderr.readline()
-            if not line:
-                break
-            match = progress_pattern.search(line)
-            if match:
-                frame_number = int(match.group(1))
-                total_frames = video_frames  # You can adjust this based on your video's total frames
-                progress_percent = (frame_number / total_frames) * 100
-                progress_bar['value'] = progress_percent
+    while True:
+        line = process.stderr.readline()
+        if not line:
+            break
+        match = progress_pattern.search(line)
+        if match and on_progress:
+            frame_number = int(match.group(1))
+            progress_percent = (frame_number / video_frames) * 100
+            on_progress(progress_percent)
 
-        process.communicate()  # Wait for the process to finish
-        if process.returncode != 0:
-            print("Error: FFmpeg process returned a non-zero exit code.")
-    except subprocess.CalledProcessError as e:
-        print("Error:", e)
+    process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError("FFmpeg process returned a non-zero exit code.")
 
 
-def get_available_resolutions(url, resolutions_treeview, thumbnail_label):
-    try:
-        ydl_opts = {
-            'listformats': True,
-        }
+def get_available_resolutions(url):
+    """
+    Returns a dict with:
+      - 'formats': list of dicts with keys: format_code, resolution, ext, needs_merge, size_display
+      - 'thumbnail_url': str or None
+      - 'ffmpeg_available': bool
+    Raises on error.
+    """
+    ydl_opts = {'quiet': True, 'no_warnings': True}
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
 
-            # Fetch the video thumbnail URL
-            thumbnail_url = info.get('thumbnail')
+    thumbnail_url = info.get('thumbnail')
+    ffmpeg_available = _get_ffmpeg_path() is not None
+    formats = []
 
-            # Read the thumbnail url
-            if thumbnail_url:
-                thumbnail_image = Image.open(io.BytesIO(urlopen(thumbnail_url).read()))
-                thumbnail_image.thumbnail((1280 / 4, 720 / 4))
-                thumbnail_imageTK = ImageTk.PhotoImage(thumbnail_image)
+    for yt_format in info.get('formats', []):
+        if yt_format.get('vcodec') == 'none' or yt_format.get('filesize') is None:
+            continue
+        if yt_format.get('ext') != 'mp4':
+            continue
 
-                # Display the image in a Label
-                thumbnail_label.config(image=thumbnail_imageTK)
-                thumbnail_label.image = thumbnail_imageTK
+        needs_merge = yt_format.get('acodec') == 'none'
+        if needs_merge and not ffmpeg_available:
+            continue
 
-            # Fetch all formats of the video
-            formats = info.get('formats', [])
-
-            # List all the formats of the video
-            for yt_format in formats:
-                if yt_format.get('vcodec') == 'none' or yt_format.get('filesize') is None:
-                    continue  # Skip audio-only formats
-
-                format_code = yt_format['format_id']  # Format id for input into download function
-                resolution = yt_format.get('resolution', 'Unknown')  # resolution of the video
-                ext = yt_format.get('ext', 'Unknown')  # video extension
-                acodec = yt_format.get('acodec')  # audio_codec of the video
-                size = yt_format.get('filesize')  # file size
-
-                # if the format not webm or mp4 skip
-                if ext != 'mp4':  # if ext not in ('webm', 'mp4'): If we want webm also
-                    continue
-
-                # change response for better view in treeview
-                if acodec == 'none':
-                    acodec = 'Yes'
-                else:
-                    acodec = 'No'
-
-                # change size from b to Mb
-                size_mb = float(size) / (1024 * 1024)
-                if size_mb >= 1024:
-                    size_gb = float(size_mb) / 1024
-                    size_display = f'{size_gb:.2f} Gb'
-                else:
-                    size_display = f'{size_mb:.2f} Mb'
-
-                # insert the resolutions in the treeview
-                resolutions_treeview.insert(parent='', index=tk.END,
-                                            values=(resolution, size_display, ext,acodec, format_code))
-
-    except Exception as e:
-        messagebox.showerror("Error", f'{e}')
-
-
-def delete_and_get_resolutions(url, resolutions_treeview, thumbnail_label):
-    for i in resolutions_treeview.get_children():
-        resolutions_treeview.delete(i)
-    get_available_resolutions(url, resolutions_treeview, thumbnail_label)
-
-
-def progress_hook(progress_bar):
-    def update_progress_bar(d):
-        if d['status'] == 'downloading':
-            progress_percent = float(d['_percent_str'].strip('%'))
-            progress_bar['value'] = progress_percent
+        size_mb = float(yt_format['filesize']) / (1024 * 1024)
+        if size_mb >= 1024:
+            size_display = f'{size_mb / 1024:.2f} GB'
         else:
-            progress_bar['value'] = 0
+            size_display = f'{size_mb:.2f} MB'
 
-    return update_progress_bar
+        formats.append({
+            'format_code': yt_format['format_id'],
+            'resolution': yt_format.get('resolution', 'Unknown'),
+            'ext': yt_format.get('ext', 'Unknown'),
+            'needs_merge': needs_merge,
+            'size_display': size_display,
+        })
+
+    return {'formats': formats, 'thumbnail_url': thumbnail_url, 'ffmpeg_available': ffmpeg_available}
+
+
+def _calculate_total_frames(duration, fps):
+    return int(duration * fps)
+
+
+def _progress_hook(on_progress):
+    def hook(d):
+        if on_progress is None:
+            return
+        if d['status'] == 'downloading':
+            try:
+                percent = float(d['_percent_str'].strip('%'))
+                on_progress(percent)
+            except (ValueError, KeyError):
+                pass
+    return hook

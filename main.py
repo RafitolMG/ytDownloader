@@ -1,5 +1,5 @@
-from src import ytVisual
+import uvicorn
+from src.api.routes import app  # noqa: F401 — re-exported for uvicorn string reference
 
-# https://www.youtube.com/watch?v=58FhORROVp0
-
-ytVisual.App('Youtube Downloader', (1280, 720), 'poppins')
+if __name__ == "__main__":
+    uvicorn.run("src.api.routes:app", host="0.0.0.0", port=8000, reload=False)
