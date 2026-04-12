@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Config (contains user-specific output folder path)
+config.ini
+
+# JetBrains IDE
+.idea/
+
+# Claude Code session data
+.claude/
+
+# OS
+Thumbs.db
+.DS_Store
