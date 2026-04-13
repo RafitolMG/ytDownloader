@@ -139,14 +139,26 @@ def start_playlist_download(body: PlaylistDownloadRequest):
                 on_video_start=on_video_start,
             )
 
+            # Collect every file that was written to the temp dir
+            downloaded = []
+            for root, _dirs, files in os.walk(tmp_dir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    downloaded.append((fpath, os.path.relpath(fpath, tmp_dir)))
+
+            if not downloaded:
+                raise RuntimeError(
+                    "No tracks were downloaded. Possible causes: the playlist is "
+                    "private or empty, YouTube is blocking the request (add a "
+                    "cookies.txt file to the project root), or all tracks are "
+                    "unavailable in your region."
+                )
+
             zip_path = os.path.join(tmp_dir, "playlist.zip")
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
-                for root, _dirs, files in os.walk(tmp_dir):
-                    for fname in files:
-                        if fname == "playlist.zip":
-                            continue
-                        fpath = os.path.join(root, fname)
-                        zf.write(fpath, os.path.relpath(fpath, tmp_dir))
+                for fpath, arcname in downloaded:
+                    if not fpath.endswith("playlist.zip"):
+                        zf.write(fpath, arcname)
 
             _jobs[job_id]["file_path"] = zip_path
             progress_queue.put({"type": "done", "filename": "playlist.zip"})
