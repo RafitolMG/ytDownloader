@@ -118,6 +118,7 @@ def merge_audio_video(video_file, audio_file, output_file, video_frames, on_prog
 
     cmd = [
         ffmpeg,
+        '-y',
         '-i', video_file,
         '-i', audio_file,
         '-c:v', 'copy',
