@@ -310,9 +310,10 @@ def download_playlist(url, quality, output_folder, on_progress=None, on_video_st
 
     ydl_opts = {
         'format': fmt,
-        'outtmpl': os.path.join(output_folder, '%(playlist_title,title)s', '%(playlist_index)s - %(title)s.%(ext)s'),
+        'outtmpl': os.path.join(output_folder, '%(playlist_index)s - %(title)s.%(ext)s'),
         'progress_hooks': [_hook],
         'ignoreerrors': True,
+        'restrictfilenames': True,
         'postprocessors': postprocessors,
         **_get_cookie_opts(),
     }
