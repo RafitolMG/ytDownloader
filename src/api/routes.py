@@ -80,16 +80,18 @@ def start_download(body: DownloadRequest):
                     body.url, tmp_dir, on_progress
                 )
                 base = os.path.splitext(os.path.basename(video_filename))[0]
-                merged_path = os.path.join(tmp_dir, f"{base}.mp4")
+                merged_tmp = os.path.join(tmp_dir, f"{base}_out.mp4")
                 ytDownloaderFunctions.merge_audio_video(
-                    video_filename, audio_filename, merged_path, total_frames, on_progress
+                    video_filename, audio_filename, merged_tmp, total_frames, on_progress
                 )
                 for f in (video_filename, audio_filename):
                     try:
                         os.remove(f)
                     except OSError:
                         pass
-                final_path = merged_path
+                # Rename to clean filename now that the original video file is gone
+                final_path = os.path.join(tmp_dir, f"{base}.mp4")
+                os.rename(merged_tmp, final_path)
 
             _jobs[job_id]["file_path"] = final_path
             progress_queue.put({"type": "done", "filename": os.path.basename(final_path)})
