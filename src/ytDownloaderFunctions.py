@@ -3,6 +3,7 @@ import yt_dlp
 import os
 import subprocess
 import re
+from urllib.parse import urlparse, parse_qs
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOCAL_FFMPEG = os.path.join(_PROJECT_ROOT, 'bin', 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg')
@@ -29,16 +30,12 @@ def _get_cookie_opts() -> dict:
         return {'cookiefile': cookies_file}
 
     if os.name == 'nt':
-        local = os.environ.get('LOCALAPPDATA', '')
+        # Chrome and Edge use app-bound encryption since v127 which breaks DPAPI
+        # extraction from outside the browser process. Firefox still works fine.
         appdata = os.environ.get('APPDATA', '')
-        candidates = [
-            ('chrome', os.path.join(local, 'Google', 'Chrome', 'User Data')),
-            ('edge',   os.path.join(local, 'Microsoft', 'Edge', 'User Data')),
-            ('firefox', os.path.join(appdata, 'Mozilla', 'Firefox', 'Profiles')),
-        ]
-        for browser, profile_dir in candidates:
-            if os.path.isdir(profile_dir):
-                return {'cookiesfrombrowser': (browser,)}
+        firefox_dir = os.path.join(appdata, 'Mozilla', 'Firefox', 'Profiles')
+        if os.path.isdir(firefox_dir):
+            return {'cookiesfrombrowser': ('firefox',)}
 
     return {}
 
@@ -157,7 +154,12 @@ def get_available_resolutions(url, audio_only=False):
       - 'ffmpeg_available': bool
     Raises on error.
     """
-    ydl_opts = {'quiet': True, 'no_warnings': True, **_get_cookie_opts()}
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'ignore_no_formats_error': True,  # don't raise if default format selection fails
+        **_get_cookie_opts(),
+    }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -219,6 +221,109 @@ def get_available_resolutions(url, audio_only=False):
             })
 
     return {'formats': formats, 'thumbnail_url': thumbnail_url, 'ffmpeg_available': ffmpeg_available}
+
+
+def is_playlist(url):
+    """Return True if the URL contains a playlist identifier."""
+    try:
+        return 'list' in parse_qs(urlparse(url).query)
+    except Exception:
+        return False
+
+
+def get_playlist_info(url):
+    """
+    Returns a dict with:
+      - 'title': playlist title
+      - 'count': number of videos
+      - 'thumbnail_url': thumbnail URL or None
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        **_get_cookie_opts(),
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    entries = info.get('entries') or []
+    thumbnail = info.get('thumbnail')
+    if not thumbnail and entries:
+        thumbnail = entries[0].get('thumbnail')
+
+    return {
+        'title': info.get('title', 'Unknown Playlist'),
+        'count': len(entries),
+        'thumbnail_url': thumbnail,
+    }
+
+
+def download_playlist(url, quality, output_folder, on_progress=None, on_video_start=None):
+    """
+    Download all videos in a playlist.
+
+    quality: 'best' | '2160' | '1440' | '1080' | '720' | '480' | '360' | 'audio'
+    on_progress(percent)            — current video download progress 0-100
+    on_video_start(index, total, title) — called when each new video starts
+    """
+    ffmpeg = _get_ffmpeg_path()
+
+    _fmt = {
+        'best':  'bestvideo[ext=mp4]+bestaudio/best',
+        '2160':  'bestvideo[height<=2160][ext=mp4]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]',
+        '1440':  'bestvideo[height<=1440][ext=mp4]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]',
+        '1080':  'bestvideo[height<=1080][ext=mp4]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+        '720':   'bestvideo[height<=720][ext=mp4]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]',
+        '480':   'bestvideo[height<=480][ext=mp4]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]',
+        '360':   'bestvideo[height<=360][ext=mp4]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]',
+        'audio': 'bestaudio/best',
+    }
+    fmt = _fmt.get(quality, _fmt['best'])
+
+    postprocessors = []
+    if quality == 'audio' and ffmpeg:
+        postprocessors = [
+            {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '0'},
+            {'key': 'FFmpegMetadata', 'add_metadata': True},
+        ]
+
+    state = {'last_index': None}
+
+    def _hook(d):
+        if d['status'] != 'downloading':
+            return
+        if on_progress:
+            try:
+                downloaded = d.get('downloaded_bytes', 0)
+                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                if total:
+                    on_progress(downloaded / total * 100)
+            except (ValueError, ZeroDivisionError):
+                pass
+        if on_video_start:
+            info = d.get('info_dict', {})
+            idx = info.get('playlist_index')
+            if idx is not None and idx != state['last_index']:
+                state['last_index'] = idx
+                on_video_start(idx, info.get('n_entries', '?'), info.get('title', ''))
+
+    ydl_opts = {
+        'format': fmt,
+        'outtmpl': os.path.join(output_folder, '%(playlist_title,title)s', '%(playlist_index)s - %(title)s.%(ext)s'),
+        'progress_hooks': [_hook],
+        'ignoreerrors': True,
+        'postprocessors': postprocessors,
+        **_get_cookie_opts(),
+    }
+
+    if ffmpeg:
+        ydl_opts['ffmpeg_location'] = ffmpeg
+        if quality != 'audio':
+            ydl_opts['merge_output_format'] = 'mp4'
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
 
 
 def _calculate_total_frames(duration, fps):
