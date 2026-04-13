@@ -6,6 +6,7 @@ import tempfile
 import threading
 import traceback
 import uuid
+import zipfile
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -36,6 +37,11 @@ class DownloadRequest(BaseModel):
     format_code: str
 
 
+class PlaylistDownloadRequest(BaseModel):
+    url: str
+    quality: str = 'audio'
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -45,8 +51,10 @@ def index(request: Request):
 
 @app.post("/api/resolutions")
 def get_resolutions(body: ResolutionsRequest):
-    """Fetch available MP4 formats for a given URL."""
+    """Fetch available MP4 formats for a single video, or detect a playlist URL."""
     try:
+        if ytDownloaderFunctions.is_playlist(body.url):
+            return {"is_playlist": True}
         return ytDownloaderFunctions.get_available_resolutions(body.url)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -106,6 +114,53 @@ def start_download(body: DownloadRequest):
     return {"job_id": job_id}
 
 
+@app.post("/api/download-playlist")
+def start_playlist_download(body: PlaylistDownloadRequest):
+    """
+    Download all tracks in a playlist as MP3, zipped into a single archive.
+    Returns a job_id to track progress via WebSocket.
+    """
+    job_id = str(uuid.uuid4())
+    progress_queue: queue.Queue = queue.Queue()
+    tmp_dir = tempfile.mkdtemp(prefix="ytdl_playlist_")
+    _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": tmp_dir}
+
+    def run():
+        try:
+            def on_progress(percent: float):
+                progress_queue.put({"type": "progress", "value": round(percent, 1)})
+
+            def on_video_start(index, total, title):
+                progress_queue.put({"type": "track", "index": index, "total": total, "title": title})
+
+            ytDownloaderFunctions.download_playlist(
+                body.url, body.quality, tmp_dir,
+                on_progress=on_progress,
+                on_video_start=on_video_start,
+            )
+
+            zip_path = os.path.join(tmp_dir, "playlist.zip")
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
+                for root, _dirs, files in os.walk(tmp_dir):
+                    for fname in files:
+                        if fname == "playlist.zip":
+                            continue
+                        fpath = os.path.join(root, fname)
+                        zf.write(fpath, os.path.relpath(fpath, tmp_dir))
+
+            _jobs[job_id]["file_path"] = zip_path
+            progress_queue.put({"type": "done", "filename": "playlist.zip"})
+
+        except Exception as e:
+            traceback.print_exc()
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            _jobs.pop(job_id, None)
+            progress_queue.put({"type": "error", "message": str(e)})
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": job_id}
+
+
 @app.websocket("/ws/progress/{job_id}")
 async def progress_ws(websocket: WebSocket, job_id: str):
     """Stream download progress to the client via WebSocket."""
@@ -145,8 +200,9 @@ def serve_file(job_id: str, background_tasks: BackgroundTasks):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     background_tasks.add_task(cleanup)
+    media_type = "application/zip" if file_path.endswith(".zip") else "video/mp4"
     return FileResponse(
         path=file_path,
         filename=os.path.basename(file_path),
-        media_type="video/mp4",
+        media_type=media_type,
     )

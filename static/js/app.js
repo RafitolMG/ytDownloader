@@ -1,5 +1,6 @@
 /* ── State ────────────────────────────────────────────────────────────────── */
 let selectedFormatCode = null;
+let isPlaylist = false;
 
 /* ── DOM refs ─────────────────────────────────────────────────────────────── */
 const urlInput          = document.getElementById('url-input');
@@ -11,11 +12,48 @@ const progressLabel     = document.getElementById('progress-label');
 const statusMessage     = document.getElementById('status-message');
 const downloadBtn       = document.getElementById('download-btn');
 const getResolutionsBtn = document.getElementById('get-resolutions-btn');
+const playlistPanel     = document.getElementById('playlist-panel');
 
 /* ── Init ─────────────────────────────────────────────────────────────────── */
 urlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') getResolutions();
 });
+
+urlInput.addEventListener('paste', () => {
+  // Use setTimeout so the pasted value is available in the input
+  setTimeout(() => autoDetectUrl(urlInput.value.trim()), 0);
+});
+
+urlInput.addEventListener('input', () => {
+  autoDetectUrl(urlInput.value.trim());
+});
+
+function autoDetectUrl(url) {
+  if (!url) {
+    isPlaylist = false;
+    playlistPanel.hidden = true;
+    return;
+  }
+  if (urlHasPlaylist(url)) {
+    isPlaylist = true;
+    selectedFormatCode = null;
+    clearTable();
+    hideThumbnail();
+    playlistPanel.hidden = false;
+    setStatus('');
+  } else {
+    isPlaylist = false;
+    playlistPanel.hidden = true;
+  }
+}
+
+function urlHasPlaylist(url) {
+  try {
+    return new URL(url).searchParams.has('list');
+  } catch {
+    return false;
+  }
+}
 
 /* ── Get formats ──────────────────────────────────────────────────────────── */
 async function getResolutions() {
@@ -24,6 +62,8 @@ async function getResolutions() {
 
   setStatus('Fetching formats…');
   selectedFormatCode = null;
+  isPlaylist = false;
+  playlistPanel.hidden = true;
   clearTable();
   hideThumbnail();
   getResolutionsBtn.disabled = true;
@@ -41,12 +81,19 @@ async function getResolutions() {
     }
 
     const data = await res.json();
-    populateTable(data.formats);
-    showThumbnail(data.thumbnail_url);
-    if (!data.ffmpeg_available) {
-      setStatus('FFmpeg not found — only formats with built-in audio are shown. Install FFmpeg to unlock higher resolutions.', 'error');
-    } else {
+
+    if (data.is_playlist) {
+      isPlaylist = true;
+      playlistPanel.hidden = false;
       setStatus('');
+    } else {
+      populateTable(data.formats);
+      showThumbnail(data.thumbnail_url);
+      if (!data.ffmpeg_available) {
+        setStatus('FFmpeg not found — only formats with built-in audio are shown. Install FFmpeg to unlock higher resolutions.', 'error');
+      } else {
+        setStatus('');
+      }
     }
   } catch (e) {
     setStatus('Network error: ' + e.message, 'error');
@@ -107,7 +154,13 @@ function hideThumbnail() {
 /* ── Download ─────────────────────────────────────────────────────────────── */
 async function startDownload() {
   const url = urlInput.value.trim();
-  if (!url)                return setStatus('Please paste a YouTube URL.', 'error');
+  if (!url) return setStatus('Please paste a YouTube URL.', 'error');
+
+  if (isPlaylist) {
+    startPlaylistDownload(url);
+    return;
+  }
+
   if (!selectedFormatCode) return setStatus('Please select a format from the table.', 'error');
 
   downloadBtn.disabled = true;
@@ -136,6 +189,33 @@ async function startDownload() {
   }
 }
 
+async function startPlaylistDownload(url) {
+  downloadBtn.disabled = true;
+  setProgress(0);
+  setStatus('Starting playlist download…');
+
+  try {
+    const res = await fetch('/api/download-playlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, quality: 'audio' }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      setStatus(err.detail || 'Failed to start playlist download.', 'error');
+      downloadBtn.disabled = false;
+      return;
+    }
+
+    const { job_id } = await res.json();
+    listenProgress(job_id);
+  } catch (e) {
+    setStatus('Network error: ' + e.message, 'error');
+    downloadBtn.disabled = false;
+  }
+}
+
 function listenProgress(jobId) {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${protocol}://${location.host}/ws/progress/${jobId}`);
@@ -147,6 +227,9 @@ function listenProgress(jobId) {
     if (event.type === 'progress') {
       setProgress(event.value);
       setStatus(`Downloading… ${event.value}%`);
+    } else if (event.type === 'track') {
+      setStatus(`Track ${event.index} / ${event.total}: ${event.title}`);
+      setProgress(0);
     } else if (event.type === 'done') {
       finished = true;
       setProgress(100);
@@ -172,15 +255,18 @@ function listenProgress(jobId) {
 
 async function triggerBrowserDownload(jobId, filename) {
   const fileUrl = `/api/file/${jobId}`;
+  const isZip = filename && filename.endsWith('.zip');
 
-  // Chrome/Edge: show native "Save As" dialog so the user picks the folder
   if ('showSaveFilePicker' in window) {
     try {
       const handle = await window.showSaveFilePicker({
         suggestedName: filename || 'video.mp4',
-        types: [{ description: 'MP4 Video', accept: { 'video/mp4': ['.mp4'] } }],
+        types: isZip
+          ? [{ description: 'ZIP Archive', accept: { 'application/zip': ['.zip'] } }]
+          : [{ description: 'MP4 Video',   accept: { 'video/mp4':        ['.mp4'] } }],
       });
       const response = await fetch(fileUrl);
+      if (!response.ok) throw new Error(`Server returned ${response.status}`);
       const writable = await handle.createWritable();
       await response.body.pipeTo(writable);
       return;
@@ -189,11 +275,9 @@ async function triggerBrowserDownload(jobId, filename) {
         setStatus('Download cancelled.', 'error');
         return;
       }
-      // Any other error: fall through to default download
     }
   }
 
-  // Fallback for Firefox/Safari: standard browser download
   const a = document.createElement('a');
   a.href = fileUrl;
   a.download = filename || 'video.mp4';

@@ -322,6 +322,34 @@ tbody td {
 .status-message.success { color: var(--success); }
 .status-message.error   { color: var(--error); }
 
+/* ── Playlist panel ───────────────────────────────────────────────────────── */
+.playlist-panel {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border-color: var(--accent);
+  background: rgba(124, 106, 247, 0.06);
+}
+
+.playlist-icon svg {
+  width: 36px;
+  height: 36px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.playlist-label {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 3px;
+}
+
+.playlist-sublabel {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
 /* ── Footer ───────────────────────────────────────────────────────────────── */
 footer {
   text-align: center;
