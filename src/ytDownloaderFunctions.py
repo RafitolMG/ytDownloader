@@ -45,6 +45,7 @@ def download_video(url, format_code, output_folder, on_progress=None):
         'format': format_code,
         'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
         'progress_hooks': [_progress_hook(on_progress)],
+        'restrictfilenames': True,
         **_get_cookie_opts(),
     }
 
@@ -53,8 +54,8 @@ def download_video(url, format_code, output_folder, on_progress=None):
         video_filename = ydl.prepare_filename(result)
         video_ext = result['ext']
         audio_codec = result['acodec']
-        duration = float(result['duration'])
-        fps = float(result['fps'])
+        duration = float(result.get('duration') or 0)
+        fps = float(result.get('fps') or 30)
 
     return video_filename, video_ext, audio_codec, _calculate_total_frames(duration, fps)
 
@@ -64,6 +65,7 @@ def download_audio(url, output_folder, on_progress=None):
         'format': 'bestaudio/best',
         'outtmpl': os.path.join(output_folder, '%(title)s_audio.%(ext)s'),
         'progress_hooks': [_progress_hook(on_progress)],
+        'restrictfilenames': True,
         **_get_cookie_opts(),
     }
 
@@ -333,12 +335,13 @@ def _calculate_total_frames(duration, fps):
 
 def _progress_hook(on_progress):
     def hook(d):
-        if on_progress is None:
+        if on_progress is None or d['status'] != 'downloading':
             return
-        if d['status'] == 'downloading':
-            try:
-                percent = float(d['_percent_str'].strip('%'))
-                on_progress(percent)
-            except (ValueError, KeyError):
-                pass
+        try:
+            downloaded = d.get('downloaded_bytes') or 0
+            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+            if total:
+                on_progress(downloaded / total * 100)
+        except (ValueError, ZeroDivisionError):
+            pass
     return hook
