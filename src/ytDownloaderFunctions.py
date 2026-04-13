@@ -15,11 +15,40 @@ def _get_ffmpeg_path():
     return shutil.which('ffmpeg')
 
 
+def _get_cookie_opts() -> dict:
+    """
+    Return yt-dlp options to authenticate with YouTube and avoid bot detection.
+
+    Priority:
+      1. cookies.txt file in project root (manual export via browser extension).
+      2. Auto-detect an installed browser and extract cookies from it (Windows).
+    Returns an empty dict if neither source is available.
+    """
+    cookies_file = os.path.join(_PROJECT_ROOT, 'cookies.txt')
+    if os.path.isfile(cookies_file):
+        return {'cookiefile': cookies_file}
+
+    if os.name == 'nt':
+        local = os.environ.get('LOCALAPPDATA', '')
+        appdata = os.environ.get('APPDATA', '')
+        candidates = [
+            ('chrome', os.path.join(local, 'Google', 'Chrome', 'User Data')),
+            ('edge',   os.path.join(local, 'Microsoft', 'Edge', 'User Data')),
+            ('firefox', os.path.join(appdata, 'Mozilla', 'Firefox', 'Profiles')),
+        ]
+        for browser, profile_dir in candidates:
+            if os.path.isdir(profile_dir):
+                return {'cookiesfrombrowser': (browser,)}
+
+    return {}
+
+
 def download_video(url, format_code, output_folder, on_progress=None):
     ydl_opts = {
         'format': format_code,
         'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
-        'progress_hooks': [_progress_hook(on_progress)]
+        'progress_hooks': [_progress_hook(on_progress)],
+        **_get_cookie_opts(),
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -37,7 +66,8 @@ def download_audio(url, output_folder, on_progress=None):
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': os.path.join(output_folder, '%(title)s_audio.%(ext)s'),
-        'progress_hooks': [_progress_hook(on_progress)]
+        'progress_hooks': [_progress_hook(on_progress)],
+        **_get_cookie_opts(),
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -46,6 +76,39 @@ def download_audio(url, output_folder, on_progress=None):
         audio_ext = result['ext']
 
     return audio_filename, audio_ext
+
+
+def download_audio_only(url, format_code, output_folder, on_progress=None):
+    """
+    Download audio-only track and embed metadata + cover art.
+    If ffmpeg is available, converts to MP3 and embeds thumbnail as album art.
+    Without ffmpeg, downloads the native audio format with metadata tags only.
+    """
+    ffmpeg = _get_ffmpeg_path()
+
+    postprocessors = [{'key': 'FFmpegMetadata', 'add_metadata': True}]
+
+    ydl_opts = {
+        'format': format_code,
+        'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
+        'progress_hooks': [_progress_hook(on_progress)],
+        'postprocessors': postprocessors,
+        **_get_cookie_opts(),
+    }
+
+    if ffmpeg:
+        ydl_opts['ffmpeg_location'] = ffmpeg
+        ydl_opts['writethumbnail'] = True
+        # Order matters: extract audio first, then embed metadata, then embed thumbnail
+        postprocessors.insert(0, {
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '0',  # VBR best quality
+        })
+        postprocessors.append({'key': 'EmbedThumbnail'})
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
 
 
 def merge_audio_video(video_file, audio_file, output_file, video_frames, on_progress=None):
@@ -85,7 +148,7 @@ def merge_audio_video(video_file, audio_file, output_file, video_frames, on_prog
         raise RuntimeError("FFmpeg process returned a non-zero exit code.")
 
 
-def get_available_resolutions(url):
+def get_available_resolutions(url, audio_only=False):
     """
     Returns a dict with:
       - 'formats': list of dicts with keys: format_code, resolution, ext, needs_merge, size_display
@@ -93,7 +156,7 @@ def get_available_resolutions(url):
       - 'ffmpeg_available': bool
     Raises on error.
     """
-    ydl_opts = {'quiet': True, 'no_warnings': True}
+    ydl_opts = {'quiet': True, 'no_warnings': True, **_get_cookie_opts()}
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -103,28 +166,56 @@ def get_available_resolutions(url):
     formats = []
 
     for yt_format in info.get('formats', []):
-        if yt_format.get('vcodec') == 'none' or yt_format.get('filesize') is None:
-            continue
-        if yt_format.get('ext') != 'mp4':
-            continue
+        if audio_only:
+            # Audio-only streams: no video codec, has audio codec
+            if yt_format.get('vcodec') != 'none':
+                continue
+            if yt_format.get('acodec') == 'none':
+                continue
 
-        needs_merge = yt_format.get('acodec') == 'none'
-        if needs_merge and not ffmpeg_available:
-            continue
+            filesize = yt_format.get('filesize') or yt_format.get('filesize_approx')
+            if filesize is None:
+                continue
 
-        size_mb = float(yt_format['filesize']) / (1024 * 1024)
-        if size_mb >= 1024:
-            size_display = f'{size_mb / 1024:.2f} GB'
+            abr = yt_format.get('abr') or 0
+            if abr:
+                quality = f"{int(abr)}kbps"
+            else:
+                quality = yt_format.get('format_note', 'Unknown')
+
+            size_mb = float(filesize) / (1024 * 1024)
+            size_display = f'{size_mb / 1024:.2f} GB' if size_mb >= 1024 else f'{size_mb:.2f} MB'
+
+            formats.append({
+                'format_code': yt_format['format_id'],
+                'resolution': quality,
+                'ext': yt_format.get('ext', 'Unknown'),
+                'needs_merge': False,
+                'size_display': size_display,
+            })
         else:
-            size_display = f'{size_mb:.2f} MB'
+            if yt_format.get('vcodec') == 'none' or yt_format.get('filesize') is None:
+                continue
+            if yt_format.get('ext') != 'mp4':
+                continue
 
-        formats.append({
-            'format_code': yt_format['format_id'],
-            'resolution': yt_format.get('resolution', 'Unknown'),
-            'ext': yt_format.get('ext', 'Unknown'),
-            'needs_merge': needs_merge,
-            'size_display': size_display,
-        })
+            needs_merge = yt_format.get('acodec') == 'none'
+            if needs_merge and not ffmpeg_available:
+                continue
+
+            size_mb = float(yt_format['filesize']) / (1024 * 1024)
+            if size_mb >= 1024:
+                size_display = f'{size_mb / 1024:.2f} GB'
+            else:
+                size_display = f'{size_mb:.2f} MB'
+
+            formats.append({
+                'format_code': yt_format['format_id'],
+                'resolution': yt_format.get('resolution', 'Unknown'),
+                'ext': yt_format.get('ext', 'Unknown'),
+                'needs_merge': needs_merge,
+                'size_display': size_display,
+            })
 
     return {'formats': formats, 'thumbnail_url': thumbnail_url, 'ffmpeg_available': ffmpeg_available}
 
