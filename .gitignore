@@ -30,3 +30,4 @@ frontend/dist/
 
 # Backend SQLite queue (runtime data)
 backend/data/
+backend/.env
