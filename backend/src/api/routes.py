@@ -9,6 +9,7 @@ import uuid
 import zipfile
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -18,6 +19,14 @@ from pydantic import BaseModel
 from src import ytDownloaderFunctions
 
 app = FastAPI(title="YT Downloader")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5273"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
