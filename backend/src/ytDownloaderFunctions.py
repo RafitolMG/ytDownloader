@@ -225,6 +225,29 @@ def get_available_resolutions(url, audio_only=False):
     return {'formats': formats, 'thumbnail_url': thumbnail_url, 'ffmpeg_available': ffmpeg_available}
 
 
+def get_basic_info(url):
+    """
+    Return the minimum metadata needed for history: title, uploader,
+    duration, thumbnail. One yt-dlp call, no download.
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'ignore_no_formats_error': True,
+        **_get_cookie_opts(),
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    return {
+        'title': info.get('title'),
+        'uploader': info.get('uploader') or info.get('channel'),
+        'duration_sec': int(info.get('duration') or 0) or None,
+        'thumbnail_url': info.get('thumbnail'),
+    }
+
+
 def is_playlist(url):
     """Return True if the URL contains a playlist identifier."""
     try:
