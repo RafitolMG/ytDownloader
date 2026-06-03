@@ -110,6 +110,63 @@ def download_audio_only(url, format_code, output_folder, on_progress=None):
         ydl.download([url])
 
 
+def get_video_codec(path):
+    """Return the video stream codec_name of `path` ('h264', 'av1', ...) or None."""
+    ffmpeg = _get_ffmpeg_path()
+    if ffmpeg is None:
+        return None
+    ffprobe = ffmpeg.replace('ffmpeg', 'ffprobe', 1)
+    try:
+        out = subprocess.check_output(
+            [ffprobe, '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', path],
+            text=True,
+        ).strip()
+        return out or None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def transcode_video_to_h264(input_file, output_file, video_frames, on_progress=None):
+    """
+    Re-encode the video stream of `input_file` to H.264, copying the audio.
+    Used when the source is AV1 (or anything non-H.264) so the result plays
+    everywhere. Slow — CPU-bound.
+    """
+    ffmpeg = _get_ffmpeg_path()
+    if ffmpeg is None:
+        raise RuntimeError("FFmpeg not found. Place ffmpeg.exe in the bin/ folder or add it to your PATH.")
+
+    cmd = [
+        ffmpeg, '-y',
+        '-i', input_file,
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '20',
+        '-c:a', 'copy',
+        '-movflags', '+faststart',
+        output_file,
+    ]
+    try:
+        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True)
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg not found. Place ffmpeg.exe in the bin/ folder or add it to your PATH.")
+
+    progress_pattern = re.compile(r"frame=(\s*\d+)")
+    while True:
+        line = process.stderr.readline()
+        if not line:
+            break
+        match = progress_pattern.search(line)
+        if match and on_progress and video_frames:
+            frame_number = int(match.group(1))
+            on_progress(min(100.0, frame_number / video_frames * 100))
+
+    process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError("FFmpeg transcode returned a non-zero exit code.")
+
+
 def merge_audio_video(video_file, audio_file, output_file, video_frames, on_progress=None):
     ffmpeg = _get_ffmpeg_path()
     if ffmpeg is None:
@@ -214,13 +271,42 @@ def get_available_resolutions(url, audio_only=False):
             else:
                 size_display = f'{size_mb:.2f} MB'
 
+            height = yt_format.get('height')
+            resolution = f'{height}p' if height else (yt_format.get('resolution') or 'Unknown')
+            vcodec = (yt_format.get('vcodec') or '').lower()
+
+            # Codec preference: H.264 (avc1) > AV1 (av01) > anything else.
+            # Lower number wins. AV1 has best compression but the worst
+            # playback compatibility (older players show video but no audio).
+            if vcodec.startswith('avc'):
+                codec_rank = 0
+            elif vcodec.startswith('av01'):
+                codec_rank = 1
+            else:
+                codec_rank = 2
+
             formats.append({
                 'format_code': yt_format['format_id'],
-                'resolution': yt_format.get('resolution', 'Unknown'),
+                'resolution': resolution,
+                'height': height or 0,
+                'codec_rank': codec_rank,
+                'size_bytes': int(yt_format['filesize']),
                 'ext': yt_format.get('ext', 'Unknown'),
                 'needs_merge': needs_merge,
                 'size_display': size_display,
             })
+
+    # Deduplicate: per height, prefer H.264 (avc1) for instant compatibility;
+    # AV1 only if no H.264 is offered (YouTube serves AV1-only at 1440p/2160p).
+    # AV1-source files are re-encoded to H.264 after merge so they play
+    # everywhere — that step is slow but the user gets a working file.
+    by_height: dict[int, dict] = {}
+    for f in formats:
+        h = f['height']
+        cur = by_height.get(h)
+        if cur is None or (f['codec_rank'], f['size_bytes']) < (cur['codec_rank'], cur['size_bytes']):
+            by_height[h] = f
+    formats = sorted(by_height.values(), key=lambda f: f['height'], reverse=True)
 
     return {'formats': formats, 'thumbnail_url': thumbnail_url, 'ffmpeg_available': ffmpeg_available}
 
