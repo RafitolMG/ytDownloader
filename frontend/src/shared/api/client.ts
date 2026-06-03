@@ -8,11 +8,22 @@ export class ApiError extends Error {
   }
 }
 
+let onUnauthorized: (() => void) | null = null
+
+/** Register a global handler invoked whenever the backend returns 401. */
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  onUnauthorized = fn
+}
+
 async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const res = await fetch(input, {
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })
+  if (res.status === 401 && onUnauthorized) {
+    onUnauthorized()
+  }
   if (!res.ok) {
     const body = await res.text()
     let detail = body
@@ -62,4 +73,20 @@ export const api = {
     json<{ ok: true }>(`/api/jobs/${jobId}`, { method: 'DELETE' }),
 
   fileUrl: (jobId: string) => `/api/file/${jobId}`,
+
+  // ── auth ──
+  login: (usernameOrEmail: string, password: string) =>
+    json<{ user_id: string; username: string; role: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ usernameOrEmail, password }),
+    }),
+
+  logout: () =>
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }),
+
+  whoami: () =>
+    json<{ user_id: string; username: string; role: string }>('/api/auth/whoami'),
+
+  authConfig: () =>
+    json<{ homeauth_base_url: string; register_url: string }>('/api/auth/config'),
 }
