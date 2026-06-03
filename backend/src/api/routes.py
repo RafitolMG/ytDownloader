@@ -13,8 +13,6 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, WebSocket,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from fastapi.requests import Request
 from pydantic import BaseModel
 
 from src import config, db, ytDownloaderFunctions
@@ -31,18 +29,27 @@ def _ensure_owner(job: dict, user: CurrentUser) -> None:
 
 app = FastAPI(title="YT Downloader")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[config.FRONTEND_ORIGIN],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if config.FRONTEND_ORIGIN:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[config.FRONTEND_ORIGIN],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.include_router(auth_router)
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+# SPA assets (compiled by Vite). In dev the SPA runs on its own port and this
+# mount stays empty; in the Docker image the multi-stage build drops dist/ at
+# YTDL_FRONTEND_DIST. The catch-all at the bottom serves index.html.
+_FRONTEND_DIST = os.environ.get("YTDL_FRONTEND_DIST", "")
+if _FRONTEND_DIST and os.path.isdir(os.path.join(_FRONTEND_DIST, "assets")):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")),
+        name="spa-assets",
+    )
 
 
 @app.on_event("startup")
@@ -80,11 +87,6 @@ class PlaylistDownloadRequest(BaseModel):
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
-
-@app.get("/")
-def index(request: Request):
-    return templates.TemplateResponse(request, "index.html")
-
 
 @app.post("/api/resolutions")
 def get_resolutions(body: ResolutionsRequest):
@@ -439,3 +441,21 @@ def delete_job(job_id: str, user: CurrentUser = Depends(current_user)):
         raise HTTPException(status_code=409, detail="Cancel the job before deleting it.")
     db.delete(job_id)
     return {"ok": True}
+
+
+# ── SPA fallback ──────────────────────────────────────────────────────────────
+# Must be declared AFTER every /api and /ws route so it doesn't shadow them.
+# Returns index.html for any GET that didn't match — the React router takes over
+# on the client. If the build isn't present (dev), responds 404.
+
+if _FRONTEND_DIST and os.path.isfile(os.path.join(_FRONTEND_DIST, "index.html")):
+    _SPA_INDEX = os.path.join(_FRONTEND_DIST, "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        if full_path.startswith(("api/", "ws/", "assets/")):
+            raise HTTPException(status_code=404)
+        candidate = os.path.join(_FRONTEND_DIST, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(_SPA_INDEX)

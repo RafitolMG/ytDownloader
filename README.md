@@ -81,6 +81,42 @@ credentials in env:
 USERNAME=alice PASSWORD='...' ./scripts/auth-smoke.sh
 ```
 
+## Deploy (Coolify self-hosted)
+
+Single-image deploy. The root `Dockerfile` is multi-stage: it builds the SPA
+with Node and bakes the static `dist/` into the FastAPI image, which then
+serves the SPA from the same origin as `/api` and `/ws` (no CORS, no extra
+service to route).
+
+In Coolify:
+
+1. **New Resource → Application → Public Repository** pointing at this repo.
+2. **Build Pack:** Dockerfile. **Base Directory:** `/` (the root `Dockerfile`).
+3. **Exposed Port:** `9877`. (HomeAuth lives on `:9876` in the same Coolify
+   instance — this is the next port in the pair. Override with `PORT` env if
+   needed.)
+4. **Persistent Storage** (so the SQLite queue survives redeploys):
+   - Mount path: `/app/data` → any host path or Coolify volume.
+5. **Environment Variables** (everything that's not listed defaults sensibly):
+
+   | Key | Example | Notes |
+   |---|---|---|
+   | `HOMEAUTH_BASE_URL` | `http://homeauth:8080` | Service name if HomeAuth lives in the same Coolify project network, otherwise the public HTTPS URL. |
+   | `HOMEAUTH_APP_API_KEY` | `…` | API key from HomeAuth `/admin/applications`. |
+   | `SESSION_COOKIE_SECURE` | `true` | Required once Traefik gives you HTTPS. |
+   | `SESSION_COOKIE_SAMESITE` | `lax` | `strict` if you don't need cross-site embeds. |
+   | `FRONTEND_ORIGIN` | *(leave empty)* | Same-origin in this topology; CORS disabled. |
+
+6. **Health Check:** the image declares one on `GET /api/auth/config` (public).
+   No extra config needed.
+
+WebSocket (`/ws/progress/*`) works on Traefik out of the box since the path
+prefix is enough to keep the upgrade headers. No special label required.
+
+> SQLite lives at `/app/data/queue.db` inside the container (the schema is
+> created on first boot). Mounting `/app/data` to a volume is what makes the
+> queue persistent — without it, every redeploy starts with an empty history.
+
 ## Stack
 
 - **Backend**: Python 3.12 + FastAPI + httpx + yt-dlp + ffmpeg + SQLite (WAL).

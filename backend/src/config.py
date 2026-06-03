@@ -31,5 +31,6 @@ SESSION_TTL_DAYS: int = int(_env("SESSION_TTL_DAYS", "7"))
 # Refresh window: try to refresh when access expires in less than this many seconds.
 ACCESS_REFRESH_LEEWAY_SEC: int = int(_env("ACCESS_REFRESH_LEEWAY_SEC", "60"))
 
-# CORS allow-list for the SPA dev server
-FRONTEND_ORIGIN: str = _env("FRONTEND_ORIGIN", "http://localhost:5273").rstrip("/")
+# CORS allow-list for the SPA dev server. Leave empty (or unset) in production
+# when the backend serves the SPA from the same origin — CORS is a no-op then.
+FRONTEND_ORIGIN: str = _env("FRONTEND_ORIGIN", "").rstrip("/")
