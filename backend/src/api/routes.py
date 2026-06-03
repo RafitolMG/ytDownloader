@@ -165,6 +165,20 @@ def start_download(body: DownloadRequest):
                 final_path = os.path.join(tmp_dir, f"{base}.mp4")
                 os.rename(merged_tmp, final_path)
 
+            # If the video stream is AV1 (or anything non-H.264), transcode it.
+            # YouTube only serves AV1 above 1080p, so this hits 1440p/2160p.
+            codec = ytDownloaderFunctions.get_video_codec(final_path)
+            if codec and codec.lower() != 'h264':
+                db.update_progress(job_id, 0, status=db.TRANSCODING)
+                progress_queue.put({"type": "status", "value": db.TRANSCODING})
+                base = os.path.splitext(os.path.basename(final_path))[0]
+                transcoded = os.path.join(tmp_dir, f"{base}_h264.mp4")
+                ytDownloaderFunctions.transcode_video_to_h264(
+                    final_path, transcoded, total_frames, on_progress
+                )
+                os.remove(final_path)
+                os.rename(transcoded, final_path)
+
             _jobs[job_id]["file_path"] = final_path
             size = os.path.getsize(final_path)
             db.finish(job_id, size_bytes=size)
