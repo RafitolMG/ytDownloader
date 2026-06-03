@@ -9,7 +9,7 @@ import traceback
 import uuid
 import zipfile
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,17 +17,32 @@ from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
 from pydantic import BaseModel
 
-from src import db, ytDownloaderFunctions
+from src import config, db, ytDownloaderFunctions
+from src.api.auth_routes import router as auth_router
+from src.auth import CurrentUser, current_user
+
+
+def _ensure_owner(job: dict, user: CurrentUser) -> None:
+    """403 unless the caller owns the job (ADMIN bypasses)."""
+    if user.is_admin:
+        return
+    if job.get("owner_id") != user.user_id:
+        raise HTTPException(status_code=403, detail="not your job")
 
 app = FastAPI(title="YT Downloader")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5273"],
+    allow_origins=[config.FRONTEND_ORIGIN],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 
 @app.on_event("startup")
@@ -35,8 +50,7 @@ def _init_db():
     db.init()
 
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+# ── In-memory job runtime (file paths, queues, cancel flags) ──────────────────
 
 # job_id -> {"queue": Queue, "file_path": str | None, "tmp_dir": str}
 _jobs: dict[str, dict] = {}
@@ -45,7 +59,6 @@ _cancelled: set[str] = set()
 
 class _Cancelled(Exception):
     """Raised from inside the yt-dlp progress hook to abort a job."""
-
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -108,7 +121,7 @@ def _throttled_progress(job_id: str, progress_queue: queue.Queue):
 
 
 @app.post("/api/download")
-def start_download(body: DownloadRequest):
+def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_user)):
     """
     Start a download in a background thread.
     Returns a job_id to connect to via WebSocket for progress updates.
@@ -125,6 +138,7 @@ def start_download(body: DownloadRequest):
         format_code=body.format_code,
         resolution=body.resolution,
         ext=body.ext,
+        owner_id=user.user_id,
     )
 
     def run():
@@ -203,7 +217,7 @@ def start_download(body: DownloadRequest):
 
 
 @app.post("/api/download-playlist")
-def start_playlist_download(body: PlaylistDownloadRequest):
+def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = Depends(current_user)):
     """
     Download all tracks in a playlist as MP3, zipped into a single archive.
     Returns a job_id to track progress via WebSocket.
@@ -218,6 +232,7 @@ def start_playlist_download(body: PlaylistDownloadRequest):
         url=body.url,
         format_code=body.quality,
         is_playlist=True,
+        owner_id=user.user_id,
     )
 
     def run():
@@ -307,6 +322,7 @@ async def progress_ws(websocket: WebSocket, job_id: str):
 
     runtime = _jobs.get(job_id)
     if runtime is None:
+        # Already finished, failed, interrupted, or cancelled — nothing live to stream.
         await websocket.close()
         return
 
@@ -326,8 +342,17 @@ async def progress_ws(websocket: WebSocket, job_id: str):
 
 
 @app.get("/api/file/{job_id}")
-def serve_file(job_id: str, background_tasks: BackgroundTasks):
+def serve_file(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = Depends(current_user),
+):
     """Serve the downloaded file and clean up the temp directory afterwards."""
+    row = db.get(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    _ensure_owner(row, user)
+
     job = _jobs.get(job_id)
     if not job or not job.get("file_path"):
         raise HTTPException(status_code=404, detail="File not ready or already downloaded.")
@@ -351,25 +376,27 @@ def serve_file(job_id: str, background_tasks: BackgroundTasks):
 # ── Job history / queue management ────────────────────────────────────────────
 
 @app.get("/api/jobs")
-def list_jobs():
-    """Return all jobs (history + active) ordered by creation time desc."""
-    return {"jobs": db.list_jobs()}
+def list_jobs(user: CurrentUser = Depends(current_user)):
+    """Return all jobs ordered by creation time desc. USER scoped to own jobs; ADMIN sees all."""
+    return {"jobs": db.list_jobs(owner_id=user.owner_filter)}
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str):
+def get_job(job_id: str, user: CurrentUser = Depends(current_user)):
     row = db.get(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found.")
+    _ensure_owner(row, user)
     return row
 
 
 @app.post("/api/jobs/{job_id}/cancel")
-def cancel_job(job_id: str):
+def cancel_job(job_id: str, user: CurrentUser = Depends(current_user)):
     """Mark an active job for cancellation. The thread will abort at next progress tick."""
     row = db.get(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found.")
+    _ensure_owner(row, user)
     if row["status"] not in db.ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail=f"Job is not active (status={row['status']}).")
     _cancelled.add(job_id)
@@ -377,17 +404,19 @@ def cancel_job(job_id: str):
 
 
 @app.post("/api/jobs/{job_id}/retry")
-def retry_job(job_id: str):
+def retry_job(job_id: str, user: CurrentUser = Depends(current_user)):
     """Re-queue a previously completed/interrupted/failed job with its original parameters."""
     row = db.get(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found.")
+    _ensure_owner(row, user)
     if row["status"] in db.ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="Job is still active.")
 
     if row["is_playlist"]:
         return start_playlist_download(
-            PlaylistDownloadRequest(url=row["url"], quality=row["format_code"])
+            PlaylistDownloadRequest(url=row["url"], quality=row["format_code"]),
+            user=user,
         )
     return start_download(
         DownloadRequest(
@@ -395,15 +424,17 @@ def retry_job(job_id: str):
             format_code=row["format_code"],
             resolution=row["resolution"],
             ext=row["ext"],
-        )
+        ),
+        user=user,
     )
 
 
 @app.delete("/api/jobs/{job_id}")
-def delete_job(job_id: str):
+def delete_job(job_id: str, user: CurrentUser = Depends(current_user)):
     row = db.get(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found.")
+    _ensure_owner(row, user)
     if row["status"] in db.ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="Cancel the job before deleting it.")
     db.delete(job_id)
