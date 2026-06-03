@@ -1,4 +1,4 @@
-import { CaptureHeader } from '@/features/capture/CaptureHeader'
+import { AppHeader } from '@/shared/ui/AppHeader'
 import { UrlInput } from '@/features/capture/UrlInput'
 import { VideoMetadata } from '@/features/capture/VideoMetadata'
 import { DownloadProgress } from '@/features/capture/DownloadProgress'
@@ -19,7 +19,7 @@ export default function CapturePage() {
   return (
     <div className="relative z-10 min-h-full">
       <main className="max-w-4xl mx-auto px-6 py-8">
-        <CaptureHeader queueCount={activeCount} />
+        <AppHeader queueCount={activeCount} />
 
         <UrlInput
           value={c.url}
