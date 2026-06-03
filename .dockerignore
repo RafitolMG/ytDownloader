@@ -1,0 +1,41 @@
+# VCS
+.git/
+.gitignore
+.github/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+backend/.venv/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Runtime data (must NOT be baked into image — mount a volume instead)
+backend/data/
+backend/.env
+
+# Dev scripts runtime
+.dev/
+
+# Legacy / unused at runtime
+Images/
+bin/
+backend/static/
+backend/templates/
+backend/Dockerfile
+backend/.dockerignore
+backend/docker-compose.yml
+
+# IDE / OS
+.idea/
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db
+
+# Docs (no necesarios en imagen)
+README.md
+LICENSE

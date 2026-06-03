@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Config (contains user-specific output folder path)
+config.ini
+
+# JetBrains IDE
+.idea/
+
+# Claude Code session data
+.claude/
+
+# Local FFmpeg binary (place ffmpeg.exe here to avoid PATH dependency)
+bin/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Dev scripts runtime (logs, pids)
+.dev/
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+
+# Backend SQLite queue (runtime data)
+backend/data/
+backend/.env
