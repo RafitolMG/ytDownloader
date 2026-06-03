@@ -131,3 +131,22 @@ def auth_config():
         "homeauth_base_url": config.HOMEAUTH_BASE_URL,
         "register_url": f"{config.HOMEAUTH_BASE_URL}/register",
     }
+
+
+@router.get("/ping")
+def auth_ping():
+    """
+    Public connectivity probe. Returns whether the backend can reach
+    HomeAuth and whether the API key is accepted. Safe to expose: leaks no
+    secrets — only base URL (which is already in /config) and a status code.
+    Intended for post-deploy smoke testing from a browser or curl.
+    """
+    result = homeauth.ping()
+    return {
+        "reachable": result.reachable,
+        "api_key_valid": result.api_key_valid,
+        "latency_ms": result.latency_ms,
+        "status_code": result.status_code,
+        "base_url": result.base_url,
+        "error": result.error,
+    }
