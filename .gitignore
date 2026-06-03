@@ -27,3 +27,6 @@ Thumbs.db
 # Frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+
+# Backend SQLite queue (runtime data)
+backend/data/

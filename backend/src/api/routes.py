@@ -4,6 +4,7 @@ import queue
 import shutil
 import tempfile
 import threading
+import time
 import traceback
 import uuid
 import zipfile
@@ -16,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
 from pydantic import BaseModel
 
-from src import ytDownloaderFunctions
+from src import db, ytDownloaderFunctions
 
 app = FastAPI(title="YT Downloader")
 
@@ -28,11 +29,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+def _init_db():
+    db.init()
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 # job_id -> {"queue": Queue, "file_path": str | None, "tmp_dir": str}
 _jobs: dict[str, dict] = {}
+_cancelled: set[str] = set()
+
+
+class _Cancelled(Exception):
+    """Raised from inside the yt-dlp progress hook to abort a job."""
+
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -44,6 +57,8 @@ class ResolutionsRequest(BaseModel):
 class DownloadRequest(BaseModel):
     url: str
     format_code: str
+    resolution: str | None = None
+    ext: str | None = None
 
 
 class PlaylistDownloadRequest(BaseModel):
@@ -69,6 +84,29 @@ def get_resolutions(body: ResolutionsRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _throttled_progress(job_id: str, progress_queue: queue.Queue):
+    """
+    Build an on_progress callback that:
+      - cancels via _Cancelled if the job is in _cancelled
+      - emits every WS update (lightweight)
+      - throttles DB writes to ~every 1s or 1% delta
+    """
+    state = {"last_db_pct": -1.0, "last_db_t": 0.0}
+
+    def on_progress(percent: float):
+        if job_id in _cancelled:
+            raise _Cancelled()
+        rounded = round(percent, 1)
+        progress_queue.put({"type": "progress", "value": rounded})
+        now = time.monotonic()
+        if abs(percent - state["last_db_pct"]) >= 1.0 or now - state["last_db_t"] >= 1.0:
+            db.update_progress(job_id, rounded)
+            state["last_db_pct"] = percent
+            state["last_db_t"] = now
+
+    return on_progress
+
+
 @app.post("/api/download")
 def start_download(body: DownloadRequest):
     """
@@ -81,10 +119,25 @@ def start_download(body: DownloadRequest):
     tmp_dir = tempfile.mkdtemp(prefix="ytdl_")
     _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": tmp_dir}
 
+    db.create_job(
+        job_id=job_id,
+        url=body.url,
+        format_code=body.format_code,
+        resolution=body.resolution,
+        ext=body.ext,
+    )
+
     def run():
         try:
-            def on_progress(percent: float):
-                progress_queue.put({"type": "progress", "value": round(percent, 1)})
+            try:
+                info = ytDownloaderFunctions.get_basic_info(body.url)
+                db.set_metadata(job_id, **info)
+                progress_queue.put({"type": "metadata", **info})
+            except Exception:
+                traceback.print_exc()
+
+            db.mark_started(job_id)
+            on_progress = _throttled_progress(job_id, progress_queue)
 
             video_filename, _, audio_codec, total_frames = ytDownloaderFunctions.download_video(
                 body.url, body.format_code, tmp_dir, on_progress
@@ -93,6 +146,9 @@ def start_download(body: DownloadRequest):
             final_path = video_filename
 
             if audio_codec == 'none':
+                db.update_progress(job_id, 0, status=db.MERGING)
+                progress_queue.put({"type": "status", "value": db.MERGING})
+
                 audio_filename, _ = ytDownloaderFunctions.download_audio(
                     body.url, tmp_dir, on_progress
                 )
@@ -106,17 +162,26 @@ def start_download(body: DownloadRequest):
                         os.remove(f)
                     except OSError:
                         pass
-                # Rename to clean filename now that the original video file is gone
                 final_path = os.path.join(tmp_dir, f"{base}.mp4")
                 os.rename(merged_tmp, final_path)
 
             _jobs[job_id]["file_path"] = final_path
+            size = os.path.getsize(final_path)
+            db.finish(job_id, size_bytes=size)
             progress_queue.put({"type": "done", "filename": os.path.basename(final_path)})
+
+        except _Cancelled:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            _jobs.pop(job_id, None)
+            _cancelled.discard(job_id)
+            db.cancel(job_id)
+            progress_queue.put({"type": "cancelled"})
 
         except Exception as e:
             traceback.print_exc()
             shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
+            db.fail(job_id, str(e))
             progress_queue.put({"type": "error", "message": str(e)})
 
     threading.Thread(target=run, daemon=True).start()
@@ -134,10 +199,29 @@ def start_playlist_download(body: PlaylistDownloadRequest):
     tmp_dir = tempfile.mkdtemp(prefix="ytdl_playlist_")
     _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": tmp_dir}
 
+    db.create_job(
+        job_id=job_id,
+        url=body.url,
+        format_code=body.quality,
+        is_playlist=True,
+    )
+
     def run():
         try:
-            def on_progress(percent: float):
-                progress_queue.put({"type": "progress", "value": round(percent, 1)})
+            try:
+                info = ytDownloaderFunctions.get_playlist_info(body.url)
+                db.set_metadata(
+                    job_id,
+                    playlist_title=info.get('title'),
+                    playlist_count=info.get('count'),
+                    thumbnail_url=info.get('thumbnail_url'),
+                )
+                progress_queue.put({"type": "metadata", **info})
+            except Exception:
+                traceback.print_exc()
+
+            db.mark_started(job_id)
+            on_progress = _throttled_progress(job_id, progress_queue)
 
             def on_video_start(index, total, title):
                 progress_queue.put({"type": "track", "index": index, "total": total, "title": title})
@@ -148,7 +232,6 @@ def start_playlist_download(body: PlaylistDownloadRequest):
                 on_video_start=on_video_start,
             )
 
-            # Collect every file that was written to the temp dir
             downloaded = []
             for root, _dirs, files in os.walk(tmp_dir):
                 for fname in files:
@@ -170,12 +253,21 @@ def start_playlist_download(body: PlaylistDownloadRequest):
                         zf.write(fpath, arcname)
 
             _jobs[job_id]["file_path"] = zip_path
+            db.finish(job_id, size_bytes=os.path.getsize(zip_path))
             progress_queue.put({"type": "done", "filename": "playlist.zip"})
+
+        except _Cancelled:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            _jobs.pop(job_id, None)
+            _cancelled.discard(job_id)
+            db.cancel(job_id)
+            progress_queue.put({"type": "cancelled"})
 
         except Exception as e:
             traceback.print_exc()
             shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
+            db.fail(job_id, str(e))
             progress_queue.put({"type": "error", "message": str(e)})
 
     threading.Thread(target=run, daemon=True).start()
@@ -184,20 +276,33 @@ def start_playlist_download(body: PlaylistDownloadRequest):
 
 @app.websocket("/ws/progress/{job_id}")
 async def progress_ws(websocket: WebSocket, job_id: str):
-    """Stream download progress to the client via WebSocket."""
-    if job_id not in _jobs:
+    """
+    Stream download progress.
+
+    Sends a `snapshot` event with the current DB state first, then either:
+      - streams live queue events if the job is still running in memory, or
+      - closes immediately if the job has reached a terminal state.
+    """
+    row = db.get(job_id)
+    if row is None:
         await websocket.close(code=4004)
         return
 
     await websocket.accept()
-    progress_queue = _jobs[job_id]["queue"]
+    await websocket.send_json({"type": "snapshot", "job": row})
 
+    runtime = _jobs.get(job_id)
+    if runtime is None:
+        await websocket.close()
+        return
+
+    progress_queue: queue.Queue = runtime["queue"]
     try:
         while True:
             try:
                 event = progress_queue.get_nowait()
                 await websocket.send_json(event)
-                if event["type"] in ("done", "error"):
+                if event["type"] in ("done", "error", "cancelled"):
                     break
             except queue.Empty:
                 await asyncio.sleep(0.1)
@@ -227,3 +332,65 @@ def serve_file(job_id: str, background_tasks: BackgroundTasks):
         filename=os.path.basename(file_path),
         media_type=media_type,
     )
+
+
+# ── Job history / queue management ────────────────────────────────────────────
+
+@app.get("/api/jobs")
+def list_jobs():
+    """Return all jobs (history + active) ordered by creation time desc."""
+    return {"jobs": db.list_jobs()}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    row = db.get(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return row
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    """Mark an active job for cancellation. The thread will abort at next progress tick."""
+    row = db.get(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if row["status"] not in db.ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Job is not active (status={row['status']}).")
+    _cancelled.add(job_id)
+    return {"ok": True}
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry_job(job_id: str):
+    """Re-queue a previously completed/interrupted/failed job with its original parameters."""
+    row = db.get(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if row["status"] in db.ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="Job is still active.")
+
+    if row["is_playlist"]:
+        return start_playlist_download(
+            PlaylistDownloadRequest(url=row["url"], quality=row["format_code"])
+        )
+    return start_download(
+        DownloadRequest(
+            url=row["url"],
+            format_code=row["format_code"],
+            resolution=row["resolution"],
+            ext=row["ext"],
+        )
+    )
+
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str):
+    row = db.get(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if row["status"] in db.ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="Cancel the job before deleting it.")
+    db.delete(job_id)
+    return {"ok": True}
