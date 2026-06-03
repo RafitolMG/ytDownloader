@@ -20,3 +20,6 @@ bin/
 # OS
 Thumbs.db
 .DS_Store
+
+# Dev scripts runtime (logs, pids)
+.dev/
