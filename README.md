@@ -110,6 +110,26 @@ In Coolify:
 6. **Health Check:** the image declares one on `GET /api/auth/config` (public).
    No extra config needed.
 
+After the first deploy, hit `GET /api/auth/ping` from anywhere
+(browser, `curl`, the Coolify terminal) to verify the backend can reach
+HomeAuth and that the API key is accepted:
+
+```json
+{
+  "reachable": true,
+  "api_key_valid": true,
+  "latency_ms": 12,
+  "status_code": 200,
+  "base_url": "http://homeauth:9876",
+  "error": null
+}
+```
+
+`reachable: false` means a network / DNS problem between the two
+containers — check that they share a Docker network. `reachable: true`
+with `api_key_valid: false` means the network works but
+`HOMEAUTH_APP_API_KEY` is wrong.
+
 WebSocket (`/ws/progress/*`) works on Traefik out of the box since the path
 prefix is enough to keep the upgrade headers. No special label required.
 

@@ -9,6 +9,7 @@ a cross-site browser anyway.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from typing import Any
@@ -179,4 +180,49 @@ def validate_token(access_token: str) -> ValidationResult:
         username=body.get("username"),
         role=body.get("role"),
         expires_at=body.get("expiresAt"),
+    )
+
+
+@dataclass(frozen=True)
+class PingResult:
+    reachable: bool          # could the backend open a TCP connection and get an HTTP response
+    api_key_valid: bool      # True if HomeAuth returned 200 on validate-token (key accepted)
+    latency_ms: int | None   # round-trip; None when unreachable
+    status_code: int | None  # HTTP status from validate-token; None when unreachable
+    base_url: str            # echoed back so the operator can confirm the URL the backend resolved
+    error: str | None        # short human-readable reason on failure
+
+
+def ping() -> PingResult:
+    """
+    Diagnose connectivity to HomeAuth without needing a real user.
+    Calls /auth/validate-token with a dummy token — HomeAuth replies 401 if the
+    API key is wrong and 200 (with valid=false) if the key is good.
+    """
+    base = config.HOMEAUTH_BASE_URL
+    if not config.HOMEAUTH_APP_API_KEY:
+        return PingResult(
+            reachable=False, api_key_valid=False, latency_ms=None,
+            status_code=None, base_url=base,
+            error="HOMEAUTH_APP_API_KEY is not set",
+        )
+    started = time.monotonic()
+    try:
+        with _client() as cli:
+            resp = cli.post(
+                "/auth/validate-token",
+                headers={"X-Api-Key": config.HOMEAUTH_APP_API_KEY},
+                json={"token": "ping"},
+            )
+    except httpx.RequestError as e:
+        return PingResult(
+            reachable=False, api_key_valid=False, latency_ms=None,
+            status_code=None, base_url=base, error=f"{type(e).__name__}: {e}",
+        )
+    latency = int((time.monotonic() - started) * 1000)
+    api_key_valid = resp.status_code == 200
+    error = None if api_key_valid else f"HomeAuth replied {resp.status_code}"
+    return PingResult(
+        reachable=True, api_key_valid=api_key_valid, latency_ms=latency,
+        status_code=resp.status_code, base_url=base, error=error,
     )
