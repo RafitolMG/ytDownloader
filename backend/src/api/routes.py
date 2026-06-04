@@ -44,10 +44,21 @@ app.include_router(auth_router)
 # mount stays empty; in the Docker image the multi-stage build drops dist/ at
 # YTDL_FRONTEND_DIST. The catch-all at the bottom serves index.html.
 _FRONTEND_DIST = os.environ.get("YTDL_FRONTEND_DIST", "")
+
+
+class _ImmutableStatic(StaticFiles):
+    # Vite asset filenames embed a content hash (e.g. main-abc123.js), so they
+    # can be cached forever — the filename changes whenever the contents do.
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 if _FRONTEND_DIST and os.path.isdir(os.path.join(_FRONTEND_DIST, "assets")):
     app.mount(
         "/assets",
-        StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")),
+        _ImmutableStatic(directory=os.path.join(_FRONTEND_DIST, "assets")),
         name="spa-assets",
     )
 
@@ -451,11 +462,16 @@ def delete_job(job_id: str, user: CurrentUser = Depends(current_user)):
 if _FRONTEND_DIST and os.path.isfile(os.path.join(_FRONTEND_DIST, "index.html")):
     _SPA_INDEX = os.path.join(_FRONTEND_DIST, "index.html")
 
+    # index.html is the SPA's manifest — must always revalidate or the browser
+    # ends up loading stale bundles after a deploy. Same for root-level static
+    # files (favicon, manifest.json) that don't have a content hash in the name.
+    _NO_CACHE = {"Cache-Control": "no-cache"}
+
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
         if full_path.startswith(("api/", "ws/", "assets/")):
             raise HTTPException(status_code=404)
         candidate = os.path.join(_FRONTEND_DIST, full_path)
         if full_path and os.path.isfile(candidate):
-            return FileResponse(candidate)
-        return FileResponse(_SPA_INDEX)
+            return FileResponse(candidate, headers=_NO_CACHE)
+        return FileResponse(_SPA_INDEX, headers=_NO_CACHE)
