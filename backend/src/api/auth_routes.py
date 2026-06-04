@@ -124,12 +124,12 @@ def whoami(user: CurrentUser = Depends(current_user)):
 def auth_config():
     """
     Public — exposes only the upstream URLs the SPA needs (no secrets).
-    Lets the frontend link out to HomeAuth's hosted register page without
-    hardcoding HOMEAUTH_BASE_URL into the bundle.
+    Must return the *public* URL (browser-reachable), never the internal
+    service-name URL the backend uses for server-to-server calls.
     """
     return {
-        "homeauth_base_url": config.HOMEAUTH_BASE_URL,
-        "register_url": f"{config.HOMEAUTH_BASE_URL}/register",
+        "homeauth_base_url": config.HOMEAUTH_PUBLIC_URL,
+        "register_url": f"{config.HOMEAUTH_PUBLIC_URL}/register",
     }
 
 
