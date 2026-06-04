@@ -19,7 +19,13 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 # HomeAuth integration
+# BASE_URL is the URL the *backend* uses to reach HomeAuth (server-to-server,
+# typically an internal Docker service name like http://home-auth:9876).
+# PUBLIC_URL is the URL the *browser* uses for redirects (e.g. the "Register"
+# link). When empty, falls back to BASE_URL — fine for dev where both are
+# http://localhost:8080.
 HOMEAUTH_BASE_URL: str = _env("HOMEAUTH_BASE_URL", "http://localhost:8080").rstrip("/")
+HOMEAUTH_PUBLIC_URL: str = _env("HOMEAUTH_PUBLIC_URL", "").rstrip("/") or HOMEAUTH_BASE_URL
 HOMEAUTH_APP_API_KEY: str = _env("HOMEAUTH_APP_API_KEY", "")
 
 # Cookie issued by *this* backend to the browser
