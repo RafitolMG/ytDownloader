@@ -101,7 +101,8 @@ In Coolify:
 
    | Key | Example | Notes |
    |---|---|---|
-   | `HOMEAUTH_BASE_URL` | `http://homeauth:8080` | Service name if HomeAuth lives in the same Coolify project network, otherwise the public HTTPS URL. |
+   | `HOMEAUTH_BASE_URL` | `http://home-auth:9876` | **Internal** URL — service name when HomeAuth lives in the same Coolify project. Used server-to-server, never reaches the browser. |
+   | `HOMEAUTH_PUBLIC_URL` | `https://auth.tudominio.com` | **Public** URL the browser uses (e.g. for the "Register" link). Required when `BASE_URL` is an internal hostname the browser can't resolve. |
    | `HOMEAUTH_APP_API_KEY` | `…` | API key from HomeAuth `/admin/applications`. |
    | `SESSION_COOKIE_SECURE` | `true` | Required once Traefik gives you HTTPS. |
    | `SESSION_COOKIE_SAMESITE` | `lax` | `strict` if you don't need cross-site embeds. |
