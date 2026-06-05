@@ -16,17 +16,33 @@ def _get_ffmpeg_path():
     return shutil.which('ffmpeg')
 
 
+def _resolve_cookies_file() -> str | None:
+    """Return the cookies.txt path to use, or None if no cookies are configured.
+
+    Priority:
+      1. YT_COOKIES_FILE env var (prod: typically a persistent volume in Coolify).
+      2. cookies.txt in the project root (dev convenience).
+    """
+    env_path = os.environ.get('YT_COOKIES_FILE', '').strip()
+    if env_path and os.path.isfile(env_path):
+        return env_path
+    legacy = os.path.join(_PROJECT_ROOT, 'cookies.txt')
+    if os.path.isfile(legacy):
+        return legacy
+    return None
+
+
 def _get_cookie_opts() -> dict:
     """
     Return yt-dlp options to authenticate with YouTube and avoid bot detection.
 
     Priority:
-      1. cookies.txt file in project root (manual export via browser extension).
+      1. cookies.txt resolved via _resolve_cookies_file.
       2. Auto-detect an installed browser and extract cookies from it (Windows).
     Returns an empty dict if neither source is available.
     """
-    cookies_file = os.path.join(_PROJECT_ROOT, 'cookies.txt')
-    if os.path.isfile(cookies_file):
+    cookies_file = _resolve_cookies_file()
+    if cookies_file:
         return {'cookiefile': cookies_file}
 
     if os.name == 'nt':

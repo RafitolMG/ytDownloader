@@ -65,12 +65,28 @@ if _FRONTEND_DIST and os.path.isdir(os.path.join(_FRONTEND_DIST, "assets")):
 
 @app.on_event("startup")
 def _init_db():
+    import logging
+    log = logging.getLogger("uvicorn.error")
     db.init()
     if config.DEV_AUTH_BYPASS:
-        import logging
-        log = logging.getLogger("uvicorn.error")
         banner = "█" * 60
         log.warning("\n%s\n  DEV_AUTH_BYPASS=1 — every request is treated as ADMIN.\n  DO NOT run this build in production.\n%s", banner, banner)
+    # Cookies: YouTube blocks datacenter IPs without an authenticated session.
+    # Surface the resolution outcome at startup so prod misconfig is loud.
+    resolved = ytDownloaderFunctions._resolve_cookies_file()
+    if resolved:
+        log.info("yt-dlp cookies: loaded from %s", resolved)
+    elif config.YT_COOKIES_FILE:
+        log.warning(
+            "yt-dlp cookies: YT_COOKIES_FILE=%s is set but the file does not exist — "
+            "YouTube will likely block extraction.",
+            config.YT_COOKIES_FILE,
+        )
+    else:
+        log.warning(
+            "yt-dlp cookies: none configured. Fine on a residential IP; on a VPS "
+            "YouTube will block extraction with 'Sign in to confirm you're not a bot'."
+        )
 
 
 # ── In-memory job runtime (file paths, queues, cancel flags) ──────────────────
