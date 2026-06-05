@@ -75,7 +75,10 @@ def _init_db():
     # Surface the resolution outcome at startup so prod misconfig is loud.
     resolved = ytDownloaderFunctions._resolve_cookies_file()
     if resolved:
-        log.info("yt-dlp cookies: loaded from %s", resolved)
+        if config.YT_COOKIES_DATA:
+            log.info("yt-dlp cookies: loaded from YT_COOKIES_DATA env var (%d bytes)", len(config.YT_COOKIES_DATA))
+        else:
+            log.info("yt-dlp cookies: loaded from %s", resolved)
     elif config.YT_COOKIES_FILE:
         log.warning(
             "yt-dlp cookies: YT_COOKIES_FILE=%s is set but the file does not exist — "
