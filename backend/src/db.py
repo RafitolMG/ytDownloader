@@ -98,6 +98,42 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+
+-- ── Music library ────────────────────────────────────────────────────────────
+-- `tracks`: the master registry of physical audio files. One row per
+-- (video_id, codec, bitrate) — shared across all users so the same source is
+-- never downloaded twice.
+CREATE TABLE IF NOT EXISTS tracks (
+    video_id        TEXT NOT NULL,
+    codec           TEXT NOT NULL,       -- 'mp3' | 'm4a' | 'flac' | ...
+    bitrate         TEXT NOT NULL,       -- '192' | '320' | 'lossless' | '0'
+    title           TEXT,
+    artist          TEXT,                -- yt uploader
+    duration_sec    INTEGER,
+    thumbnail_url   TEXT,
+    source_url      TEXT NOT NULL,
+    file_path       TEXT NOT NULL,
+    file_size       INTEGER,
+    sha256          TEXT,
+    downloaded_at   TEXT NOT NULL,
+    PRIMARY KEY (video_id, codec, bitrate)
+);
+
+-- `track_owners`: per-user library membership. Multiple owners can reference
+-- the same physical file in `tracks`.
+CREATE TABLE IF NOT EXISTS track_owners (
+    owner_id              TEXT NOT NULL,
+    video_id              TEXT NOT NULL,
+    codec                 TEXT NOT NULL,
+    bitrate               TEXT NOT NULL,
+    added_at              TEXT NOT NULL,
+    source_playlist_title TEXT,
+    PRIMARY KEY (owner_id, video_id, codec, bitrate),
+    FOREIGN KEY (video_id, codec, bitrate)
+        REFERENCES tracks(video_id, codec, bitrate) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_owners_owner ON track_owners(owner_id, added_at DESC);
 """
 
 ROLE_ADMIN = "ADMIN"
@@ -368,3 +404,171 @@ def update_session_tokens(
 def delete_session(session_id: str) -> None:
     with _write() as conn:
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+
+# ── Music library ────────────────────────────────────────────────────────────
+
+def get_track(video_id: str, codec: str, bitrate: str) -> dict[str, Any] | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM tracks WHERE video_id = ? AND codec = ? AND bitrate = ?",
+        (video_id, codec, bitrate),
+    ).fetchone()
+    return _row_to_dict(row)
+
+
+def register_track(
+    *,
+    video_id: str,
+    codec: str,
+    bitrate: str,
+    title: str | None,
+    artist: str | None,
+    duration_sec: int | None,
+    thumbnail_url: str | None,
+    source_url: str,
+    file_path: str,
+    file_size: int | None,
+    sha256: str | None,
+) -> None:
+    """Idempotent: re-registering an existing track overwrites the row."""
+    with _write() as conn:
+        conn.execute(
+            """
+            INSERT INTO tracks (
+                video_id, codec, bitrate, title, artist, duration_sec,
+                thumbnail_url, source_url, file_path, file_size, sha256, downloaded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(video_id, codec, bitrate) DO UPDATE SET
+                title = excluded.title,
+                artist = excluded.artist,
+                duration_sec = excluded.duration_sec,
+                thumbnail_url = excluded.thumbnail_url,
+                source_url = excluded.source_url,
+                file_path = excluded.file_path,
+                file_size = excluded.file_size,
+                sha256 = excluded.sha256,
+                downloaded_at = excluded.downloaded_at
+            """,
+            (
+                video_id, codec, bitrate, title, artist, duration_sec,
+                thumbnail_url, source_url, file_path, file_size, sha256, _now(),
+            ),
+        )
+
+
+def link_owner(
+    *,
+    owner_id: str,
+    video_id: str,
+    codec: str,
+    bitrate: str,
+    source_playlist_title: str | None = None,
+) -> None:
+    """Idempotent: links a user to a track. Existing rows are left untouched
+    so we don't overwrite an earlier `source_playlist_title`."""
+    with _write() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO track_owners (
+                owner_id, video_id, codec, bitrate, added_at, source_playlist_title
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (owner_id, video_id, codec, bitrate, _now(), source_playlist_title),
+        )
+
+
+def is_owned(owner_id: str, video_id: str, codec: str, bitrate: str) -> bool:
+    conn = _get_conn()
+    row = conn.execute(
+        """
+        SELECT 1 FROM track_owners
+         WHERE owner_id = ? AND video_id = ? AND codec = ? AND bitrate = ?
+         LIMIT 1
+        """,
+        (owner_id, video_id, codec, bitrate),
+    ).fetchone()
+    return row is not None
+
+
+def count_owners(video_id: str, codec: str, bitrate: str) -> int:
+    conn = _get_conn()
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM track_owners
+         WHERE video_id = ? AND codec = ? AND bitrate = ?
+        """,
+        (video_id, codec, bitrate),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def remove_from_library(
+    owner_id: str, video_id: str, codec: str, bitrate: str
+) -> dict[str, Any]:
+    """
+    Unlink the caller from a track. If no owners remain, also delete the
+    master `tracks` row and return its file_path so the caller can erase the
+    file from disk.
+
+    Returns a dict:
+      { 'unlinked': bool, 'orphaned': bool, 'file_path': str | None }
+    """
+    with _write() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM track_owners
+             WHERE owner_id = ? AND video_id = ? AND codec = ? AND bitrate = ?
+            """,
+            (owner_id, video_id, codec, bitrate),
+        )
+        if cur.rowcount == 0:
+            return {"unlinked": False, "orphaned": False, "file_path": None}
+
+        remaining = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM track_owners
+             WHERE video_id = ? AND codec = ? AND bitrate = ?
+            """,
+            (video_id, codec, bitrate),
+        ).fetchone()
+        if remaining and remaining["n"] > 0:
+            return {"unlinked": True, "orphaned": False, "file_path": None}
+
+        # No owners left — drop the master row and surface its file_path so
+        # the caller can rm the physical file.
+        master = conn.execute(
+            "SELECT file_path FROM tracks WHERE video_id = ? AND codec = ? AND bitrate = ?",
+            (video_id, codec, bitrate),
+        ).fetchone()
+        conn.execute(
+            "DELETE FROM tracks WHERE video_id = ? AND codec = ? AND bitrate = ?",
+            (video_id, codec, bitrate),
+        )
+        return {
+            "unlinked": True,
+            "orphaned": True,
+            "file_path": master["file_path"] if master else None,
+        }
+
+
+def list_library(owner_id: str, limit: int = 500) -> list[dict[str, Any]]:
+    """Return the caller's library — joins track_owners with tracks."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+               t.thumbnail_url, t.source_url, t.file_size,
+               o.added_at, o.source_playlist_title
+          FROM track_owners o
+          JOIN tracks t
+            ON t.video_id = o.video_id
+           AND t.codec = o.codec
+           AND t.bitrate = o.bitrate
+         WHERE o.owner_id = ?
+         ORDER BY o.added_at DESC
+         LIMIT ?
+        """,
+        (owner_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
