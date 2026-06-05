@@ -58,9 +58,18 @@ _DEFAULT_LIBRARY_DIR = os.path.join(
 )
 LIBRARY_DIR: str = _env("LIBRARY_DIR", _DEFAULT_LIBRARY_DIR)
 
-# yt-dlp cookies file. YouTube blocks datacenter IPs (Coolify / VPS) without an
-# authenticated session, so prod deployments must mount a Netscape-format
-# cookies.txt exported from a logged-in browser. Empty string = no cookies
-# (fine for local dev on a residential IP). When set, the file must exist or
-# yt-dlp will error on every job.
+# yt-dlp cookies. YouTube blocks datacenter IPs (Coolify / VPS) without an
+# authenticated session, so prod deployments must provide a Netscape-format
+# cookies.txt exported from a logged-in browser.
+#
+# Two ways to supply it (DATA wins over FILE if both are set):
+#   YT_COOKIES_DATA — raw cookies.txt contents pasted into an env var. The
+#                     backend writes it to a tempfile on first use. Easiest
+#                     for Coolify since cookies can be rotated by editing the
+#                     env var without touching files or SSH.
+#   YT_COOKIES_FILE — absolute path to a cookies.txt already on disk. Useful
+#                     when the file is bind-mounted via Coolify's File Mount
+#                     or pre-placed in the persistent volume.
+# Empty strings = no cookies (fine for local dev on a residential IP).
+YT_COOKIES_DATA: str = _env("YT_COOKIES_DATA", "")
 YT_COOKIES_FILE: str = _env("YT_COOKIES_FILE", "")
