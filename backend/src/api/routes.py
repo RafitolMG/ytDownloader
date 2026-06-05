@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import queue
 import shutil
@@ -7,15 +8,14 @@ import threading
 import time
 import traceback
 import uuid
-import zipfile
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src import config, db, ytDownloaderFunctions
+from src import config, db, search as search_mod, ytDownloaderFunctions
 from src.api.auth_routes import router as auth_router
 from src.auth import CurrentUser, current_user
 
@@ -66,6 +66,11 @@ if _FRONTEND_DIST and os.path.isdir(os.path.join(_FRONTEND_DIST, "assets")):
 @app.on_event("startup")
 def _init_db():
     db.init()
+    if config.DEV_AUTH_BYPASS:
+        import logging
+        log = logging.getLogger("uvicorn.error")
+        banner = "█" * 60
+        log.warning("\n%s\n  DEV_AUTH_BYPASS=1 — every request is treated as ADMIN.\n  DO NOT run this build in production.\n%s", banner, banner)
 
 
 # ── In-memory job runtime (file paths, queues, cancel flags) ──────────────────
@@ -104,7 +109,8 @@ def get_resolutions(body: ResolutionsRequest):
     """Fetch available MP4 formats for a single video, or detect a playlist URL."""
     try:
         if ytDownloaderFunctions.is_playlist(body.url):
-            return {"is_playlist": True}
+            info = ytDownloaderFunctions.get_playlist_tracks(body.url)
+            return {"is_playlist": True, **info}
         return ytDownloaderFunctions.get_available_resolutions(body.url)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -137,12 +143,22 @@ def _throttled_progress(job_id: str, progress_queue: queue.Queue):
 def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_user)):
     """
     Start a download in a background thread.
-    Returns a job_id to connect to via WebSocket for progress updates.
-    When done, fetch /api/file/{job_id} to receive the file.
+
+    Two flows depending on `format_code`:
+      - Audio preset (mp3-192, mp3-320, m4a, flac): imports the track into
+        the user's music library (shared content-addressed storage with
+        dedup). Emits `done {filename: null}` so the frontend doesn't try to
+        download a file.
+      - Anything else: standard single-video download → tmp_dir → file served
+        via /api/file/{job_id}.
     """
+    is_audio_import = ytDownloaderFunctions.is_audio_quality(body.format_code)
+
     job_id = str(uuid.uuid4())
     progress_queue: queue.Queue = queue.Queue()
-    tmp_dir = tempfile.mkdtemp(prefix="ytdl_")
+    # For audio imports we don't need a tmp_dir at the job level — the per-track
+    # downloader manages its own scratch space under LIBRARY_DIR.
+    tmp_dir = None if is_audio_import else tempfile.mkdtemp(prefix="ytdl_")
     _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": tmp_dir}
 
     db.create_job(
@@ -153,6 +169,101 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
         ext=body.ext,
         owner_id=user.user_id,
     )
+
+    def run_audio_import():
+        try:
+            codec, bitrate, ext = ytDownloaderFunctions.parse_audio_quality(body.format_code)
+            info = ytDownloaderFunctions.get_single_video_info(body.url)
+            video_id = info['id']
+
+            db.set_metadata(
+                job_id,
+                title=info.get('title'),
+                uploader=info.get('uploader'),
+                thumbnail_url=info.get('thumbnail'),
+                duration_sec=info.get('duration_sec'),
+            )
+            progress_queue.put({
+                "type": "metadata",
+                "title": info.get('title'),
+                "uploader": info.get('uploader'),
+                "thumbnail_url": info.get('thumbnail'),
+                "duration_sec": info.get('duration_sec'),
+            })
+
+            db.mark_started(job_id)
+
+            existing = db.get_track(video_id, codec, bitrate)
+            if existing and os.path.isfile(existing['file_path']):
+                # Already in the shared library — just link this user.
+                db.link_owner(
+                    owner_id=user.user_id,
+                    video_id=video_id,
+                    codec=codec,
+                    bitrate=bitrate,
+                )
+                progress_queue.put({"type": "progress", "value": 100.0})
+                db.finish(job_id, size_bytes=existing.get('file_size'))
+                progress_queue.put({
+                    "type": "done",
+                    "filename": None,
+                    "imported": 0,
+                    "reused": 1,
+                })
+                return
+
+            dest_path = _library_path(video_id, codec, bitrate, ext)
+
+            def on_progress(pct: float):
+                if job_id in _cancelled:
+                    raise _Cancelled()
+                progress_queue.put({"type": "progress", "value": round(pct, 1)})
+
+            ytDownloaderFunctions.download_track_audio(
+                info['webpage_url'], codec, bitrate, dest_path,
+                on_progress=on_progress,
+            )
+
+            file_size = os.path.getsize(dest_path)
+            sha256 = _sha256_file(dest_path)
+            db.register_track(
+                video_id=video_id,
+                codec=codec,
+                bitrate=bitrate,
+                title=info.get('title'),
+                artist=info.get('uploader'),
+                duration_sec=info.get('duration_sec'),
+                thumbnail_url=info.get('thumbnail'),
+                source_url=info['webpage_url'],
+                file_path=dest_path,
+                file_size=file_size,
+                sha256=sha256,
+            )
+            db.link_owner(
+                owner_id=user.user_id,
+                video_id=video_id,
+                codec=codec,
+                bitrate=bitrate,
+            )
+            db.finish(job_id, size_bytes=file_size)
+            progress_queue.put({
+                "type": "done",
+                "filename": None,
+                "imported": 1,
+                "reused": 0,
+            })
+
+        except _Cancelled:
+            _jobs.pop(job_id, None)
+            _cancelled.discard(job_id)
+            db.cancel(job_id)
+            progress_queue.put({"type": "cancelled"})
+
+        except Exception as e:
+            traceback.print_exc()
+            _jobs.pop(job_id, None)
+            db.fail(job_id, str(e))
+            progress_queue.put({"type": "error", "message": str(e)})
 
     def run():
         try:
@@ -225,20 +336,46 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
             db.fail(job_id, str(e))
             progress_queue.put({"type": "error", "message": str(e)})
 
-    threading.Thread(target=run, daemon=True).start()
+    target = run_audio_import if is_audio_import else run
+    threading.Thread(target=target, daemon=True).start()
     return {"job_id": job_id}
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _library_path(video_id: str, codec: str, bitrate: str, ext: str) -> str:
+    return os.path.join(config.LIBRARY_DIR, video_id, f"{codec}_{bitrate}.{ext}")
 
 
 @app.post("/api/download-playlist")
 def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = Depends(current_user)):
     """
-    Download all tracks in a playlist as MP3, zipped into a single archive.
+    Import a playlist into the user's library. Each track is stored in the
+    shared content-addressed library at LIBRARY_DIR/{video_id}/{codec}_{bitrate}.{ext}.
+
+    Dedup rules per track:
+      - If the (video_id, codec, bitrate) tuple exists in `tracks` AND the
+        file is present on disk → skip the download and just link this user as
+        an owner.
+      - If the row exists but the file is gone → re-download.
+      - Otherwise → download, hash, register, link.
+
     Returns a job_id to track progress via WebSocket.
     """
+    try:
+        codec, bitrate, ext = ytDownloaderFunctions.parse_audio_quality(body.quality)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     job_id = str(uuid.uuid4())
     progress_queue: queue.Queue = queue.Queue()
-    tmp_dir = tempfile.mkdtemp(prefix="ytdl_playlist_")
-    _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": tmp_dir}
+    _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": None}
 
     db.create_job(
         job_id=job_id,
@@ -251,55 +388,109 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
     def run():
         try:
             try:
-                info = ytDownloaderFunctions.get_playlist_info(body.url)
+                info = ytDownloaderFunctions.get_playlist_tracks(body.url)
                 db.set_metadata(
                     job_id,
                     playlist_title=info.get('title'),
                     playlist_count=info.get('count'),
                     thumbnail_url=info.get('thumbnail_url'),
                 )
-                progress_queue.put({"type": "metadata", **info})
+                # Strip `tracks` from the WS payload — it can be hundreds of
+                # entries and the client already fetched them at analyze time.
+                meta_event = {k: v for k, v in info.items() if k != 'tracks'}
+                progress_queue.put({"type": "metadata", **meta_event})
             except Exception:
                 traceback.print_exc()
+                raise
 
-            db.mark_started(job_id)
-            on_progress = _throttled_progress(job_id, progress_queue)
-
-            def on_video_start(index, total, title):
-                progress_queue.put({"type": "track", "index": index, "total": total, "title": title})
-
-            ytDownloaderFunctions.download_playlist(
-                body.url, body.quality, tmp_dir,
-                on_progress=on_progress,
-                on_video_start=on_video_start,
-            )
-
-            downloaded = []
-            for root, _dirs, files in os.walk(tmp_dir):
-                for fname in files:
-                    fpath = os.path.join(root, fname)
-                    downloaded.append((fpath, os.path.relpath(fpath, tmp_dir)))
-
-            if not downloaded:
+            tracks = info.get('tracks') or []
+            if not tracks:
                 raise RuntimeError(
-                    "No tracks were downloaded. Possible causes: the playlist is "
-                    "private or empty, YouTube is blocking the request (add a "
-                    "cookies.txt file to the project root), or all tracks are "
-                    "unavailable in your region."
+                    "Playlist returned no tracks. It may be private, empty, or "
+                    "blocked in your region."
                 )
 
-            zip_path = os.path.join(tmp_dir, "playlist.zip")
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
-                for fpath, arcname in downloaded:
-                    if not fpath.endswith("playlist.zip"):
-                        zf.write(fpath, arcname)
+            db.mark_started(job_id)
+            total = len(tracks)
+            playlist_title = info.get('title')
+            imported = 0
+            reused = 0
 
-            _jobs[job_id]["file_path"] = zip_path
-            db.finish(job_id, size_bytes=os.path.getsize(zip_path))
-            progress_queue.put({"type": "done", "filename": "playlist.zip"})
+            for idx, entry in enumerate(tracks, start=1):
+                if job_id in _cancelled:
+                    raise _Cancelled()
+
+                video_id = entry['id']
+                title = entry.get('title') or video_id
+                progress_queue.put({"type": "track", "index": idx, "total": total, "title": title})
+
+                # Overall progress baseline at the start of this track.
+                base_pct = (idx - 1) / total * 100
+
+                existing = db.get_track(video_id, codec, bitrate)
+                if existing and os.path.isfile(existing['file_path']):
+                    # Already in the shared library — just link this user.
+                    db.link_owner(
+                        owner_id=user.user_id,
+                        video_id=video_id,
+                        codec=codec,
+                        bitrate=bitrate,
+                        source_playlist_title=playlist_title,
+                    )
+                    reused += 1
+                    progress_queue.put({"type": "progress", "value": round(idx / total * 100, 1)})
+                    db.update_progress(job_id, idx / total * 100)
+                    continue
+
+                dest_path = _library_path(video_id, codec, bitrate, ext)
+
+                def on_track_progress(pct: float, _base=base_pct, _total=total):
+                    if job_id in _cancelled:
+                        raise _Cancelled()
+                    overall = _base + (pct / _total)
+                    progress_queue.put({"type": "progress", "value": round(overall, 1)})
+
+                ytDownloaderFunctions.download_track_audio(
+                    entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
+                    codec, bitrate, dest_path,
+                    on_progress=on_track_progress,
+                )
+
+                file_size = os.path.getsize(dest_path)
+                sha256 = _sha256_file(dest_path)
+
+                db.register_track(
+                    video_id=video_id,
+                    codec=codec,
+                    bitrate=bitrate,
+                    title=title,
+                    artist=entry.get('uploader'),
+                    duration_sec=entry.get('duration_sec'),
+                    thumbnail_url=entry.get('thumbnail'),
+                    source_url=entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
+                    file_path=dest_path,
+                    file_size=file_size,
+                    sha256=sha256,
+                )
+                db.link_owner(
+                    owner_id=user.user_id,
+                    video_id=video_id,
+                    codec=codec,
+                    bitrate=bitrate,
+                    source_playlist_title=playlist_title,
+                )
+                imported += 1
+                db.update_progress(job_id, idx / total * 100)
+
+            db.finish(job_id, size_bytes=None)
+            progress_queue.put({
+                "type": "done",
+                "filename": None,
+                "imported": imported,
+                "reused": reused,
+            })
 
         except _Cancelled:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
             _cancelled.discard(job_id)
             db.cancel(job_id)
@@ -307,7 +498,6 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
 
         except Exception as e:
             traceback.print_exc()
-            shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
             db.fail(job_id, str(e))
             progress_queue.put({"type": "error", "message": str(e)})
@@ -386,6 +576,135 @@ def serve_file(
     )
 
 
+# ── Music library streaming ───────────────────────────────────────────────────
+
+_AUDIO_MEDIA_TYPES = {
+    "mp3": "audio/mpeg",
+    "m4a": "audio/mp4",
+    "flac": "audio/flac",
+}
+
+
+@app.get("/api/library")
+def list_library(limit: int = 500, user: CurrentUser = Depends(current_user)):
+    """Return the caller's music library — every track they own."""
+    return {"items": db.list_library(user.user_id, limit=limit)}
+
+
+@app.delete("/api/library/{video_id}")
+def remove_track(
+    video_id: str,
+    codec: str,
+    bitrate: str,
+    user: CurrentUser = Depends(current_user),
+):
+    """
+    Unlink the caller from a track. If they were the last owner, the master
+    record and the underlying audio file are deleted too. Cleans up the
+    video_id directory when empty.
+    """
+    result = db.remove_from_library(user.user_id, video_id, codec, bitrate)
+    if not result["unlinked"]:
+        raise HTTPException(status_code=404, detail="track not in your library")
+
+    if result["orphaned"] and result["file_path"]:
+        try:
+            os.remove(result["file_path"])
+        except FileNotFoundError:
+            pass
+        # Drop the per-video directory if it's now empty.
+        parent = os.path.dirname(result["file_path"])
+        try:
+            if os.path.isdir(parent) and not os.listdir(parent):
+                os.rmdir(parent)
+        except OSError:
+            pass
+
+    return {"ok": True, "orphaned": result["orphaned"]}
+
+
+@app.get("/api/track/{video_id}/stream")
+def stream_track(
+    video_id: str,
+    request: Request,
+    codec: str = "mp3",
+    bitrate: str = "192",
+    user: CurrentUser = Depends(current_user),
+):
+    """
+    Stream a track from the library to an HTML <audio> element. Honors the
+    `Range` header so the browser can seek without re-downloading.
+    """
+    if not db.is_owned(user.user_id, video_id, codec, bitrate) and not user.is_admin:
+        raise HTTPException(status_code=404, detail="track not in your library")
+
+    track = db.get_track(video_id, codec, bitrate)
+    if track is None:
+        raise HTTPException(status_code=404, detail="track not found")
+    file_path = track["file_path"]
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=410, detail="track file missing on disk")
+
+    file_size = os.path.getsize(file_path)
+    media_type = _AUDIO_MEDIA_TYPES.get(track["codec"], "application/octet-stream")
+    range_header = request.headers.get("range") or request.headers.get("Range")
+
+    if not range_header:
+        return FileResponse(
+            file_path,
+            media_type=media_type,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+                "Cache-Control": "private, max-age=3600",
+            },
+        )
+
+    # Parse `Range: bytes=START-END`. We only handle a single byte range — the
+    # browser's <audio> tag never issues multipart range requests.
+    try:
+        units, _, ranges = range_header.partition("=")
+        if units.strip().lower() != "bytes":
+            raise ValueError("only `bytes` units are supported")
+        start_str, _, end_str = ranges.strip().split(",", 1)[0].partition("-")
+        start = int(start_str) if start_str else 0
+        end = int(end_str) if end_str else file_size - 1
+    except ValueError:
+        raise HTTPException(status_code=416, detail="invalid Range header")
+
+    if start < 0 or end >= file_size or start > end:
+        return Response(
+            status_code=416,
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+
+    chunk_size = 1024 * 64
+    length = end - start + 1
+
+    def iter_chunk():
+        remaining = length
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            while remaining > 0:
+                buf = f.read(min(chunk_size, remaining))
+                if not buf:
+                    break
+                remaining -= len(buf)
+                yield buf
+
+    return StreamingResponse(
+        iter_chunk(),
+        status_code=206,
+        media_type=media_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(length),
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
+
+
 # ── Job history / queue management ────────────────────────────────────────────
 
 @app.get("/api/jobs")
@@ -452,6 +771,60 @@ def delete_job(job_id: str, user: CurrentUser = Depends(current_user)):
         raise HTTPException(status_code=409, detail="Cancel the job before deleting it.")
     db.delete(job_id)
     return {"ok": True}
+
+
+# ── Search ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/search/suggest")
+def search_suggest(
+    q: str = "",
+    hl: str = "es",
+    user: CurrentUser = Depends(current_user),
+):
+    """Autocomplete strings for the search bar dropdown. Cached 60s."""
+    return {"suggestions": search_mod.suggest(q, hl=hl)}
+
+
+@app.get("/api/search")
+def search_videos(
+    q: str = "",
+    limit: int = 20,
+    user: CurrentUser = Depends(current_user),
+):
+    """yt-dlp ytsearch:<q> — listing-level metadata only. Cached 5min."""
+    try:
+        return {"results": search_mod.search(q, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"search failed: {e}")
+
+
+@app.get("/api/history")
+def search_history(
+    limit: int = 20,
+    user: CurrentUser = Depends(current_user),
+):
+    """
+    Recent completed downloads for the current user — used as the empty-state
+    dropdown in the search bar. Returns the same shape the search results do
+    so the frontend can render both with one card component.
+    """
+    rows = db.list_jobs(owner_id=user.user_id, limit=limit * 3)
+    items = []
+    for row in rows:
+        if row.get("status") != db.DONE:
+            continue
+        items.append({
+            "id": row["id"],
+            "title": row.get("title"),
+            "channel": row.get("uploader"),
+            "thumbnail": row.get("thumbnail_url"),
+            "duration_seconds": row.get("duration_sec"),
+            "url": row["url"],
+            "completed_at": row.get("completed_at"),
+        })
+        if len(items) >= limit:
+            break
+    return {"items": items}
 
 
 # ── SPA fallback ──────────────────────────────────────────────────────────────

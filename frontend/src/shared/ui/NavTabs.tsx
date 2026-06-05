@@ -35,6 +35,18 @@ export function NavTabs({ queueCount }: { queueCount: number }) {
           </span>
         )}
       </NavLink>
+      <NavLink
+        to="/library"
+        className={({ isActive }) =>
+          `${baseCls} ${
+            isActive
+              ? 'border-hot text-ink-hi bg-hot/10 shadow-[var(--shadow-glow-hot)]'
+              : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
+          }`
+        }
+      >
+        ♪ library
+      </NavLink>
     </nav>
   )
 }

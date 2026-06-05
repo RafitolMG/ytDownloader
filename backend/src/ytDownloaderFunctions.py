@@ -370,15 +370,206 @@ def get_playlist_info(url):
     }
 
 
+def get_playlist_tracks(url):
+    """
+    Returns playlist metadata + a list of every track, suitable for the UI
+    to preview before downloading.
+
+    Shape:
+      {
+        'title': str,
+        'count': int,
+        'thumbnail_url': str | None,
+        'tracks': [
+          {
+            'id': str,
+            'title': str,
+            'url': str,        # canonical watch URL
+            'duration_sec': int | None,
+            'thumbnail': str | None,
+          },
+          ...
+        ]
+      }
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': 'in_playlist',
+        **_get_cookie_opts(),
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    entries = info.get('entries') or []
+    thumbnail = info.get('thumbnail')
+    if not thumbnail and entries:
+        thumbnail = entries[0].get('thumbnail')
+
+    tracks = []
+    for e in entries:
+        if not e:
+            continue
+        vid = e.get('id')
+        if not vid:
+            continue
+        # Prefer the largest thumbnail when entries expose a list.
+        thumb = e.get('thumbnail')
+        if not thumb:
+            thumbs = e.get('thumbnails') or []
+            if thumbs:
+                thumb = thumbs[-1].get('url')
+        duration = e.get('duration')
+        tracks.append({
+            'id': vid,
+            'title': e.get('title') or vid,
+            'url': e.get('url') or f'https://www.youtube.com/watch?v={vid}',
+            'duration_sec': int(duration) if duration else None,
+            'thumbnail': thumb,
+        })
+
+    return {
+        'title': info.get('title', 'Unknown Playlist'),
+        'count': len(tracks),
+        'thumbnail_url': thumbnail,
+        'tracks': tracks,
+    }
+
+
+_AUDIO_QUALITIES = {
+    # alias        → (yt-dlp codec,  preferred quality string)
+    'audio':    ('mp3',  '0'),    # legacy: best mp3 VBR
+    'mp3-192':  ('mp3',  '192'),
+    'mp3-320':  ('mp3',  '320'),
+    'm4a':      ('m4a',  '0'),    # best m4a (AAC)
+    'flac':     ('flac', '0'),    # lossless
+}
+
+
+def parse_audio_quality(quality: str):
+    """Return (codec, bitrate, ext) for an audio quality preset alias.
+    Raises ValueError if the alias is unknown."""
+    if quality not in _AUDIO_QUALITIES:
+        raise ValueError(f"Unknown audio quality: {quality}")
+    codec, bitrate = _AUDIO_QUALITIES[quality]
+    # For our supported codecs (mp3/m4a/flac) the codec name == file extension.
+    return codec, bitrate, codec
+
+
+def get_single_video_info(url):
+    """
+    Resolve a single-video URL to the metadata we need for library imports
+    *without* downloading. Returns:
+      { 'id', 'title', 'uploader', 'duration_sec', 'thumbnail', 'webpage_url' }
+    Raises if the URL is not a single video (no `id`).
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        **_get_cookie_opts(),
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    vid = info.get('id')
+    if not vid:
+        raise RuntimeError("yt-dlp returned no video id for this URL")
+    duration = info.get('duration')
+    return {
+        'id': vid,
+        'title': info.get('title') or vid,
+        'uploader': info.get('uploader'),
+        'duration_sec': int(duration) if duration else None,
+        'thumbnail': info.get('thumbnail'),
+        'webpage_url': info.get('webpage_url') or url,
+    }
+
+
+def is_audio_quality(format_code: str) -> bool:
+    """Return True if `format_code` matches an audio-quality preset alias."""
+    return format_code in _AUDIO_QUALITIES
+
+
+def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
+    """
+    Download a single video as audio with the given codec+bitrate, writing the
+    final post-processed file to `dest_path`. Creates parent dirs as needed.
+
+    Implementation note: yt-dlp's FFmpegExtractAudio rewrites the file extension
+    *after* download, so we let yt-dlp produce the file in a per-call tmp dir
+    (under dest_path's parent) and then move the result atomically into place.
+    """
+    import tempfile
+
+    ffmpeg = _get_ffmpeg_path()
+    if not ffmpeg:
+        raise RuntimeError(
+            "ffmpeg is required for audio extraction but was not found on PATH"
+        )
+
+    parent_dir = os.path.dirname(dest_path)
+    os.makedirs(parent_dir, exist_ok=True)
+
+    work_dir = tempfile.mkdtemp(prefix="ytdl_track_", dir=parent_dir)
+
+    def _hook(d):
+        if on_progress is None or d.get('status') != 'downloading':
+            return
+        try:
+            downloaded = d.get('downloaded_bytes') or 0
+            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+            if total:
+                on_progress(downloaded / total * 100)
+        except (ValueError, ZeroDivisionError):
+            pass
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': os.path.join(work_dir, 'track.%(ext)s'),
+        'progress_hooks': [_hook],
+        'restrictfilenames': True,
+        'ffmpeg_location': ffmpeg,
+        'postprocessors': [
+            {'key': 'FFmpegExtractAudio', 'preferredcodec': codec, 'preferredquality': bitrate},
+            {'key': 'FFmpegMetadata', 'add_metadata': True},
+        ],
+        **_get_cookie_opts(),
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        produced = None
+        for fname in os.listdir(work_dir):
+            if fname.startswith('track.'):
+                produced = os.path.join(work_dir, fname)
+                break
+        if not produced or not os.path.isfile(produced):
+            raise RuntimeError("ffmpeg produced no audio file")
+
+        # Move atomically into place (same filesystem since work_dir is a child
+        # of parent_dir).
+        if os.path.exists(dest_path):
+            os.remove(dest_path)
+        os.replace(produced, dest_path)
+        return dest_path
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 def download_playlist(url, quality, output_folder, on_progress=None, on_video_start=None):
     """
     Download all videos in a playlist.
 
-    quality: 'best' | '2160' | '1440' | '1080' | '720' | '480' | '360' | 'audio'
+    quality:
+      Video:  'best' | '2160' | '1440' | '1080' | '720' | '480' | '360'
+      Audio:  'audio' | 'mp3-192' | 'mp3-320' | 'm4a' | 'flac'
     on_progress(percent)            — current video download progress 0-100
     on_video_start(index, total, title) — called when each new video starts
     """
     ffmpeg = _get_ffmpeg_path()
+    is_audio = quality in _AUDIO_QUALITIES
 
     _fmt = {
         'best':  'bestvideo[ext=mp4]+bestaudio/best',
@@ -388,14 +579,14 @@ def download_playlist(url, quality, output_folder, on_progress=None, on_video_st
         '720':   'bestvideo[height<=720][ext=mp4]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]',
         '480':   'bestvideo[height<=480][ext=mp4]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]',
         '360':   'bestvideo[height<=360][ext=mp4]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]',
-        'audio': 'bestaudio/best',
     }
-    fmt = _fmt.get(quality, _fmt['best'])
+    fmt = 'bestaudio/best' if is_audio else _fmt.get(quality, _fmt['best'])
 
     postprocessors = []
-    if quality == 'audio' and ffmpeg:
+    if is_audio and ffmpeg:
+        codec, pref_q = _AUDIO_QUALITIES[quality]
         postprocessors = [
-            {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '0'},
+            {'key': 'FFmpegExtractAudio', 'preferredcodec': codec, 'preferredquality': pref_q},
             {'key': 'FFmpegMetadata', 'add_metadata': True},
         ]
 
@@ -431,7 +622,7 @@ def download_playlist(url, quality, output_folder, on_progress=None, on_video_st
 
     if ffmpeg:
         ydl_opts['ffmpeg_location'] = ffmpeg
-        if quality != 'audio':
+        if not is_audio:
             ydl_opts['merge_output_format'] = 'mp4'
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:

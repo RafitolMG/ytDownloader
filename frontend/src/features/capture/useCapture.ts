@@ -4,6 +4,7 @@ import { api } from '@/shared/api/client'
 import type {
   FormatInfo,
   JobStatus,
+  PlaylistTrack,
   ResolutionsResponse,
   WsEvent,
 } from '@/shared/api/types'
@@ -33,15 +34,28 @@ const EMPTY_META: CaptureMetadata = {
 export function useCapture() {
   const queryClient = useQueryClient()
   const [url, setUrl] = useState('')
+  // The URL last analyzed successfully. Diverges from `url` while the user is
+  // typing something new in the input — the page uses that divergence to hide
+  // the previous video's metadata so it doesn't bleed through the dropdown.
+  const [committedUrl, setCommittedUrl] = useState('')
   const [phase, setPhase] = useState<Phase>('idle')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
   const [formats, setFormats] = useState<FormatInfo[]>([])
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
   const [meta, setMeta] = useState<CaptureMetadata>(EMPTY_META)
+  const [playlistTracks, setPlaylistTracks] = useState<PlaylistTrack[]>([])
 
   const [selectedFormat, setSelectedFormat] = useState<FormatInfo | null>(null)
-  const [playlistQuality, setPlaylistQuality] = useState('audio')
+  // Mutually exclusive with selectedFormat — picking one clears the other.
+  // When set, the download is routed through the library import flow instead
+  // of producing a file the user must save.
+  const [selectedAudio, setSelectedAudio] = useState<string | null>(null)
+  const [playlistQuality, setPlaylistQuality] = useState('mp3-192')
+  /** True after a `done` event whose `filename` was null — meaning the job
+   * landed in the library rather than producing a downloadable file. Drives
+   * the "view library" CTA on the capture page. */
+  const [completedAsImport, setCompletedAsImport] = useState(false)
 
   const [jobId, setJobId] = useState<string | null>(null)
   const [status, setStatus] = useState<JobStatus | null>(null)
@@ -56,7 +70,11 @@ export function useCapture() {
     setFormats([])
     setThumbnailUrl(null)
     setMeta(EMPTY_META)
+    setPlaylistTracks([])
     setSelectedFormat(null)
+    setSelectedAudio(null)
+    setCompletedAsImport(false)
+    setCommittedUrl('')
     setJobId(null)
     setStatus(null)
     setProgress(0)
@@ -65,22 +83,33 @@ export function useCapture() {
     wsRef.current = null
   }, [])
 
-  const analyze = useCallback(async () => {
-    if (!url.trim()) return
+  const analyze = useCallback(async (overrideUrl?: string) => {
+    const target = (overrideUrl ?? url).trim()
+    if (!target) return
     setPhase('analyzing')
     setErrorMsg(null)
     try {
-      const res: ResolutionsResponse = await api.resolutions(url.trim())
+      const res: ResolutionsResponse = await api.resolutions(target)
       if ('is_playlist' in res && res.is_playlist) {
-        setMeta({ ...EMPTY_META, is_playlist: true })
+        setMeta({
+          ...EMPTY_META,
+          is_playlist: true,
+          playlist_title: res.title,
+          playlist_count: res.count,
+          thumbnail_url: res.thumbnail_url ?? null,
+        })
+        setPlaylistTracks(res.tracks ?? [])
+        setThumbnailUrl(res.thumbnail_url ?? null)
         setFormats([])
-        setThumbnailUrl(null)
+        setCommittedUrl(target)
         setPhase('ready')
       } else if ('formats' in res) {
         setFormats(res.formats)
         setThumbnailUrl(res.thumbnail_url ?? null)
         setMeta({ ...EMPTY_META })
+        setPlaylistTracks([])
         setSelectedFormat(res.formats[0] ?? null)
+        setCommittedUrl(target)
         setPhase('ready')
       } else {
         throw new Error('Unexpected /api/resolutions response.')
@@ -142,8 +171,16 @@ export function useCapture() {
             setProgress(100)
             setPhase('done')
             queryClient.invalidateQueries({ queryKey: ['jobs'] })
-            // Trigger the browser download
-            window.location.href = api.fileUrl(id)
+            queryClient.invalidateQueries({ queryKey: ['library'] })
+            // Video downloads still produce a file the user must save.
+            // Library imports (playlist + single-video audio) emit
+            // `filename: null` — the page surfaces a "View library" CTA
+            // instead of a browser download.
+            if (data.filename) {
+              window.location.href = api.fileUrl(id)
+            } else {
+              setCompletedAsImport(true)
+            }
             ws.close()
             break
           case 'error':
@@ -174,6 +211,7 @@ export function useCapture() {
         setPhase('downloading')
         setStatus('queued')
         setProgress(0)
+        setCompletedAsImport(false)
         const { job_id } = await api.downloadPlaylist(url.trim(), playlistQuality)
         setJobId(job_id)
         subscribeWs(job_id)
@@ -184,17 +222,21 @@ export function useCapture() {
       }
       return
     }
-    if (!selectedFormat) return
+    if (!selectedFormat && !selectedAudio) return
     try {
       setPhase('downloading')
       setStatus('queued')
       setProgress(0)
-      const { job_id } = await api.download({
-        url: url.trim(),
-        format_code: selectedFormat.format_code,
-        resolution: selectedFormat.resolution,
-        ext: selectedFormat.ext,
-      })
+      setCompletedAsImport(false)
+      const payload = selectedAudio
+        ? { url: url.trim(), format_code: selectedAudio }
+        : {
+            url: url.trim(),
+            format_code: selectedFormat!.format_code,
+            resolution: selectedFormat!.resolution,
+            ext: selectedFormat!.ext,
+          }
+      const { job_id } = await api.download(payload)
       setJobId(job_id)
       subscribeWs(job_id)
       queryClient.invalidateQueries({ queryKey: ['jobs'] })
@@ -202,7 +244,7 @@ export function useCapture() {
       setErrorMsg(e instanceof Error ? e.message : String(e))
       setPhase('error')
     }
-  }, [meta.is_playlist, playlistQuality, queryClient, selectedFormat, subscribeWs, url])
+  }, [meta.is_playlist, playlistQuality, queryClient, selectedAudio, selectedFormat, subscribeWs, url])
 
   const abort = useCallback(async () => {
     if (!jobId) return
@@ -215,21 +257,37 @@ export function useCapture() {
 
   useEffect(() => () => wsRef.current?.close(), [])
 
+  // Selection helpers that keep video format and audio preset mutually
+  // exclusive — picking one always clears the other.
+  const selectFormat = useCallback((f: FormatInfo) => {
+    setSelectedFormat(f)
+    setSelectedAudio(null)
+  }, [])
+  const selectAudio = useCallback((q: string) => {
+    setSelectedAudio(q)
+    setSelectedFormat(null)
+  }, [])
+
   return {
     url,
     setUrl,
+    committedUrl,
     phase,
     errorMsg,
     formats,
     thumbnailUrl,
     meta,
+    playlistTracks,
     selectedFormat,
-    selectFormat: setSelectedFormat,
+    selectedAudio,
+    selectFormat,
+    selectAudio,
     playlistQuality,
     setPlaylistQuality,
     status,
     progress,
     trackInfo,
+    completedAsImport,
     analyze,
     startDownload,
     abort,

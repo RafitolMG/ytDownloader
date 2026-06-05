@@ -7,15 +7,15 @@ type Props = {
   thumbnailUrl: string | null
   selected: FormatInfo | null
   onSelect: (f: FormatInfo) => void
-  playlistQuality: string
-  onPlaylistQualityChange: (q: string) => void
+  selectedAudio: string | null
+  onSelectAudio: (q: string) => void
 }
 
-const PLAYLIST_QUALITIES = [
-  { value: 'audio', label: 'mp3' },
-  { value: '720', label: '720p' },
-  { value: '1080', label: '1080p' },
-  { value: 'best', label: 'best' },
+const AUDIO_PRESETS = [
+  { value: 'mp3-192', label: 'mp3 · 192', sub: 'standard' },
+  { value: 'mp3-320', label: 'mp3 · 320', sub: 'high' },
+  { value: 'm4a', label: 'm4a (aac)', sub: 'apple-friendly' },
+  { value: 'flac', label: 'flac', sub: 'lossless' },
 ]
 
 export function VideoMetadata({
@@ -24,10 +24,9 @@ export function VideoMetadata({
   thumbnailUrl,
   selected,
   onSelect,
-  playlistQuality,
-  onPlaylistQualityChange,
+  selectedAudio,
+  onSelectAudio,
 }: Props) {
-  const isPlaylist = meta.is_playlist
   return (
     <section className="grid grid-cols-1 md:grid-cols-[280px_1fr] gap-6 mb-6">
       {/* Thumbnail */}
@@ -68,81 +67,64 @@ export function VideoMetadata({
         <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
           // signal acquired
         </div>
-
-        {isPlaylist ? (
-          <>
-            <h2 className="font-sans text-xl font-semibold text-ink-hi leading-tight mb-1">
-              ⊹ {meta.playlist_title ?? 'Playlist detected'} ⊹
-            </h2>
-            <div className="font-pixel text-lg text-cool mb-4">
-              {meta.playlist_count != null
-                ? `${meta.playlist_count} tracks`
-                : 'preparing tracks…'}
-            </div>
-            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
-              playlist quality
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {PLAYLIST_QUALITIES.map((q) => (
-                <button
-                  key={q.value}
-                  type="button"
-                  onClick={() => onPlaylistQualityChange(q.value)}
-                  className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
-                    playlistQuality === q.value
-                      ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
-                      : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
-                  }`}
-                >
-                  <div className="text-xl leading-none">
-                    {playlistQuality === q.value ? '◆' : '◇'} {q.label}
-                  </div>
-                  <div className="text-sm text-ink-lo mt-1">
-                    {q.value === 'audio' ? 'zip of mp3s' : `zip of ${q.label} mp4s`}
-                  </div>
-                </button>
-              ))}
-            </div>
-          </>
+        <h2 className="font-sans text-xl font-semibold text-ink-hi leading-tight mb-1">
+          ⊹ {meta.title ?? 'awaiting signal…'} ⊹
+        </h2>
+        <div className="font-pixel text-lg text-cool mb-4">
+          {meta.uploader ?? '—'}
+          {meta.duration_sec ? ` • ${fmtDuration(meta.duration_sec)}` : ''}
+        </div>
+        <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
+          ▸ video · download as file
+        </div>
+        {formats.length === 0 ? (
+          <div className="font-pixel text-ink-lo">no formats yet</div>
         ) : (
-          <>
-            <h2 className="font-sans text-xl font-semibold text-ink-hi leading-tight mb-1">
-              ⊹ {meta.title ?? 'awaiting signal…'} ⊹
-            </h2>
-            <div className="font-pixel text-lg text-cool mb-4">
-              {meta.uploader ?? '—'}
-              {meta.duration_sec ? ` • ${fmtDuration(meta.duration_sec)}` : ''}
-            </div>
-            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
-              select format
-            </div>
-            {formats.length === 0 ? (
-              <div className="font-pixel text-ink-lo">no formats yet</div>
-            ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {formats.map((f) => (
-                  <button
-                    key={f.format_code}
-                    type="button"
-                    onClick={() => onSelect(f)}
-                    className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
-                      selected?.format_code === f.format_code
-                        ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
-                        : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
-                    }`}
-                  >
-                    <div className="text-xl leading-none">
-                      {selected?.format_code === f.format_code ? '◆' : '◇'} {f.resolution}
-                    </div>
-                    <div className="text-sm text-ink-lo mt-1">
-                      {f.ext} · {f.size_display}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {formats.map((f) => (
+              <button
+                key={f.format_code}
+                type="button"
+                onClick={() => onSelect(f)}
+                className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
+                  selected?.format_code === f.format_code
+                    ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
+                    : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
+                }`}
+              >
+                <div className="text-xl leading-none">
+                  {selected?.format_code === f.format_code ? '◆' : '◇'} {f.resolution}
+                </div>
+                <div className="text-sm text-ink-lo mt-1">
+                  {f.ext} · {f.size_display}
+                </div>
+              </button>
+            ))}
+          </div>
         )}
+
+        <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mt-5 mb-2">
+          ♪ audio · add to library
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {AUDIO_PRESETS.map((q) => (
+            <button
+              key={q.value}
+              type="button"
+              onClick={() => onSelectAudio(q.value)}
+              className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
+                selectedAudio === q.value
+                  ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
+                  : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
+              }`}
+            >
+              <div className="text-lg leading-none">
+                {selectedAudio === q.value ? '◆' : '◇'} {q.label}
+              </div>
+              <div className="text-sm text-ink-lo mt-1">{q.sub}</div>
+            </button>
+          ))}
+        </div>
       </div>
     </section>
   )

@@ -64,6 +64,17 @@ if [ ! -f "$REQ_STAMP" ] || [ "$(cat "$REQ_STAMP")" != "$CURRENT_HASH" ]; then
   echo "  · deps installed"
 fi
 
+# Source backend/.env if present so vars like DEV_AUTH_BYPASS, HOMEAUTH_*,
+# SESSION_COOKIE_* propagate to the uvicorn process without having to remember
+# `export` on every shell. The file is gitignored.
+if [ -f "$ROOT/backend/.env" ]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$ROOT/backend/.env"
+  set +a
+  echo "  · sourced backend/.env"
+fi
+
 if is_up "http://localhost:8000/"; then
   echo "  · already up on :8000"
 else
