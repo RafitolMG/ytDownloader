@@ -1,4 +1,11 @@
-import type { JobRow, ResolutionsResponse } from './types'
+import type {
+  HistoryResponse,
+  JobRow,
+  LibraryResponse,
+  ResolutionsResponse,
+  SearchResponse,
+  SuggestResponse,
+} from './types'
 
 export class ApiError extends Error {
   status: number
@@ -89,4 +96,30 @@ export const api = {
 
   authConfig: () =>
     json<{ homeauth_base_url: string; register_url: string }>('/api/auth/config'),
+
+  // ── search ──
+  suggest: (q: string, hl = 'es') =>
+    json<SuggestResponse>(
+      `/api/search/suggest?q=${encodeURIComponent(q)}&hl=${encodeURIComponent(hl)}`,
+    ),
+
+  search: (q: string, limit = 20) =>
+    json<SearchResponse>(
+      `/api/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
+
+  history: (limit = 20) => json<HistoryResponse>(`/api/history?limit=${limit}`),
+
+  // ── music library ──
+  library: (limit = 500) =>
+    json<LibraryResponse>(`/api/library?limit=${limit}`),
+
+  removeFromLibrary: (videoId: string, codec: string, bitrate: string) =>
+    json<{ ok: true; orphaned: boolean }>(
+      `/api/library/${encodeURIComponent(videoId)}?codec=${encodeURIComponent(codec)}&bitrate=${encodeURIComponent(bitrate)}`,
+      { method: 'DELETE' },
+    ),
+
+  trackStreamUrl: (videoId: string, codec: string, bitrate: string) =>
+    `/api/track/${encodeURIComponent(videoId)}/stream?codec=${encodeURIComponent(codec)}&bitrate=${encodeURIComponent(bitrate)}`,
 }

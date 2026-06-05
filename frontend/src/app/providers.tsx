@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { AuthProvider } from '@/features/auth/AuthProvider'
+import { AudioPlayerProvider } from '@/features/player/AudioPlayerProvider'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -17,7 +18,9 @@ export function AppProviders({ children }: { children: ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <AuthProvider>{children}</AuthProvider>
+        <AuthProvider>
+          <AudioPlayerProvider>{children}</AudioPlayerProvider>
+        </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>
   )
