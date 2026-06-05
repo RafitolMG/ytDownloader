@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom'
 import CapturePage from '@/pages/CapturePage'
 import QueuePage from '@/pages/QueuePage'
+import LibraryPage from '@/pages/LibraryPage'
 import LoginPage from '@/pages/LoginPage'
 import { RequireAuth } from '@/features/auth/RequireAuth'
 
@@ -21,6 +22,14 @@ export function AppRouter() {
         element={
           <RequireAuth>
             <QueuePage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/library"
+        element={
+          <RequireAuth>
+            <LibraryPage />
           </RequireAuth>
         }
       />

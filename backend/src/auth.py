@@ -81,6 +81,14 @@ def _refresh_session(session: dict) -> dict:
     return refreshed
 
 
+_DEV_USER = CurrentUser(
+    session_id="dev-session",
+    user_id="dev-user",
+    username="dev",
+    role=db.ROLE_ADMIN,
+)
+
+
 def current_user(ytdl_session: str | None = Cookie(default=None, alias=config.SESSION_COOKIE_NAME)) -> CurrentUser:
     """
     FastAPI dependency. Use as:
@@ -89,6 +97,9 @@ def current_user(ytdl_session: str | None = Cookie(default=None, alias=config.SE
         def whoami(user: CurrentUser = Depends(current_user)):
             return user
     """
+    if config.DEV_AUTH_BYPASS:
+        return _DEV_USER
+
     if not ytdl_session:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="not authenticated")
 
