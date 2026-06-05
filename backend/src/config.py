@@ -57,3 +57,10 @@ _DEFAULT_LIBRARY_DIR = os.path.join(
     "library",
 )
 LIBRARY_DIR: str = _env("LIBRARY_DIR", _DEFAULT_LIBRARY_DIR)
+
+# yt-dlp cookies file. YouTube blocks datacenter IPs (Coolify / VPS) without an
+# authenticated session, so prod deployments must mount a Netscape-format
+# cookies.txt exported from a logged-in browser. Empty string = no cookies
+# (fine for local dev on a residential IP). When set, the file must exist or
+# yt-dlp will error on every job.
+YT_COOKIES_FILE: str = _env("YT_COOKIES_FILE", "")
