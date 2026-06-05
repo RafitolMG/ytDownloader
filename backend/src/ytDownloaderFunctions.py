@@ -16,13 +16,33 @@ def _get_ffmpeg_path():
     return shutil.which('ffmpeg')
 
 
+_COOKIES_DATA_PATH: str | None = None
+
+
 def _resolve_cookies_file() -> str | None:
     """Return the cookies.txt path to use, or None if no cookies are configured.
 
     Priority:
-      1. YT_COOKIES_FILE env var (prod: typically a persistent volume in Coolify).
-      2. cookies.txt in the project root (dev convenience).
+      1. YT_COOKIES_DATA env var (raw cookies.txt contents — written once to a
+         tempfile so yt-dlp can read it via 'cookiefile').
+      2. YT_COOKIES_FILE env var (prod with a mounted file).
+      3. cookies.txt in the project root (dev convenience).
     """
+    global _COOKIES_DATA_PATH
+    data = os.environ.get('YT_COOKIES_DATA', '')
+    if data:
+        if _COOKIES_DATA_PATH is None or not os.path.isfile(_COOKIES_DATA_PATH):
+            import tempfile
+            fd, path = tempfile.mkstemp(prefix='yt-cookies-', suffix='.txt')
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    f.write(data)
+            except Exception:
+                os.unlink(path)
+                raise
+            _COOKIES_DATA_PATH = path
+        return _COOKIES_DATA_PATH
+
     env_path = os.environ.get('YT_COOKIES_FILE', '').strip()
     if env_path and os.path.isfile(env_path):
         return env_path
