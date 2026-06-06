@@ -443,6 +443,7 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
             playlist_title = info.get('title')
             imported = 0
             reused = 0
+            skipped = 0
 
             for idx, entry in enumerate(tracks, start=1):
                 if job_id in _cancelled:
@@ -478,36 +479,53 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
                     overall = _base + (pct / _total)
                     progress_queue.put({"type": "progress", "value": round(overall, 1)})
 
-                ytDownloaderFunctions.download_track_audio(
-                    entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
-                    codec, bitrate, dest_path,
-                    on_progress=on_track_progress,
-                )
+                # Per-track try/except: one removed/private/region-locked
+                # video shouldn't abort the entire playlist. _Cancelled still
+                # propagates so the user's abort works.
+                try:
+                    ytDownloaderFunctions.download_track_audio(
+                        entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
+                        codec, bitrate, dest_path,
+                        on_progress=on_track_progress,
+                    )
 
-                file_size = os.path.getsize(dest_path)
-                sha256 = _sha256_file(dest_path)
+                    file_size = os.path.getsize(dest_path)
+                    sha256 = _sha256_file(dest_path)
 
-                db.register_track(
-                    video_id=video_id,
-                    codec=codec,
-                    bitrate=bitrate,
-                    title=title,
-                    artist=entry.get('uploader'),
-                    duration_sec=entry.get('duration_sec'),
-                    thumbnail_url=entry.get('thumbnail'),
-                    source_url=entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
-                    file_path=dest_path,
-                    file_size=file_size,
-                    sha256=sha256,
-                )
-                db.link_owner(
-                    owner_id=user.user_id,
-                    video_id=video_id,
-                    codec=codec,
-                    bitrate=bitrate,
-                    source_playlist_title=playlist_title,
-                )
-                imported += 1
+                    db.register_track(
+                        video_id=video_id,
+                        codec=codec,
+                        bitrate=bitrate,
+                        title=title,
+                        artist=entry.get('uploader'),
+                        duration_sec=entry.get('duration_sec'),
+                        thumbnail_url=entry.get('thumbnail'),
+                        source_url=entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
+                        file_path=dest_path,
+                        file_size=file_size,
+                        sha256=sha256,
+                    )
+                    db.link_owner(
+                        owner_id=user.user_id,
+                        video_id=video_id,
+                        codec=codec,
+                        bitrate=bitrate,
+                        source_playlist_title=playlist_title,
+                    )
+                    imported += 1
+                except _Cancelled:
+                    raise
+                except Exception as track_err:
+                    traceback.print_exc()
+                    skipped += 1
+                    progress_queue.put({
+                        "type": "track_skipped",
+                        "index": idx,
+                        "total": total,
+                        "title": title,
+                        "message": str(track_err),
+                    })
+
                 db.update_progress(job_id, idx / total * 100)
 
             db.finish(job_id, size_bytes=None)
@@ -516,6 +534,7 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
                 "filename": None,
                 "imported": imported,
                 "reused": reused,
+                "skipped": skipped,
             })
 
         except _Cancelled:
