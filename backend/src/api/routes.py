@@ -75,10 +75,19 @@ def _init_db():
     # Surface the resolution outcome at startup so prod misconfig is loud.
     resolved = ytDownloaderFunctions._resolve_cookies_file()
     if resolved:
-        if config.YT_COOKIES_DATA:
-            log.info("yt-dlp cookies: loaded from YT_COOKIES_DATA env var (%d bytes)", len(config.YT_COOKIES_DATA))
+        if config.YT_COOKIES_DATA and ytDownloaderFunctions._COOKIES_DATA_PATH:
+            log.info(
+                "yt-dlp cookies: loaded from YT_COOKIES_DATA env var (base64, %d bytes encoded)",
+                len(config.YT_COOKIES_DATA),
+            )
         else:
             log.info("yt-dlp cookies: loaded from %s", resolved)
+    elif config.YT_COOKIES_DATA and ytDownloaderFunctions._COOKIES_DATA_ERROR:
+        log.warning(
+            "yt-dlp cookies: YT_COOKIES_DATA could not be decoded (%s). "
+            "It must be base64-encoded — `base64 -w0 cookies.txt` and paste the output.",
+            ytDownloaderFunctions._COOKIES_DATA_ERROR,
+        )
     elif config.YT_COOKIES_FILE:
         log.warning(
             "yt-dlp cookies: YT_COOKIES_FILE=%s is set but the file does not exist — "

@@ -17,31 +17,43 @@ def _get_ffmpeg_path():
 
 
 _COOKIES_DATA_PATH: str | None = None
+_COOKIES_DATA_ERROR: str | None = None
 
 
 def _resolve_cookies_file() -> str | None:
     """Return the cookies.txt path to use, or None if no cookies are configured.
 
     Priority:
-      1. YT_COOKIES_DATA env var (raw cookies.txt contents — written once to a
-         tempfile so yt-dlp can read it via 'cookiefile').
+      1. YT_COOKIES_DATA env var — base64-encoded cookies.txt. Decoded once
+         to a tempfile so yt-dlp can read it via 'cookiefile'. base64 keeps
+         the value on a single line with no shell-special characters, which
+         matters because Coolify (and most platforms) source env files as
+         bash and dotted tab-separated lines would be parsed as commands.
       2. YT_COOKIES_FILE env var (prod with a mounted file).
       3. cookies.txt in the project root (dev convenience).
     """
-    global _COOKIES_DATA_PATH
-    data = os.environ.get('YT_COOKIES_DATA', '')
+    global _COOKIES_DATA_PATH, _COOKIES_DATA_ERROR
+    data = os.environ.get('YT_COOKIES_DATA', '').strip()
     if data:
         if _COOKIES_DATA_PATH is None or not os.path.isfile(_COOKIES_DATA_PATH):
+            import base64
             import tempfile
-            fd, path = tempfile.mkstemp(prefix='yt-cookies-', suffix='.txt')
             try:
-                with os.fdopen(fd, 'w') as f:
-                    f.write(data)
-            except Exception:
-                os.unlink(path)
-                raise
-            _COOKIES_DATA_PATH = path
-        return _COOKIES_DATA_PATH
+                content = base64.b64decode(data, validate=True).decode('utf-8')
+            except Exception as e:
+                _COOKIES_DATA_ERROR = f"base64 decode failed: {e}"
+            else:
+                _COOKIES_DATA_ERROR = None
+                fd, path = tempfile.mkstemp(prefix='yt-cookies-', suffix='.txt')
+                try:
+                    with os.fdopen(fd, 'w') as f:
+                        f.write(content)
+                except Exception:
+                    os.unlink(path)
+                    raise
+                _COOKIES_DATA_PATH = path
+        if _COOKIES_DATA_PATH and os.path.isfile(_COOKIES_DATA_PATH):
+            return _COOKIES_DATA_PATH
 
     env_path = os.environ.get('YT_COOKIES_FILE', '').strip()
     if env_path and os.path.isfile(env_path):
