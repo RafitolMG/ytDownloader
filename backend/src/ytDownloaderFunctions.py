@@ -511,22 +511,21 @@ def get_single_video_info(url):
       { 'id', 'title', 'uploader', 'duration_sec', 'thumbnail', 'webpage_url' }
     Raises if the URL is not a single video (no `id`).
     """
-    # We only ever follow this path to import audio into the library, so pin
-    # the format selector to audio-only. Without it yt-dlp applies its default
-    # (`bestvideo*+bestaudio/best`) which on YouTube — especially from a
-    # datacenter IP — fails to resolve a mergeable pair and raises
-    # "Requested format is not available", even though we're not downloading
-    # here. Matching `download_track_audio`'s selector keeps the two calls
-    # consistent.
+    # Metadata-only call: pass `process=False` to skip yt-dlp's format-selection
+    # phase entirely. Otherwise `process_video_result` raises "Requested format
+    # is not available" on YouTube tracks whose available formats none of the
+    # default selectors can resolve (audio-only music entries, weird codec
+    # combos from a datacenter IP, etc.) — even though we're not downloading.
+    # The raw `_real_extract` result still carries id/title/uploader/duration/
+    # thumbnail/webpage_url, which is all we need.
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
-        'format': 'bestaudio/best',
         **_get_cookie_opts(),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+        info = ydl.extract_info(url, download=False, process=False)
     vid = info.get('id')
     if not vid:
         raise RuntimeError("yt-dlp returned no video id for this URL")
