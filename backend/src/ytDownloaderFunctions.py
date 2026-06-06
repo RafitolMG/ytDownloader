@@ -76,17 +76,20 @@ def _get_cookie_opts() -> dict:
       None if neither source is available — local residential IPs often still
       work without them.
 
-    JS runtime: yt-dlp 2026.3.17's `js_runtimes` default is `['deno']` only,
+    JS runtime: yt-dlp 2026.3.17's default `js_runtimes` only enables Deno,
     so Node is treated as unavailable even when installed. We override with
-    `['deno', 'node']` — Deno gets priority when present (local dev / future
-    images) and Node is the fallback that the container actually ships.
-    Without this override the n-param challenge fails, YouTube serves only
-    image / storyboard formats, and any download breaks with "Requested
-    format is not available". The value must be a flat list of strings (each
-    optionally `RUNTIME:PATH`); passing a dict triggers a NoneType .get error
-    deep inside yt-dlp's runtime selector.
+    both — Deno gets priority when present (local dev / future images) and
+    Node is the fallback that the container actually ships.
+
+    The format in this yt-dlp version is `{runtime: {config}}` (dict of
+    runtime name to config dict). An empty `{}` config means "use the
+    binary from PATH" — that's what we want both for the Node 22 we
+    install via NodeSource in the Dockerfile and for whatever Deno the
+    dev may have locally. Passing a list (the format the CLI parser
+    produces, and the format on master) or `None` as the value triggers
+    400-style errors from yt-dlp before extraction even begins.
     """
-    opts: dict = {'js_runtimes': ['deno', 'node']}
+    opts: dict = {'js_runtimes': {'deno': {}, 'node': {}}}
 
     cookies_file = _resolve_cookies_file()
     if cookies_file:
