@@ -89,7 +89,18 @@ def _get_cookie_opts() -> dict:
     produces, and the format on master) or `None` as the value triggers
     400-style errors from yt-dlp before extraction even begins.
     """
-    opts: dict = {'js_runtimes': {'deno': {}, 'node': {}}}
+    # `player_client`: try multiple YouTube player clients so that "Topic"
+    # channel uploads (auto-generated YouTube Music tracks like
+    # `<Artist> - Topic`) resolve. The default `web` client often returns
+    # "Video unavailable" for them; `web_music` is the YouTube Music client
+    # that does resolve them. `ios` and `tv` are extra fallbacks for cases
+    # where `web` is blocked by anti-bot.
+    opts: dict = {
+        'js_runtimes': {'deno': {}, 'node': {}},
+        'extractor_args': {
+            'youtube': {'player_client': ['default', 'web_music', 'ios', 'tv']},
+        },
+    }
 
     cookies_file = _resolve_cookies_file()
     if cookies_file:
@@ -488,6 +499,10 @@ def get_playlist_tracks(url):
         tracks.append({
             'id': vid,
             'title': e.get('title') or vid,
+            # YouTube Music tracks expose a canonical `artist`; fall back to
+            # `uploader`/`channel` for normal videos. Without this the track
+            # lands in the library with artist=None.
+            'uploader': e.get('artist') or e.get('uploader') or e.get('channel'),
             'url': e.get('url') or f'https://www.youtube.com/watch?v={vid}',
             'duration_sec': int(duration) if duration else None,
             'thumbnail': thumb,
@@ -550,7 +565,10 @@ def get_single_video_info(url):
     return {
         'id': vid,
         'title': info.get('title') or vid,
-        'uploader': info.get('uploader'),
+        # YouTube Music tracks set a canonical `artist`; regular videos only
+        # have `uploader` / `channel`. Try in that order so the library shows
+        # the most accurate name.
+        'uploader': info.get('artist') or info.get('uploader') or info.get('channel'),
         'duration_sec': int(duration) if duration else None,
         'thumbnail': info.get('thumbnail'),
         'webpage_url': info.get('webpage_url') or url,
