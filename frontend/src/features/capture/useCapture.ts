@@ -31,6 +31,21 @@ const EMPTY_META: CaptureMetadata = {
   playlist_count: null,
 }
 
+// Programmatic anchor-click is more reliable than `window.location.href`:
+// setting `location.href` is treated as a navigation that the browser may
+// silently cancel (popup blockers, race with React re-renders, reverse
+// proxies that strip Content-Disposition). The `download` attribute on a
+// same-origin <a> guarantees the response is saved as a file.
+function triggerFileDownload(url: string, suggestedName: string) {
+  const a = document.createElement('a')
+  a.href = url
+  a.download = suggestedName
+  a.style.display = 'none'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
 export function useCapture() {
   const queryClient = useQueryClient()
   const [url, setUrl] = useState('')
@@ -45,17 +60,31 @@ export function useCapture() {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null)
   const [meta, setMeta] = useState<CaptureMetadata>(EMPTY_META)
   const [playlistTracks, setPlaylistTracks] = useState<PlaylistTrack[]>([])
+  /** True when the analyzed single video is detected as music (drives whether
+   * the library option is offered — non-music audio downloads only run via
+   * the file-download flow). Defaults true so playlists and pre-analyze
+   * states don't accidentally hide controls. */
+  const [isMusic, setIsMusic] = useState(true)
 
   const [selectedFormat, setSelectedFormat] = useState<FormatInfo | null>(null)
   // Mutually exclusive with selectedFormat — picking one clears the other.
-  // When set, the download is routed through the library import flow instead
-  // of producing a file the user must save.
+  // When `audioMode === 'library'` the download is routed through the
+  // library import flow; `'file'` produces a downloadable audio file.
   const [selectedAudio, setSelectedAudio] = useState<string | null>(null)
+  const [audioMode, setAudioMode] = useState<'library' | 'file'>('library')
   const [playlistQuality, setPlaylistQuality] = useState('mp3-192')
   /** True after a `done` event whose `filename` was null — meaning the job
    * landed in the library rather than producing a downloadable file. Drives
    * the "view library" CTA on the capture page. */
   const [completedAsImport, setCompletedAsImport] = useState(false)
+  /** Summary numbers from the final `done` event of a playlist/library import.
+   * `skipped` covers tracks the backend couldn't resolve (unavailable, private,
+   * region-locked) — surfaced in the CTA so the user knows the count. */
+  const [importSummary, setImportSummary] = useState<{
+    imported: number
+    reused: number
+    skipped: number
+  } | null>(null)
 
   const [jobId, setJobId] = useState<string | null>(null)
   const [status, setStatus] = useState<JobStatus | null>(null)
@@ -71,9 +100,12 @@ export function useCapture() {
     setThumbnailUrl(null)
     setMeta(EMPTY_META)
     setPlaylistTracks([])
+    setIsMusic(true)
     setSelectedFormat(null)
     setSelectedAudio(null)
+    setAudioMode('library')
     setCompletedAsImport(false)
+    setImportSummary(null)
     setCommittedUrl('')
     setJobId(null)
     setStatus(null)
@@ -101,6 +133,7 @@ export function useCapture() {
         setPlaylistTracks(res.tracks ?? [])
         setThumbnailUrl(res.thumbnail_url ?? null)
         setFormats([])
+        setIsMusic(true)
         setCommittedUrl(target)
         setPhase('ready')
       } else if ('formats' in res) {
@@ -108,7 +141,14 @@ export function useCapture() {
         setThumbnailUrl(res.thumbnail_url ?? null)
         setMeta({ ...EMPTY_META })
         setPlaylistTracks([])
+        setIsMusic(res.is_music)
         setSelectedFormat(res.formats[0] ?? null)
+        // Non-music videos can't go to library — default the audio mode to
+        // file so that if the user does pick an audio preset, it downloads
+        // as a file instead of polluting the library.
+        if (!res.is_music) {
+          setAudioMode('file')
+        }
         setCommittedUrl(target)
         setPhase('ready')
       } else {
@@ -166,6 +206,11 @@ export function useCapture() {
           case 'track':
             setTrackInfo({ index: data.index, total: data.total, title: data.title })
             break
+          case 'track_skipped':
+            // Backend reports a per-track failure but keeps the playlist
+            // running. We don't show each one inline — the final `done`
+            // event aggregates them as `skipped`.
+            break
           case 'done':
             setStatus('done')
             setProgress(100)
@@ -173,13 +218,18 @@ export function useCapture() {
             queryClient.invalidateQueries({ queryKey: ['jobs'] })
             queryClient.invalidateQueries({ queryKey: ['library'] })
             // Video downloads still produce a file the user must save.
-            // Library imports (playlist + single-video audio) emit
-            // `filename: null` — the page surfaces a "View library" CTA
+            // Library imports (playlist + single-video audio without `as_file`)
+            // emit `filename: null` — the page surfaces a "View library" CTA
             // instead of a browser download.
             if (data.filename) {
-              window.location.href = api.fileUrl(id)
+              triggerFileDownload(api.fileUrl(id), data.filename)
             } else {
               setCompletedAsImport(true)
+              setImportSummary({
+                imported: data.imported ?? 0,
+                reused: data.reused ?? 0,
+                skipped: data.skipped ?? 0,
+              })
             }
             ws.close()
             break
@@ -229,7 +279,11 @@ export function useCapture() {
       setProgress(0)
       setCompletedAsImport(false)
       const payload = selectedAudio
-        ? { url: url.trim(), format_code: selectedAudio }
+        ? {
+            url: url.trim(),
+            format_code: selectedAudio,
+            as_file: audioMode === 'file',
+          }
         : {
             url: url.trim(),
             format_code: selectedFormat!.format_code,
@@ -244,7 +298,7 @@ export function useCapture() {
       setErrorMsg(e instanceof Error ? e.message : String(e))
       setPhase('error')
     }
-  }, [meta.is_playlist, playlistQuality, queryClient, selectedAudio, selectedFormat, subscribeWs, url])
+  }, [audioMode, meta.is_playlist, playlistQuality, queryClient, selectedAudio, selectedFormat, subscribeWs, url])
 
   const abort = useCallback(async () => {
     if (!jobId) return
@@ -263,8 +317,9 @@ export function useCapture() {
     setSelectedFormat(f)
     setSelectedAudio(null)
   }, [])
-  const selectAudio = useCallback((q: string) => {
+  const selectAudio = useCallback((q: string, mode: 'library' | 'file' = 'library') => {
     setSelectedAudio(q)
+    setAudioMode(mode)
     setSelectedFormat(null)
   }, [])
 
@@ -280,6 +335,8 @@ export function useCapture() {
     playlistTracks,
     selectedFormat,
     selectedAudio,
+    audioMode,
+    isMusic,
     selectFormat,
     selectAudio,
     playlistQuality,
@@ -288,6 +345,7 @@ export function useCapture() {
     progress,
     trackInfo,
     completedAsImport,
+    importSummary,
     analyze,
     startDownload,
     abort,

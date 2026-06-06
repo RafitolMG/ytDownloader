@@ -116,14 +116,38 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     }
   }, [current])
 
+  /** End-of-queue advancement shared by `next()` and the audio `ended` event.
+   * Behaviour at the tail of the queue:
+   *   - shuffle on  + queue.length > 1 → reshuffle (excluding the just-played
+   *     track from position 0 so it doesn't repeat back-to-back) and continue.
+   *   - shuffle off + repeat 'all'    → loop back to position 0.
+   *   - otherwise                     → stay put.
+   */
+  const advanceOrReshuffle = useCallback(() => {
+    if (pos < 0) return
+    if (pos + 1 < order.length) {
+      setPos(pos + 1)
+      return
+    }
+    if (shuffle && queue.length > 1) {
+      const lastQueueIdx = order[pos]
+      const candidates = Array.from({ length: queue.length }, (_, i) => i)
+        .filter((i) => i !== lastQueueIdx)
+      const reshuffled = shuffleArray(candidates)
+      // Park the just-played at the end of the new rotation so the cycle stays
+      // complete on subsequent wraps.
+      setOrder([...reshuffled, lastQueueIdx])
+      setPos(0)
+      return
+    }
+    if (repeat === 'all') {
+      setPos(0)
+    }
+  }, [order, pos, queue.length, repeat, shuffle])
+
   const next = useCallback(() => {
-    setPos((p) => {
-      if (p < 0) return p
-      if (p + 1 < order.length) return p + 1
-      // At end of queue. Wrap in 'all', otherwise stay put.
-      return repeat === 'all' ? 0 : p
-    })
-  }, [order.length, repeat])
+    advanceOrReshuffle()
+  }, [advanceOrReshuffle])
 
   const prev = useCallback(() => {
     const el = audioRef.current
@@ -225,11 +249,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
             }
             return
           }
-          setPos((p) => {
-            if (p < 0) return p
-            if (p + 1 < order.length) return p + 1
-            return repeat === 'all' ? 0 : p
-          })
+          advanceOrReshuffle()
         }}
         preload="metadata"
         className="hidden"

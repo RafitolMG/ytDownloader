@@ -66,6 +66,10 @@ export type ResolutionsResponse =
       formats: FormatInfo[]
       thumbnail_url: string | null
       ffmpeg_available: boolean
+      /** True when the video looks like a song — categories includes "Music",
+       * uploader is a "- Topic" channel, or YouTube Music metadata is set.
+       * Drives whether the "add to library" audio option is shown. */
+      is_music: boolean
     }
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -138,10 +142,18 @@ export type WsEvent =
   | { type: 'status'; value: JobStatus }
   | { type: 'track'; index: number; total: number; title: string }
   | {
+      type: 'track_skipped'
+      index: number
+      total: number
+      title: string
+      message: string
+    }
+  | {
       type: 'done'
       filename: string | null
       imported?: number
       reused?: number
+      skipped?: number
     }
   | { type: 'error'; message: string }
   | { type: 'cancelled' }

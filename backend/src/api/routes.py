@@ -123,6 +123,10 @@ class DownloadRequest(BaseModel):
     format_code: str
     resolution: str | None = None
     ext: str | None = None
+    # When true and `format_code` is an audio preset, write the result to a
+    # tmp_dir and serve it via /api/file like a video instead of importing
+    # into the user's library.
+    as_file: bool = False
 
 
 class PlaylistDownloadRequest(BaseModel):
@@ -172,20 +176,24 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
     """
     Start a download in a background thread.
 
-    Two flows depending on `format_code`:
-      - Audio preset (mp3-192, mp3-320, m4a, flac): imports the track into
-        the user's music library (shared content-addressed storage with
-        dedup). Emits `done {filename: null}` so the frontend doesn't try to
-        download a file.
+    Three flows depending on `format_code` + `as_file`:
+      - Audio preset (mp3-192, mp3-320, m4a, flac) with `as_file=False`:
+        imports the track into the user's music library (shared content-
+        addressed storage with dedup). Emits `done {filename: null}` so the
+        frontend doesn't try to download a file.
+      - Audio preset with `as_file=True`: writes the extracted audio to
+        tmp_dir and serves it via /api/file like a video — no library row.
       - Anything else: standard single-video download → tmp_dir → file served
         via /api/file/{job_id}.
     """
-    is_audio_import = ytDownloaderFunctions.is_audio_quality(body.format_code)
+    is_audio_preset = ytDownloaderFunctions.is_audio_quality(body.format_code)
+    is_audio_import = is_audio_preset and not body.as_file
+    is_audio_file = is_audio_preset and body.as_file
 
     job_id = str(uuid.uuid4())
     progress_queue: queue.Queue = queue.Queue()
-    # For audio imports we don't need a tmp_dir at the job level — the per-track
-    # downloader manages its own scratch space under LIBRARY_DIR.
+    # For library imports we don't need a tmp_dir at the job level — the
+    # per-track downloader manages its own scratch space under LIBRARY_DIR.
     tmp_dir = None if is_audio_import else tempfile.mkdtemp(prefix="ytdl_")
     _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": tmp_dir}
 
@@ -364,7 +372,48 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
             db.fail(job_id, str(e))
             progress_queue.put({"type": "error", "message": str(e)})
 
-    target = run_audio_import if is_audio_import else run
+    def run_audio_file():
+        try:
+            try:
+                info = ytDownloaderFunctions.get_basic_info(body.url)
+                db.set_metadata(job_id, **info)
+                progress_queue.put({"type": "metadata", **info})
+            except Exception:
+                traceback.print_exc()
+
+            db.mark_started(job_id)
+            on_progress = _throttled_progress(job_id, progress_queue)
+
+            codec, bitrate, _ext = ytDownloaderFunctions.parse_audio_quality(body.format_code)
+            final_path = ytDownloaderFunctions.download_audio_file(
+                body.url, codec, bitrate, tmp_dir, on_progress,
+            )
+
+            _jobs[job_id]["file_path"] = final_path
+            size = os.path.getsize(final_path)
+            db.finish(job_id, size_bytes=size)
+            progress_queue.put({"type": "done", "filename": os.path.basename(final_path)})
+
+        except _Cancelled:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            _jobs.pop(job_id, None)
+            _cancelled.discard(job_id)
+            db.cancel(job_id)
+            progress_queue.put({"type": "cancelled"})
+
+        except Exception as e:
+            traceback.print_exc()
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            _jobs.pop(job_id, None)
+            db.fail(job_id, str(e))
+            progress_queue.put({"type": "error", "message": str(e)})
+
+    if is_audio_import:
+        target = run_audio_import
+    elif is_audio_file:
+        target = run_audio_file
+    else:
+        target = run
     threading.Thread(target=target, daemon=True).start()
     return {"job_id": job_id}
 
@@ -443,6 +492,7 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
             playlist_title = info.get('title')
             imported = 0
             reused = 0
+            skipped = 0
 
             for idx, entry in enumerate(tracks, start=1):
                 if job_id in _cancelled:
@@ -478,36 +528,53 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
                     overall = _base + (pct / _total)
                     progress_queue.put({"type": "progress", "value": round(overall, 1)})
 
-                ytDownloaderFunctions.download_track_audio(
-                    entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
-                    codec, bitrate, dest_path,
-                    on_progress=on_track_progress,
-                )
+                # Per-track try/except: one removed/private/region-locked
+                # video shouldn't abort the entire playlist. _Cancelled still
+                # propagates so the user's abort works.
+                try:
+                    ytDownloaderFunctions.download_track_audio(
+                        entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
+                        codec, bitrate, dest_path,
+                        on_progress=on_track_progress,
+                    )
 
-                file_size = os.path.getsize(dest_path)
-                sha256 = _sha256_file(dest_path)
+                    file_size = os.path.getsize(dest_path)
+                    sha256 = _sha256_file(dest_path)
 
-                db.register_track(
-                    video_id=video_id,
-                    codec=codec,
-                    bitrate=bitrate,
-                    title=title,
-                    artist=entry.get('uploader'),
-                    duration_sec=entry.get('duration_sec'),
-                    thumbnail_url=entry.get('thumbnail'),
-                    source_url=entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
-                    file_path=dest_path,
-                    file_size=file_size,
-                    sha256=sha256,
-                )
-                db.link_owner(
-                    owner_id=user.user_id,
-                    video_id=video_id,
-                    codec=codec,
-                    bitrate=bitrate,
-                    source_playlist_title=playlist_title,
-                )
-                imported += 1
+                    db.register_track(
+                        video_id=video_id,
+                        codec=codec,
+                        bitrate=bitrate,
+                        title=title,
+                        artist=entry.get('uploader'),
+                        duration_sec=entry.get('duration_sec'),
+                        thumbnail_url=entry.get('thumbnail'),
+                        source_url=entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
+                        file_path=dest_path,
+                        file_size=file_size,
+                        sha256=sha256,
+                    )
+                    db.link_owner(
+                        owner_id=user.user_id,
+                        video_id=video_id,
+                        codec=codec,
+                        bitrate=bitrate,
+                        source_playlist_title=playlist_title,
+                    )
+                    imported += 1
+                except _Cancelled:
+                    raise
+                except Exception as track_err:
+                    traceback.print_exc()
+                    skipped += 1
+                    progress_queue.put({
+                        "type": "track_skipped",
+                        "index": idx,
+                        "total": total,
+                        "title": title,
+                        "message": str(track_err),
+                    })
+
                 db.update_progress(job_id, idx / total * 100)
 
             db.finish(job_id, size_bytes=None)
@@ -516,6 +583,7 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
                 "filename": None,
                 "imported": imported,
                 "reused": reused,
+                "skipped": skipped,
             })
 
         except _Cancelled:
@@ -596,7 +664,13 @@ def serve_file(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     background_tasks.add_task(cleanup)
-    media_type = "application/zip" if file_path.endswith(".zip") else "video/mp4"
+    ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+    media_type = {
+        "zip": "application/zip",
+        "mp3": "audio/mpeg",
+        "m4a": "audio/mp4",
+        "flac": "audio/flac",
+    }.get(ext, "video/mp4")
     return FileResponse(
         path=file_path,
         filename=os.path.basename(file_path),
