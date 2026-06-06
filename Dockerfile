@@ -22,8 +22,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     YTDL_FRONTEND_DIST=/app/frontend_dist \
     PORT=9877
 
+# nodejs is required by yt-dlp to solve YouTube's signature / n-param JS
+# challenges via the yt-dlp-ejs plugin. Without a JS runtime YouTube returns
+# only image (storyboard) formats and any audio/video download fails with
+# "Requested format is not available". Deno is yt-dlp's preferred runtime but
+# Node is in apt and works equally well — see
+# https://github.com/yt-dlp/yt-dlp/wiki/EJS.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
