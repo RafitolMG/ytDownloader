@@ -8,7 +8,9 @@ type Props = {
   selected: FormatInfo | null
   onSelect: (f: FormatInfo) => void
   selectedAudio: string | null
-  onSelectAudio: (q: string) => void
+  audioMode: 'library' | 'file'
+  isMusic: boolean
+  onSelectAudio: (q: string, mode: 'library' | 'file') => void
 }
 
 const AUDIO_PRESETS = [
@@ -25,6 +27,8 @@ export function VideoMetadata({
   selected,
   onSelect,
   selectedAudio,
+  audioMode,
+  isMusic,
   onSelectAudio,
 }: Props) {
   return (
@@ -103,27 +107,60 @@ export function VideoMetadata({
           </div>
         )}
 
+        {isMusic && (
+          <>
+            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mt-5 mb-2">
+              ♪ audio · add to library
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {AUDIO_PRESETS.map((q) => {
+                const isActive = selectedAudio === q.value && audioMode === 'library'
+                return (
+                  <button
+                    key={`lib-${q.value}`}
+                    type="button"
+                    onClick={() => onSelectAudio(q.value, 'library')}
+                    className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
+                      isActive
+                        ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
+                        : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
+                    }`}
+                  >
+                    <div className="text-lg leading-none">
+                      {isActive ? '◆' : '◇'} {q.label}
+                    </div>
+                    <div className="text-sm text-ink-lo mt-1">{q.sub}</div>
+                  </button>
+                )
+              })}
+            </div>
+          </>
+        )}
+
         <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mt-5 mb-2">
-          ♪ audio · add to library
+          ▼ audio · download as file
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {AUDIO_PRESETS.map((q) => (
-            <button
-              key={q.value}
-              type="button"
-              onClick={() => onSelectAudio(q.value)}
-              className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
-                selectedAudio === q.value
-                  ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
-                  : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
-              }`}
-            >
-              <div className="text-lg leading-none">
-                {selectedAudio === q.value ? '◆' : '◇'} {q.label}
-              </div>
-              <div className="text-sm text-ink-lo mt-1">{q.sub}</div>
-            </button>
-          ))}
+          {AUDIO_PRESETS.map((q) => {
+            const isActive = selectedAudio === q.value && audioMode === 'file'
+            return (
+              <button
+                key={`file-${q.value}`}
+                type="button"
+                onClick={() => onSelectAudio(q.value, 'file')}
+                className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
+                  isActive
+                    ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
+                    : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
+                }`}
+              >
+                <div className="text-lg leading-none">
+                  {isActive ? '◆' : '◇'} {q.label}
+                </div>
+                <div className="text-sm text-ink-lo mt-1">{q.sub}</div>
+              </button>
+            )
+          })}
         </div>
       </div>
     </section>
