@@ -66,26 +66,37 @@ def _resolve_cookies_file() -> str | None:
 
 def _get_cookie_opts() -> dict:
     """
-    Return yt-dlp options to authenticate with YouTube and avoid bot detection.
+    Return the yt-dlp options common to every YouTube call: cookies (to avoid
+    bot detection) plus an explicit JS runtime (to solve YouTube's signature /
+    n-param challenges).
 
-    Priority:
+    Cookies priority:
       1. cookies.txt resolved via _resolve_cookies_file.
       2. Auto-detect an installed browser and extract cookies from it (Windows).
-    Returns an empty dict if neither source is available.
+      None if neither source is available — local residential IPs often still
+      work without them.
+
+    JS runtime: yt-dlp 2026.3.17 only auto-enables Deno; Node has to be
+    requested explicitly via `js_runtimes`. We ship Node 22 in the Docker
+    image and rely on the user having Node on PATH locally (the frontend
+    already requires it). Without this the n-param challenge fails and YouTube
+    serves only image / storyboard formats, so any download breaks with
+    "Requested format is not available".
     """
+    opts: dict = {'js_runtimes': {'node': None}}
+
     cookies_file = _resolve_cookies_file()
     if cookies_file:
-        return {'cookiefile': cookies_file}
-
-    if os.name == 'nt':
+        opts['cookiefile'] = cookies_file
+    elif os.name == 'nt':
         # Chrome and Edge use app-bound encryption since v127 which breaks DPAPI
         # extraction from outside the browser process. Firefox still works fine.
         appdata = os.environ.get('APPDATA', '')
         firefox_dir = os.path.join(appdata, 'Mozilla', 'Firefox', 'Profiles')
         if os.path.isdir(firefox_dir):
-            return {'cookiesfrombrowser': ('firefox',)}
+            opts['cookiesfrombrowser'] = ('firefox',)
 
-    return {}
+    return opts
 
 
 def download_video(url, format_code, output_folder, on_progress=None):
