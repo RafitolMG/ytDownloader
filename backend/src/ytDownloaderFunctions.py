@@ -89,7 +89,18 @@ def _get_cookie_opts() -> dict:
     produces, and the format on master) or `None` as the value triggers
     400-style errors from yt-dlp before extraction even begins.
     """
-    opts: dict = {'js_runtimes': {'deno': {}, 'node': {}}}
+    # `player_client`: try multiple YouTube player clients so that "Topic"
+    # channel uploads (auto-generated YouTube Music tracks like
+    # `<Artist> - Topic`) resolve. The default `web` client often returns
+    # "Video unavailable" for them; `web_music` is the YouTube Music client
+    # that does resolve them. `ios` and `tv` are extra fallbacks for cases
+    # where `web` is blocked by anti-bot.
+    opts: dict = {
+        'js_runtimes': {'deno': {}, 'node': {}},
+        'extractor_args': {
+            'youtube': {'player_client': ['default', 'web_music', 'ios', 'tv']},
+        },
+    }
 
     cookies_file = _resolve_cookies_file()
     if cookies_file:
@@ -373,7 +384,39 @@ def get_available_resolutions(url, audio_only=False):
             by_height[h] = f
     formats = sorted(by_height.values(), key=lambda f: f['height'], reverse=True)
 
-    return {'formats': formats, 'thumbnail_url': thumbnail_url, 'ffmpeg_available': ffmpeg_available}
+    return {
+        'formats': formats,
+        'thumbnail_url': thumbnail_url,
+        'ffmpeg_available': ffmpeg_available,
+        'is_music': _looks_like_music(info),
+    }
+
+
+def _looks_like_music(info: dict) -> bool:
+    """Heuristic for "this video is a song, not a vlog/tutorial/whatever".
+
+    The library is meant to hold actual music. Random audio extracted from a
+    non-music video would clutter it (and accumulate unbounded DB rows). We
+    surface this flag so the frontend hides the "add to library" option when
+    it's almost certainly the wrong choice.
+
+    Positive signals:
+      - `categories` includes 'Music' (most reliable — YouTube's own tag).
+      - Uploader/channel ends with " - Topic" (auto-generated music uploads
+        from YouTube Music — always music).
+      - yt-dlp populated music metadata (`artist` / `track` / `album`),
+        which it does for YouTube Music tracks.
+    """
+    cats = info.get('categories') or []
+    if any((c or '').lower() == 'music' for c in cats):
+        return True
+    for key in ('uploader', 'channel'):
+        name = (info.get(key) or '').strip()
+        if name.endswith(' - Topic'):
+            return True
+    if info.get('artist') or info.get('track') or info.get('album'):
+        return True
+    return False
 
 
 def get_basic_info(url):
@@ -488,6 +531,10 @@ def get_playlist_tracks(url):
         tracks.append({
             'id': vid,
             'title': e.get('title') or vid,
+            # YouTube Music tracks expose a canonical `artist`; fall back to
+            # `uploader`/`channel` for normal videos. Without this the track
+            # lands in the library with artist=None.
+            'uploader': e.get('artist') or e.get('uploader') or e.get('channel'),
             'url': e.get('url') or f'https://www.youtube.com/watch?v={vid}',
             'duration_sec': int(duration) if duration else None,
             'thumbnail': thumb,
@@ -550,7 +597,10 @@ def get_single_video_info(url):
     return {
         'id': vid,
         'title': info.get('title') or vid,
-        'uploader': info.get('uploader'),
+        # YouTube Music tracks set a canonical `artist`; regular videos only
+        # have `uploader` / `channel`. Try in that order so the library shows
+        # the most accurate name.
+        'uploader': info.get('artist') or info.get('uploader') or info.get('channel'),
         'duration_sec': int(duration) if duration else None,
         'thumbnail': info.get('thumbnail'),
         'webpage_url': info.get('webpage_url') or url,
@@ -628,6 +678,46 @@ def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
         return dest_path
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def download_audio_file(url, codec, bitrate, output_folder, on_progress=None):
+    """
+    Download a single video as audio (codec+bitrate) into `output_folder`,
+    naming the file after the video title — same convention as `download_video`.
+    Returns the absolute path of the produced file.
+
+    Used when the user wants the audio as a downloadable file rather than a
+    library import. Library imports go through `download_track_audio` which
+    writes to a content-addressed library path.
+    """
+    ffmpeg = _get_ffmpeg_path()
+    if not ffmpeg:
+        raise RuntimeError(
+            "ffmpeg is required for audio extraction but was not found on PATH"
+        )
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
+        'progress_hooks': [_progress_hook(on_progress)],
+        'restrictfilenames': True,
+        'ffmpeg_location': ffmpeg,
+        'postprocessors': [
+            {'key': 'FFmpegExtractAudio', 'preferredcodec': codec, 'preferredquality': bitrate},
+            {'key': 'FFmpegMetadata', 'add_metadata': True},
+        ],
+        **_get_cookie_opts(),
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    # FFmpegExtractAudio rewrites the extension after download; scan the
+    # output dir for the actual produced file.
+    for fname in os.listdir(output_folder):
+        if fname.lower().endswith(f'.{codec}'):
+            return os.path.join(output_folder, fname)
+    raise RuntimeError(f"yt-dlp produced no .{codec} file in {output_folder}")
 
 
 def download_playlist(url, quality, output_folder, on_progress=None, on_video_start=None):

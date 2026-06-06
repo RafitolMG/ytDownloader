@@ -56,6 +56,7 @@ export const api = {
     format_code: string
     resolution?: string | null
     ext?: string | null
+    as_file?: boolean
   }) =>
     json<{ job_id: string }>('/api/download', {
       method: 'POST',

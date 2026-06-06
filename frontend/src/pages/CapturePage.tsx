@@ -98,6 +98,8 @@ export default function CapturePage() {
               selected={c.selectedFormat}
               onSelect={c.selectFormat}
               selectedAudio={c.selectedAudio}
+              audioMode={c.audioMode}
+              isMusic={c.isMusic}
               onSelectAudio={c.selectAudio}
             />
           ))}
@@ -135,6 +137,25 @@ export default function CapturePage() {
                   ? 'tracks added to your library. ready to listen.'
                   : 'added to your library. ready to listen.'}
               </div>
+              {c.importSummary && (c.importSummary.imported > 0 || c.importSummary.reused > 0 || c.importSummary.skipped > 0) && (
+                <div className="font-pixel text-sm text-ink-lo mt-2">
+                  {c.importSummary.imported > 0 && (
+                    <span className="text-cool">{c.importSummary.imported} new</span>
+                  )}
+                  {c.importSummary.reused > 0 && (
+                    <>
+                      {c.importSummary.imported > 0 && ' · '}
+                      <span className="text-violet">{c.importSummary.reused} reused</span>
+                    </>
+                  )}
+                  {c.importSummary.skipped > 0 && (
+                    <>
+                      {(c.importSummary.imported > 0 || c.importSummary.reused > 0) && ' · '}
+                      <span className="text-sun">⚠ {c.importSummary.skipped} skipped</span>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
             <Link
               to="/library"
