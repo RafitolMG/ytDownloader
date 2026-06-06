@@ -22,14 +22,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     YTDL_FRONTEND_DIST=/app/frontend_dist \
     PORT=9877
 
-# nodejs is required by yt-dlp to solve YouTube's signature / n-param JS
-# challenges via the yt-dlp-ejs plugin. Without a JS runtime YouTube returns
-# only image (storyboard) formats and any audio/video download fails with
-# "Requested format is not available". Deno is yt-dlp's preferred runtime but
-# Node is in apt and works equally well — see
-# https://github.com/yt-dlp/yt-dlp/wiki/EJS.
+# Node.js is required by yt-dlp to solve YouTube's signature / n-param JS
+# challenges via the yt-dlp-ejs plugin. Without a working JS runtime YouTube
+# returns only image (storyboard) formats and any audio/video download fails
+# with "Requested format is not available".
+#
+# yt-dlp-ejs requires Node ≥ 22. Debian bookworm's apt nodejs is 18.x, too old
+# (silently fails with "n challenge solving failed"), so we install Node 22
+# from NodeSource. See https://github.com/yt-dlp/ejs.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates nodejs \
+    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get purge -y --auto-remove gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
