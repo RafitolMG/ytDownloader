@@ -63,10 +63,11 @@ LIBRARY_DIR: str = _env("LIBRARY_DIR", _DEFAULT_LIBRARY_DIR)
 # cookies.txt exported from a logged-in browser.
 #
 # Two ways to supply it (DATA wins over FILE if both are set):
-#   YT_COOKIES_DATA — raw cookies.txt contents pasted into an env var. The
-#                     backend writes it to a tempfile on first use. Easiest
-#                     for Coolify since cookies can be rotated by editing the
-#                     env var without touching files or SSH.
+#   YT_COOKIES_DATA — base64-encoded cookies.txt. The backend decodes and
+#                     writes it to a tempfile on first use. base64 keeps the
+#                     value on a single line with no shell-special characters,
+#                     which is what Coolify needs because it sources env files
+#                     as bash. Generate with `base64 -w0 cookies.txt`.
 #   YT_COOKIES_FILE — absolute path to a cookies.txt already on disk. Useful
 #                     when the file is bind-mounted via Coolify's File Mount
 #                     or pre-placed in the persistent volume.
