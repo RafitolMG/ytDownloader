@@ -494,6 +494,27 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
             reused = 0
             skipped = 0
 
+            # Mirror the YouTube playlist as a real `playlists` row so the user
+            # gets a curated, reorderable copy out of the box. Private by
+            # default — they can flip it public from the UI. Lazily created
+            # only after we have something to add (avoids empty playlists if
+            # the import fails before the first track).
+            mirrored_playlist_id: str | None = None
+
+            def ensure_mirrored_playlist() -> str:
+                nonlocal mirrored_playlist_id
+                if mirrored_playlist_id is None:
+                    pid = str(uuid.uuid4())
+                    db.create_playlist(
+                        playlist_id=pid,
+                        owner_id=user.user_id,
+                        name=playlist_title or "YouTube import",
+                        description=f"Imported from {body.url}",
+                        visibility="private",
+                    )
+                    mirrored_playlist_id = pid
+                return mirrored_playlist_id
+
             for idx, entry in enumerate(tracks, start=1):
                 if job_id in _cancelled:
                     raise _Cancelled()
@@ -514,6 +535,9 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
                         codec=codec,
                         bitrate=bitrate,
                         source_playlist_title=playlist_title,
+                    )
+                    db.add_track_to_playlist(
+                        ensure_mirrored_playlist(), video_id, codec, bitrate,
                     )
                     reused += 1
                     progress_queue.put({"type": "progress", "value": round(idx / total * 100, 1)})
@@ -560,6 +584,9 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
                         codec=codec,
                         bitrate=bitrate,
                         source_playlist_title=playlist_title,
+                    )
+                    db.add_track_to_playlist(
+                        ensure_mirrored_playlist(), video_id, codec, bitrate,
                     )
                     imported += 1
                 except _Cancelled:
@@ -701,28 +728,253 @@ def remove_track(
     user: CurrentUser = Depends(current_user),
 ):
     """
-    Unlink the caller from a track. If they were the last owner, the master
-    record and the underlying audio file are deleted too. Cleans up the
-    video_id directory when empty.
+    Unlink the caller from a track. The master row and the underlying file
+    are preserved so the track stays in the shared catalog and other users
+    can keep playing or adopting it — even when the caller was the last
+    owner. Orphan cleanup is an admin concern.
     """
-    result = db.remove_from_library(user.user_id, video_id, codec, bitrate)
-    if not result["unlinked"]:
+    unlinked = db.unlink_owner(user.user_id, video_id, codec, bitrate)
+    if not unlinked:
         raise HTTPException(status_code=404, detail="track not in your library")
+    return {"ok": True}
 
-    if result["orphaned"] and result["file_path"]:
-        try:
-            os.remove(result["file_path"])
-        except FileNotFoundError:
-            pass
-        # Drop the per-video directory if it's now empty.
-        parent = os.path.dirname(result["file_path"])
-        try:
-            if os.path.isdir(parent) and not os.listdir(parent):
-                os.rmdir(parent)
-        except OSError:
-            pass
 
-    return {"ok": True, "orphaned": result["orphaned"]}
+# ── Shared catalog ────────────────────────────────────────────────────────────
+# Every download lands in the global `tracks` registry. The catalog surfaces it
+# so any user can adopt an existing track into their library without triggering
+# a fresh download. "In library" and "liked" used to be separate concepts; they
+# were merged — the heart toggle is the library toggle, and `owner_count` is
+# the social signal (people who saved this track).
+
+_CATALOG_SORTS = {"newest", "popular", "title", "artist"}
+
+
+@app.get("/api/catalog/tracks")
+def list_catalog(
+    q: str | None = None,
+    sort: str = "newest",
+    limit: int = 200,
+    offset: int = 0,
+    user: CurrentUser = Depends(current_user),
+):
+    """Paginated global track listing with per-viewer is_owned/is_liked flags."""
+    if sort not in _CATALOG_SORTS:
+        sort = "newest"
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    items = db.list_catalog(
+        user.user_id, query=q, sort=sort, limit=limit, offset=offset,
+    )
+    return {"items": items}
+
+
+@app.post("/api/catalog/tracks/{video_id}/{codec}/{bitrate}/own")
+def catalog_adopt(
+    video_id: str,
+    codec: str,
+    bitrate: str,
+    user: CurrentUser = Depends(current_user),
+):
+    """Adopt an existing catalog track into the caller's library — no download
+    happens, just a new `track_owners` row."""
+    if db.get_track(video_id, codec, bitrate) is None:
+        raise HTTPException(status_code=404, detail="track not in catalog")
+    db.link_owner(
+        owner_id=user.user_id,
+        video_id=video_id, codec=codec, bitrate=bitrate,
+    )
+    return {"ok": True, "owned": True}
+
+
+@app.delete("/api/catalog/tracks/{video_id}/{codec}/{bitrate}/own")
+def catalog_unown(
+    video_id: str,
+    codec: str,
+    bitrate: str,
+    user: CurrentUser = Depends(current_user),
+):
+    """Un-adopt: remove the caller from the track's owner list. The track
+    stays in the shared catalog so anyone else can keep playing or adopting
+    it — that's the whole point of the catalog being eternal."""
+    db.unlink_owner(user.user_id, video_id, codec, bitrate)
+    return {"ok": True, "owned": False}
+
+
+# ── Playlists ────────────────────────────────────────────────────────────────
+
+class PlaylistCreate(BaseModel):
+    name: str
+    description: str | None = None
+    visibility: str = "private"  # 'private' | 'public'
+
+
+class PlaylistUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    visibility: str | None = None
+    cover_url: str | None = None
+
+
+class PlaylistTrackKey(BaseModel):
+    video_id: str
+    codec: str
+    bitrate: str
+
+
+class PlaylistReorder(BaseModel):
+    order: list[PlaylistTrackKey]
+
+
+def _ensure_playlist_visible(playlist: dict, user: CurrentUser) -> None:
+    """403 unless the playlist is public or the caller owns it (ADMIN bypasses)."""
+    if user.is_admin:
+        return
+    if playlist["visibility"] == "public":
+        return
+    if playlist["owner_id"] == user.user_id:
+        return
+    raise HTTPException(status_code=403, detail="playlist is private")
+
+
+def _ensure_playlist_owner(playlist: dict, user: CurrentUser) -> None:
+    """403 unless the caller owns the playlist (ADMIN bypasses)."""
+    if user.is_admin:
+        return
+    if playlist["owner_id"] != user.user_id:
+        raise HTTPException(status_code=403, detail="not your playlist")
+
+
+@app.get("/api/playlists")
+def list_playlists(
+    owner_id: str | None = None,
+    limit: int = 200,
+    user: CurrentUser = Depends(current_user),
+):
+    """List playlists viewable by the caller — every public playlist + their
+    own private ones. Pass `owner_id=me` (or a user id) to scope by creator."""
+    if owner_id == "me":
+        owner_id = user.user_id
+    limit = max(1, min(limit, 500))
+    items = db.list_playlists(user.user_id, owner_id=owner_id, limit=limit)
+    return {"items": items}
+
+
+@app.post("/api/playlists")
+def create_playlist(
+    body: PlaylistCreate,
+    user: CurrentUser = Depends(current_user),
+):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    playlist_id = str(uuid.uuid4())
+    db.create_playlist(
+        playlist_id=playlist_id,
+        owner_id=user.user_id,
+        name=name,
+        description=body.description,
+        visibility=body.visibility,
+    )
+    return {"id": playlist_id}
+
+
+@app.get("/api/playlists/{playlist_id}")
+def get_playlist(
+    playlist_id: str,
+    user: CurrentUser = Depends(current_user),
+):
+    playlist = db.get_playlist(playlist_id)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    _ensure_playlist_visible(playlist, user)
+    tracks = db.list_playlist_tracks(playlist_id)
+    return {
+        **playlist,
+        "is_owner": playlist["owner_id"] == user.user_id,
+        "tracks": tracks,
+    }
+
+
+@app.patch("/api/playlists/{playlist_id}")
+def patch_playlist(
+    playlist_id: str,
+    body: PlaylistUpdate,
+    user: CurrentUser = Depends(current_user),
+):
+    playlist = db.get_playlist(playlist_id)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    _ensure_playlist_owner(playlist, user)
+    db.update_playlist(
+        playlist_id,
+        name=body.name.strip() if body.name is not None else None,
+        description=body.description,
+        visibility=body.visibility,
+        cover_url=body.cover_url,
+    )
+    return {"ok": True}
+
+
+@app.delete("/api/playlists/{playlist_id}")
+def delete_playlist(
+    playlist_id: str,
+    user: CurrentUser = Depends(current_user),
+):
+    playlist = db.get_playlist(playlist_id)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    _ensure_playlist_owner(playlist, user)
+    db.delete_playlist(playlist_id)
+    return {"ok": True}
+
+
+@app.post("/api/playlists/{playlist_id}/tracks")
+def add_track(
+    playlist_id: str,
+    body: PlaylistTrackKey,
+    user: CurrentUser = Depends(current_user),
+):
+    playlist = db.get_playlist(playlist_id)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    _ensure_playlist_owner(playlist, user)
+    if db.get_track(body.video_id, body.codec, body.bitrate) is None:
+        raise HTTPException(status_code=404, detail="track not in catalog")
+    added = db.add_track_to_playlist(playlist_id, body.video_id, body.codec, body.bitrate)
+    return {"ok": True, "added": added}
+
+
+@app.delete("/api/playlists/{playlist_id}/tracks/{video_id}/{codec}/{bitrate}")
+def remove_track_from_playlist(
+    playlist_id: str,
+    video_id: str,
+    codec: str,
+    bitrate: str,
+    user: CurrentUser = Depends(current_user),
+):
+    playlist = db.get_playlist(playlist_id)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    _ensure_playlist_owner(playlist, user)
+    removed = db.remove_track_from_playlist(playlist_id, video_id, codec, bitrate)
+    if not removed:
+        raise HTTPException(status_code=404, detail="track not in this playlist")
+    return {"ok": True}
+
+
+@app.patch("/api/playlists/{playlist_id}/order")
+def reorder_playlist(
+    playlist_id: str,
+    body: PlaylistReorder,
+    user: CurrentUser = Depends(current_user),
+):
+    playlist = db.get_playlist(playlist_id)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    _ensure_playlist_owner(playlist, user)
+    keys = [(k.video_id, k.codec, k.bitrate) for k in body.order]
+    reordered = db.reorder_playlist(playlist_id, keys)
+    return {"ok": True, "reordered": reordered}
 
 
 @app.get("/api/track/{video_id}/stream")
@@ -736,10 +988,11 @@ def stream_track(
     """
     Stream a track from the library to an HTML <audio> element. Honors the
     `Range` header so the browser can seek without re-downloading.
-    """
-    if not db.is_owned(user.user_id, video_id, codec, bitrate) and not user.is_admin:
-        raise HTTPException(status_code=404, detail="track not in your library")
 
+    Any authenticated user can stream any track in the shared catalog — this is
+    what lets users play tracks from public playlists or the catalog without
+    first adopting them into their own library.
+    """
     track = db.get_track(video_id, codec, bitrate)
     if track is None:
         raise HTTPException(status_code=404, detail="track not found")
