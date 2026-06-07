@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
 import type { JobRow as Job, JobStatus } from '@/shared/api/types'
+import { useLiveJobProgress } from './useLiveJobProgress'
 
 const STATUS_STYLES: Record<JobStatus, { label: string; cls: string; glow?: string }> = {
   queued:      { label: 'queued',      cls: 'text-ink-mid border-ink-lo/40' },
@@ -41,7 +42,12 @@ export function JobRow({ job }: { job: Job }) {
   const del = useMutation({ mutationFn: () => api.delete(job.id), onSuccess: invalidate })
 
   const active = job.status === 'queued' || job.status === 'downloading' || job.status === 'merging' || job.status === 'transcoding'
-  const style = STATUS_STYLES[job.status]
+  // Live overlay only when the job is active — closed sockets reset their
+  // local state so finished jobs don't keep showing stale per-track info.
+  const live = useLiveJobProgress(job.id, active)
+  const displayStatus: JobStatus = live.status ?? job.status
+  const displayProgress = live.progress ?? job.progress_pct
+  const style = STATUS_STYLES[displayStatus]
   const title = job.title ?? job.playlist_title ?? job.url
 
   return (
@@ -85,10 +91,25 @@ export function JobRow({ job }: { job: Job }) {
         </div>
 
         {active ? (
-          <div className="font-pixel text-lg mt-2">
-            <span className="text-cool">{buildBar(job.progress_pct)}</span>{' '}
-            <span className="text-hot">{job.progress_pct.toFixed(1)}%</span>
-          </div>
+          <>
+            <div className="font-pixel text-lg mt-2">
+              <span className="text-cool">{buildBar(displayProgress)}</span>{' '}
+              <span className="text-hot">{displayProgress.toFixed(1)}%</span>
+            </div>
+            {live.track && (
+              <div className="font-pixel text-sm text-ink-mid mt-1 truncate">
+                <span className="text-cool tabular-nums">
+                  {live.track.index}/{live.track.total}
+                </span>{' '}
+                · <span className="text-ink-hi">{live.track.title}</span>
+              </div>
+            )}
+            {live.skipped > 0 && (
+              <div className="font-pixel text-sm text-sun mt-1">
+                ⚠ {live.skipped} skipped
+              </div>
+            )}
+          </>
         ) : job.status === 'error' && job.error_message ? (
           <div className="font-pixel text-sm text-crit/80 mt-1 truncate" title={job.error_message}>
             ⚠ {job.error_message}

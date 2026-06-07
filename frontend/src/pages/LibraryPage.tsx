@@ -5,19 +5,12 @@ import { api } from '@/shared/api/client'
 import type { LibraryItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
-
-type Group = {
-  /** Synthetic key — playlist title or '__loose__' for tracks not from a playlist. */
-  key: string
-  label: string
-  tracks: LibraryItem[]
-  /** First track's thumbnail, used as group cover. */
-  cover: string | null
-}
+import { AddToPlaylistMenu } from '@/features/playlists/AddToPlaylistMenu'
 
 export default function LibraryPage() {
   const jobsQuery = useJobs()
   const activeCount = countActive(jobsQuery.data)
+  const [query, setQuery] = useState('')
 
   const libraryQuery = useQuery({
     queryKey: ['library'],
@@ -25,36 +18,19 @@ export default function LibraryPage() {
     staleTime: 10_000,
   })
 
-  const groups = useMemo<Group[]>(() => {
-    const items = libraryQuery.data?.items ?? []
-    const byKey = new Map<string, Group>()
-    for (const t of items) {
-      const key = t.source_playlist_title ?? '__loose__'
-      const label = t.source_playlist_title ?? 'singles'
-      let g = byKey.get(key)
-      if (!g) {
-        g = { key, label, tracks: [], cover: t.thumbnail_url }
-        byKey.set(key, g)
-      }
-      g.tracks.push(t)
-      if (!g.cover && t.thumbnail_url) g.cover = t.thumbnail_url
-    }
-    return Array.from(byKey.values()).sort((a, b) => b.tracks.length - a.tracks.length)
-  }, [libraryQuery.data])
-
-  const [openKey, setOpenKey] = useState<string | null>(null)
-  const [query, setQuery] = useState('')
-  const openGroup = groups.find((g) => g.key === openKey) ?? null
-
+  // Backend already returns rows ordered by added_at DESC, so the flat list
+  // is "newest first" without any client-side sort.
+  const items = libraryQuery.data?.items ?? []
   const trimmed = query.trim().toLowerCase()
   const filtered = useMemo<LibraryItem[]>(() => {
-    if (!trimmed) return []
-    const items = libraryQuery.data?.items ?? []
+    if (!trimmed) return items
     return items.filter((t) => {
-      const hay = `${t.title ?? ''} ${t.artist ?? ''} ${t.source_playlist_title ?? ''}`.toLowerCase()
+      const hay = `${t.title ?? ''} ${t.artist ?? ''}`.toLowerCase()
       return hay.includes(trimmed)
     })
-  }, [trimmed, libraryQuery.data])
+  }, [trimmed, items])
+
+  const player = useAudioPlayer()
 
   return (
     <div className="relative z-10 min-h-full">
@@ -63,15 +39,15 @@ export default function LibraryPage() {
 
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-            ░▒▓ music library ▓▒░
+            ░▒▓ my library ▓▒░
           </div>
-          {openGroup && !trimmed && (
+          {filtered.length > 0 && (
             <button
               type="button"
-              onClick={() => setOpenKey(null)}
-              className="font-pixel text-sm uppercase tracking-widest px-3 py-1 border border-border text-ink-mid hover:text-cool hover:border-cool/70 transition rounded-xs"
+              onClick={() => player.play(filtered, 0)}
+              className="font-pixel text-sm uppercase tracking-widest px-4 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
             >
-              ◀ all playlists
+              ▶ play all
             </button>
           )}
         </div>
@@ -109,165 +85,53 @@ export default function LibraryPage() {
           </div>
         )}
 
-        {libraryQuery.data && groups.length === 0 && (
+        {libraryQuery.data && items.length === 0 && (
           <div className="card-vapor rounded-sm p-8 text-center">
             <div className="font-pixel text-lg text-ink-mid mb-2">
               ⊹ empty library ⊹
             </div>
             <div className="font-pixel text-sm text-ink-lo">
-              import a playlist from the capture page to start your collection.
+              download a track from capture, or "+ add" something from the catalog.
             </div>
           </div>
         )}
 
-        {trimmed ? (
-          <SearchResults query={query} matches={filtered} />
-        ) : openGroup ? (
-          <TrackList group={openGroup} />
-        ) : (
-          groups.length > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-              {groups.map((g) => (
-                <PlaylistCard key={g.key} group={g} onOpen={() => setOpenKey(g.key)} />
-              ))}
+        {libraryQuery.data && items.length > 0 && filtered.length === 0 && trimmed && (
+          <div className="card-vapor rounded-sm p-8 text-center">
+            <div className="font-pixel text-ink-mid">
+              no tracks match "<span className="text-cool">{query}</span>"
             </div>
-          )
+          </div>
+        )}
+
+        {filtered.length > 0 && (
+          <ul className="card-vapor rounded-sm divide-y divide-border">
+            {filtered.map((t, i) => (
+              <TrackRow
+                key={`${t.video_id}/${t.codec}/${t.bitrate}`}
+                track={t}
+                position={i + 1}
+                queue={filtered}
+                index={i}
+              />
+            ))}
+          </ul>
         )}
       </main>
     </div>
   )
 }
 
-function SearchResults({ query, matches }: { query: string; matches: LibraryItem[] }) {
-  const player = useAudioPlayer()
-  if (matches.length === 0) {
-    return (
-      <div className="card-vapor rounded-sm p-8 text-center">
-        <div className="font-pixel text-ink-mid">
-          no tracks match "<span className="text-cool">{query}</span>"
-        </div>
-      </div>
-    )
-  }
-  return (
-    <section className="card-vapor rounded-sm">
-      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-        <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-          // {matches.length} match{matches.length === 1 ? '' : 'es'}
-        </div>
-        <button
-          type="button"
-          onClick={() => player.play(matches, 0)}
-          className="font-pixel text-sm uppercase tracking-widest px-4 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
-        >
-          ▶ play all
-        </button>
-      </div>
-      <ul className="divide-y divide-border max-h-[32rem] overflow-y-auto">
-        {matches.map((t, i) => (
-          <TrackRow
-            key={`${t.video_id}/${t.codec}/${t.bitrate}`}
-            track={t}
-            position={i + 1}
-            onPlay={() => player.play(matches, i)}
-          />
-        ))}
-      </ul>
-    </section>
-  )
-}
-
-function PlaylistCard({ group, onOpen }: { group: Group; onOpen: () => void }) {
-  const player = useAudioPlayer()
-  return (
-    <div className="card-vapor rounded-sm overflow-hidden flex flex-col group">
-      <button
-        type="button"
-        onClick={onOpen}
-        className="relative aspect-video overflow-hidden bg-page-mid img-chromatic block"
-      >
-        {group.cover ? (
-          <img
-            src={group.cover}
-            alt=""
-            className="w-full h-full object-cover transition group-hover:scale-105"
-            referrerPolicy="no-referrer"
-          />
-        ) : (
-          <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
-        )}
-        <div
-          className="absolute inset-0 pointer-events-none"
-          style={{
-            backgroundImage:
-              'repeating-linear-gradient(to bottom, transparent 0px, transparent 2px, rgba(0,0,0,0.25) 2px, rgba(0,0,0,0.25) 3px)',
-          }}
-        />
-      </button>
-      <div className="p-3 flex-1 flex flex-col gap-2">
-        <div className="flex-1 min-w-0">
-          <div className="font-sans text-sm font-semibold text-ink-hi leading-snug line-clamp-2">
-            {group.label}
-          </div>
-          <div className="font-pixel text-xs text-ink-lo uppercase tracking-widest mt-1">
-            {group.tracks.length} track{group.tracks.length === 1 ? '' : 's'}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={() => player.play(group.tracks, 0)}
-          className="font-pixel text-sm uppercase tracking-widest px-3 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
-        >
-          ▶ play all
-        </button>
-      </div>
-    </div>
-  )
-}
-
-function TrackList({ group }: { group: Group }) {
-  const player = useAudioPlayer()
-  return (
-    <section className="card-vapor rounded-sm">
-      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-        <div>
-          <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-            // playlist
-          </div>
-          <div className="font-sans text-lg font-semibold text-ink-hi mt-1">
-            {group.label}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={() => player.play(group.tracks, 0)}
-          className="font-pixel text-sm uppercase tracking-widest px-4 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
-        >
-          ▶ play all
-        </button>
-      </div>
-      <ul className="divide-y divide-border max-h-[32rem] overflow-y-auto">
-        {group.tracks.map((t, i) => (
-          <TrackRow
-            key={`${t.video_id}/${t.codec}/${t.bitrate}`}
-            track={t}
-            position={i + 1}
-            onPlay={() => player.play(group.tracks, i)}
-          />
-        ))}
-      </ul>
-    </section>
-  )
-}
-
 function TrackRow({
   track,
   position,
-  onPlay,
+  queue,
+  index,
 }: {
   track: LibraryItem
   position: number
-  onPlay: () => void
+  queue: LibraryItem[]
+  index: number
 }) {
   const player = useAudioPlayer()
   const queryClient = useQueryClient()
@@ -275,6 +139,7 @@ function TrackRow({
     mutationFn: () => api.removeFromLibrary(track.video_id, track.codec, track.bitrate),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['library'] })
+      queryClient.invalidateQueries({ queryKey: ['catalog'] })
     },
   })
   const isCurrent =
@@ -287,15 +152,13 @@ function TrackRow({
     if (remove.isPending) return
     const ok = window.confirm(`Remove "${track.title ?? track.video_id}" from your library?`)
     if (!ok) return
-    // If we're removing the track that's currently playing, stop it first so
-    // the player doesn't get stuck pointing at a deleted file.
     if (isCurrent) player.stop()
     remove.mutate()
   }
 
   return (
     <li
-      onClick={onPlay}
+      onClick={() => player.play(queue, index)}
       className={`flex items-center gap-3 px-3 py-2 cursor-pointer transition group ${
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       }`}
@@ -333,6 +196,26 @@ function TrackRow({
           {track.artist ?? '—'}
         </div>
       </div>
+      <AddToPlaylistMenu
+        trackKey={{
+          video_id: track.video_id,
+          codec: track.codec,
+          bitrate: track.bitrate,
+        }}
+        trigger={(open) => (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              open()
+            }}
+            title="add to playlist"
+            className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-transparent text-ink-lo opacity-0 group-hover:opacity-100 hover:text-cool hover:border-cool/60 transition rounded-xs"
+          >
+            ≣+
+          </button>
+        )}
+      />
       <button
         type="button"
         onClick={handleRemove}
