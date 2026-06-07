@@ -149,7 +149,10 @@ function CatalogRow({
   const queryClient = useQueryClient()
 
   const toggleLibrary = useMutation({
-    mutationFn: () =>
+    // The two branches return different literal `owned` types; widen to a
+    // common shape so the ternary doesn't force the mutation type into one
+    // arm (`owned: true`) and reject the other under `tsc -b`.
+    mutationFn: async (): Promise<{ ok: true; owned: boolean }> =>
       item.is_owned
         ? api.catalogUnown(item.video_id, item.codec, item.bitrate)
         : api.catalogAdopt(item.video_id, item.codec, item.bitrate),
