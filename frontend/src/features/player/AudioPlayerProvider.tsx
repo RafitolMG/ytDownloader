@@ -20,6 +20,13 @@ type PlayerCtx = {
   queue: LibraryItem[]
   /** Index of `current` within `queue`. -1 when nothing is loaded. */
   index: number
+  /** True when `next()` will produce a track to play. In shuffle mode that
+   * includes the implicit reshuffle on wrap. Drives the next button's
+   * disabled state — `index < queue.length-1` would be wrong in shuffle. */
+  canGoNext: boolean
+  /** True when `prev()` will land on a previous track (vs. just restarting
+   * the current one). */
+  canGoPrev: boolean
   isPlaying: boolean
   /** Live playback position in seconds. */
   position: number
@@ -82,6 +89,16 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
 
   const index = pos >= 0 && pos < order.length ? order[pos] : -1
   const current = index >= 0 && index < queue.length ? queue[index] : null
+  // canGoNext mirrors advanceOrReshuffle's branches: there is a next track
+  // when we haven't hit the tail of `order` yet, OR we're in shuffle with
+  // >1 track (reshuffle will produce one), OR repeat='all' loops back.
+  const canGoNext =
+    pos >= 0 &&
+    (pos < order.length - 1 || (shuffle && queue.length > 1) || repeat === 'all')
+  // canGoPrev: there's an earlier position to walk back to, or repeat='all'
+  // wraps to the tail. The >3s rewind-to-start nicety lives in prev() itself
+  // and doesn't need to be reflected in this flag.
+  const canGoPrev = pos > 0 || (pos >= 0 && repeat === 'all')
 
   // Load the new src whenever the logical current track changes.
   useEffect(() => {
@@ -101,7 +118,11 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       const newOrder = buildOrder(nextQueue.length, clamped, shuffle)
       setQueue(nextQueue)
       setOrder(newOrder)
-      setPos(0)
+      // When shuffled, buildOrder parks `startAt` at order[0] so pos=0 is the
+      // start. When not shuffled, order is identity, so pos must = clamped to
+      // actually start at the clicked track instead of always falling back to
+      // queue[0].
+      setPos(shuffle ? 0 : clamped)
     },
     [shuffle],
   )
@@ -194,8 +215,10 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         if (prevOrder.length === 0) return prevOrder
         const currentQueueIdx = pos >= 0 ? prevOrder[pos] : 0
         const next = buildOrder(prevOrder.length, currentQueueIdx, willBeOn)
-        // After rebuild, the current track is at position 0.
-        setPos(0)
+        // Shuffle ON: buildOrder puts current track at order[0] → pos=0.
+        // Shuffle OFF: order is identity → pos must = the queue index of the
+        // current track so we don't jump back to queue[0].
+        setPos(willBeOn ? 0 : currentQueueIdx)
         return next
       })
       return willBeOn
@@ -211,6 +234,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       current,
       queue,
       index,
+      canGoNext,
+      canGoPrev,
       isPlaying,
       position,
       duration,
@@ -226,7 +251,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       cycleRepeat,
     }),
     [
-      current, queue, index, isPlaying, position, duration, shuffle, repeat,
+      current, queue, index, canGoNext, canGoPrev, isPlaying, position, duration,
+      shuffle, repeat,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
     ],
   )
