@@ -5,8 +5,6 @@ export function PlayerBar() {
   if (!p.current) return null
 
   const t = p.current
-  const hasPrev = p.index > 0
-  const hasNext = p.index < p.queue.length - 1
   const dur = Number.isFinite(p.duration) ? p.duration : t.duration_sec ?? 0
   const pct = dur > 0 ? Math.min(100, (p.position / dur) * 100) : 0
 
@@ -66,7 +64,7 @@ export function PlayerBar() {
           </PlayerToggle>
           <PlayerButton
             onClick={p.prev}
-            disabled={!hasPrev && p.position < 3 && p.repeat !== 'all'}
+            disabled={!p.canGoPrev && p.position < 3}
             title="prev"
           >
             ⏮
@@ -76,7 +74,7 @@ export function PlayerBar() {
           </PlayerButton>
           <PlayerButton
             onClick={p.next}
-            disabled={!hasNext && p.repeat !== 'all'}
+            disabled={!p.canGoNext}
             title="next"
           >
             ⏭
