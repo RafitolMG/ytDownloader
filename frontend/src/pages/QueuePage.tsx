@@ -15,7 +15,9 @@ const FILTERS: { key: Filter; label: string }[] = [
 
 export default function QueuePage() {
   const [filter, setFilter] = useState<Filter>('all')
-  const jobsQuery = useJobs({ refetchInterval: 2_000 })
+  // Live progress comes via WebSocket per-row; the list refresh just needs to
+  // catch new jobs and terminal transitions, so a 5s heartbeat is plenty.
+  const jobsQuery = useJobs({ refetchInterval: 5_000 })
   const jobs = jobsQuery.data ?? []
   const activeCount = countActive(jobs)
 

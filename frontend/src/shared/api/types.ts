@@ -127,6 +127,81 @@ export type LibraryResponse = {
   items: LibraryItem[]
 }
 
+// ── Shared catalog ───────────────────────────────────────────────────────────
+
+export type CatalogSort = 'newest' | 'popular' | 'title' | 'artist'
+
+export type CatalogItem = {
+  video_id: string
+  codec: string
+  bitrate: string
+  title: string | null
+  artist: string | null
+  duration_sec: number | null
+  thumbnail_url: string | null
+  source_url: string
+  file_size: number | null
+  downloaded_at: string
+  /** Number of users that have this track in their library — used both as the
+   * social signal (♥ N) and as the "popular" sort key. */
+  owner_count: number
+  /** SQLite returns 0/1 for EXISTS subqueries; treat as boolean at the edge. */
+  is_owned: 0 | 1
+}
+
+export type CatalogResponse = {
+  items: CatalogItem[]
+}
+
+// ── Playlists ────────────────────────────────────────────────────────────────
+
+export type PlaylistVisibility = 'public' | 'private'
+
+export type PlaylistSummary = {
+  id: string
+  owner_id: string
+  name: string
+  description: string | null
+  visibility: PlaylistVisibility
+  cover_url: string | null
+  created_at: string
+  updated_at: string
+  track_count: number
+  /** 0/1 from SQLite — treat as boolean. */
+  is_owner: 0 | 1
+}
+
+export type PlaylistTrackRow = {
+  video_id: string
+  codec: string
+  bitrate: string
+  title: string | null
+  artist: string | null
+  duration_sec: number | null
+  thumbnail_url: string | null
+  source_url: string
+  file_size: number | null
+  position: number
+  added_at: string
+}
+
+export type PlaylistDetail = {
+  id: string
+  owner_id: string
+  name: string
+  description: string | null
+  visibility: PlaylistVisibility
+  cover_url: string | null
+  created_at: string
+  updated_at: string
+  is_owner: boolean
+  tracks: PlaylistTrackRow[]
+}
+
+export type PlaylistsResponse = {
+  items: PlaylistSummary[]
+}
+
 export type WsEvent =
   | { type: 'snapshot'; job: JobRow }
   | {

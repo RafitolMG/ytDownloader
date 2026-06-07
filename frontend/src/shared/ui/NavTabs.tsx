@@ -47,6 +47,30 @@ export function NavTabs({ queueCount }: { queueCount: number }) {
       >
         ♪ library
       </NavLink>
+      <NavLink
+        to="/catalog"
+        className={({ isActive }) =>
+          `${baseCls} ${
+            isActive
+              ? 'border-hot text-ink-hi bg-hot/10 shadow-[var(--shadow-glow-hot)]'
+              : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
+          }`
+        }
+      >
+        ⊕ catalog
+      </NavLink>
+      <NavLink
+        to="/playlists"
+        className={({ isActive }) =>
+          `${baseCls} ${
+            isActive
+              ? 'border-hot text-ink-hi bg-hot/10 shadow-[var(--shadow-glow-hot)]'
+              : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
+          }`
+        }
+      >
+        ≣ playlists
+      </NavLink>
     </nav>
   )
 }

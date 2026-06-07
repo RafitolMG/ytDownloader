@@ -134,6 +134,59 @@ CREATE TABLE IF NOT EXISTS track_owners (
 );
 
 CREATE INDEX IF NOT EXISTS idx_track_owners_owner ON track_owners(owner_id, added_at DESC);
+
+-- `track_likes`: heart/favorite. Independent from ownership so a user can
+-- like a track without adding it to their library, and vice versa.
+CREATE TABLE IF NOT EXISTS track_likes (
+    user_id  TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    codec    TEXT NOT NULL,
+    bitrate  TEXT NOT NULL,
+    liked_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, video_id, codec, bitrate),
+    FOREIGN KEY (video_id, codec, bitrate)
+        REFERENCES tracks(video_id, codec, bitrate) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_track_likes_track ON track_likes(video_id, codec, bitrate);
+CREATE INDEX IF NOT EXISTS idx_track_likes_user  ON track_likes(user_id, liked_at DESC);
+
+-- ── Playlists ────────────────────────────────────────────────────────────────
+-- User-curated lists of tracks pulled from the shared catalog. Visibility is
+-- per playlist: 'public' means any authenticated user can see and play it but
+-- only the owner can mutate. 'private' is owner-only end-to-end.
+CREATE TABLE IF NOT EXISTS playlists (
+    id           TEXT PRIMARY KEY,
+    owner_id     TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    description  TEXT,
+    visibility   TEXT NOT NULL DEFAULT 'private',  -- 'public' | 'private'
+    cover_url    TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlists_owner      ON playlists(owner_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_playlists_visibility ON playlists(visibility, updated_at DESC);
+
+-- `playlist_tracks`: ordered M2M between playlists and tracks. `position` is
+-- a sparse integer (gaps allowed) so reorders can be O(1) per move without a
+-- full renumber. The (playlist_id, position) unique index is enforced at the
+-- application level on insert.
+CREATE TABLE IF NOT EXISTS playlist_tracks (
+    playlist_id TEXT NOT NULL,
+    video_id    TEXT NOT NULL,
+    codec       TEXT NOT NULL,
+    bitrate     TEXT NOT NULL,
+    position    INTEGER NOT NULL,
+    added_at    TEXT NOT NULL,
+    PRIMARY KEY (playlist_id, video_id, codec, bitrate),
+    FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+    FOREIGN KEY (video_id, codec, bitrate)
+        REFERENCES tracks(video_id, codec, bitrate) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlist_tracks_pos ON playlist_tracks(playlist_id, position);
 """
 
 ROLE_ADMIN = "ADMIN"
@@ -503,16 +556,15 @@ def count_owners(video_id: str, codec: str, bitrate: str) -> int:
     return int(row["n"]) if row else 0
 
 
-def remove_from_library(
+def unlink_owner(
     owner_id: str, video_id: str, codec: str, bitrate: str
-) -> dict[str, Any]:
-    """
-    Unlink the caller from a track. If no owners remain, also delete the
-    master `tracks` row and return its file_path so the caller can erase the
-    file from disk.
+) -> bool:
+    """Remove a user from a track's owner list. The master `tracks` row and
+    the underlying file are **always** preserved — catalog/library actions
+    must not silently delete shared assets. Reclaiming orphans is a separate
+    admin concern (see `delete_track_master`).
 
-    Returns a dict:
-      { 'unlinked': bool, 'orphaned': bool, 'file_path': str | None }
+    Returns True iff a row was actually removed.
     """
     with _write() as conn:
         cur = conn.execute(
@@ -522,34 +574,25 @@ def remove_from_library(
             """,
             (owner_id, video_id, codec, bitrate),
         )
-        if cur.rowcount == 0:
-            return {"unlinked": False, "orphaned": False, "file_path": None}
+        return cur.rowcount > 0
 
-        remaining = conn.execute(
-            """
-            SELECT COUNT(*) AS n FROM track_owners
-             WHERE video_id = ? AND codec = ? AND bitrate = ?
-            """,
-            (video_id, codec, bitrate),
-        ).fetchone()
-        if remaining and remaining["n"] > 0:
-            return {"unlinked": True, "orphaned": False, "file_path": None}
 
-        # No owners left — drop the master row and surface its file_path so
-        # the caller can rm the physical file.
-        master = conn.execute(
+def delete_track_master(video_id: str, codec: str, bitrate: str) -> str | None:
+    """Hard-delete the master row + return its file_path so the caller can
+    rm the physical file. Intended for admin cleanup of orphans, NOT for
+    normal user-facing library removals."""
+    with _write() as conn:
+        row = conn.execute(
             "SELECT file_path FROM tracks WHERE video_id = ? AND codec = ? AND bitrate = ?",
             (video_id, codec, bitrate),
         ).fetchone()
+        if row is None:
+            return None
         conn.execute(
             "DELETE FROM tracks WHERE video_id = ? AND codec = ? AND bitrate = ?",
             (video_id, codec, bitrate),
         )
-        return {
-            "unlinked": True,
-            "orphaned": True,
-            "file_path": master["file_path"] if master else None,
-        }
+        return row["file_path"]
 
 
 def list_library(owner_id: str, limit: int = 500) -> list[dict[str, Any]]:
@@ -572,3 +615,320 @@ def list_library(owner_id: str, limit: int = 500) -> list[dict[str, Any]]:
         (owner_id, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Catalog (shared global view of `tracks`) ──────────────────────────────────
+
+_CATALOG_SORTS = {
+    'newest': 't.downloaded_at DESC',
+    # "popular" used to be likes; after merging like↔library, popularity is the
+    # number of users who have the track in their library (owner_count).
+    'popular': 'owner_count DESC, t.downloaded_at DESC',
+    'title':  "COALESCE(t.title, '') COLLATE NOCASE ASC",
+    'artist': "COALESCE(t.artist, '') COLLATE NOCASE ASC, COALESCE(t.title, '') COLLATE NOCASE ASC",
+}
+
+
+def list_catalog(
+    viewer_id: str,
+    *,
+    query: str | None = None,
+    sort: str = 'newest',
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Return every track in the shared registry, annotated with social state
+    relative to `viewer_id`: `is_owned`, `owner_count`.
+
+    `query` is a case-insensitive substring match against title/artist.
+    `sort` is one of `_CATALOG_SORTS` keys; unknown values fall back to 'newest'.
+    """
+    order_by = _CATALOG_SORTS.get(sort, _CATALOG_SORTS['newest'])
+    params: list[Any] = [viewer_id]
+    where = ''
+    if query:
+        where = " WHERE (t.title LIKE ? OR t.artist LIKE ?)"
+        wildcard = f"%{query}%"
+        params.extend([wildcard, wildcard])
+    params.extend([limit, offset])
+
+    conn = _get_conn()
+    rows = conn.execute(
+        f"""
+        SELECT
+            t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+            t.thumbnail_url, t.source_url, t.file_size, t.downloaded_at,
+            (SELECT COUNT(*) FROM track_owners o2
+              WHERE o2.video_id = t.video_id
+                AND o2.codec    = t.codec
+                AND o2.bitrate  = t.bitrate) AS owner_count,
+            EXISTS(SELECT 1 FROM track_owners o3
+                    WHERE o3.owner_id = ?
+                      AND o3.video_id = t.video_id
+                      AND o3.codec    = t.codec
+                      AND o3.bitrate  = t.bitrate) AS is_owned
+          FROM tracks t
+          {where}
+         ORDER BY {order_by}
+         LIMIT ? OFFSET ?
+        """,
+        tuple(params),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Playlists ────────────────────────────────────────────────────────────────
+
+PLAYLIST_PUBLIC = "public"
+PLAYLIST_PRIVATE = "private"
+_VISIBILITIES = {PLAYLIST_PUBLIC, PLAYLIST_PRIVATE}
+
+
+def create_playlist(
+    *,
+    playlist_id: str,
+    owner_id: str,
+    name: str,
+    description: str | None = None,
+    visibility: str = PLAYLIST_PRIVATE,
+) -> None:
+    if visibility not in _VISIBILITIES:
+        visibility = PLAYLIST_PRIVATE
+    now = _now()
+    with _write() as conn:
+        conn.execute(
+            """
+            INSERT INTO playlists (
+                id, owner_id, name, description, visibility,
+                cover_url, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (playlist_id, owner_id, name, description, visibility, now, now),
+        )
+
+
+def get_playlist(playlist_id: str) -> dict[str, Any] | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM playlists WHERE id = ?",
+        (playlist_id,),
+    ).fetchone()
+    return _row_to_dict(row)
+
+
+def update_playlist(
+    playlist_id: str,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    visibility: str | None = None,
+    cover_url: str | None = None,
+) -> bool:
+    """Partial update. Returns True iff a row was modified."""
+    updates: list[str] = []
+    params: list[Any] = []
+    if name is not None:
+        updates.append("name = ?")
+        params.append(name)
+    if description is not None:
+        updates.append("description = ?")
+        params.append(description)
+    if visibility is not None:
+        if visibility not in _VISIBILITIES:
+            return False
+        updates.append("visibility = ?")
+        params.append(visibility)
+    if cover_url is not None:
+        updates.append("cover_url = ?")
+        params.append(cover_url)
+    if not updates:
+        return False
+    updates.append("updated_at = ?")
+    params.append(_now())
+    params.append(playlist_id)
+    with _write() as conn:
+        cur = conn.execute(
+            f"UPDATE playlists SET {', '.join(updates)} WHERE id = ?",
+            tuple(params),
+        )
+        return cur.rowcount > 0
+
+
+def delete_playlist(playlist_id: str) -> bool:
+    with _write() as conn:
+        cur = conn.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
+        return cur.rowcount > 0
+
+
+def list_playlists(
+    viewer_id: str,
+    *,
+    owner_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """List playlists the viewer can see. By default returns all of theirs +
+    every public playlist; when `owner_id` is set, scopes to that owner (still
+    respecting visibility for non-owners).
+
+    Each row is annotated with `track_count` and `is_owner`.
+    """
+    params: list[Any] = [viewer_id]
+    where = ""
+    if owner_id is not None:
+        where = "WHERE p.owner_id = ? AND (p.owner_id = ? OR p.visibility = 'public')"
+        params.extend([owner_id, viewer_id])
+    else:
+        where = "WHERE p.owner_id = ? OR p.visibility = 'public'"
+        params.append(viewer_id)
+    params.append(limit)
+
+    conn = _get_conn()
+    rows = conn.execute(
+        f"""
+        SELECT p.id, p.owner_id, p.name, p.description, p.visibility,
+               p.cover_url, p.created_at, p.updated_at,
+               (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count,
+               (p.owner_id = ?) AS is_owner
+          FROM playlists p
+          {where}
+         ORDER BY p.updated_at DESC
+         LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_playlist_tracks(playlist_id: str) -> list[dict[str, Any]]:
+    """Ordered tracks for a playlist, joined with `tracks` for display fields."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+               t.thumbnail_url, t.source_url, t.file_size,
+               pt.position, pt.added_at
+          FROM playlist_tracks pt
+          JOIN tracks t
+            ON t.video_id = pt.video_id
+           AND t.codec    = pt.codec
+           AND t.bitrate  = pt.bitrate
+         WHERE pt.playlist_id = ?
+         ORDER BY pt.position ASC
+        """,
+        (playlist_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_track_to_playlist(
+    playlist_id: str, video_id: str, codec: str, bitrate: str,
+) -> bool:
+    """Append a track to the end of the playlist. Returns False if the track
+    is already in the playlist."""
+    with _write() as conn:
+        existing = conn.execute(
+            """
+            SELECT 1 FROM playlist_tracks
+             WHERE playlist_id = ? AND video_id = ? AND codec = ? AND bitrate = ?
+            """,
+            (playlist_id, video_id, codec, bitrate),
+        ).fetchone()
+        if existing:
+            return False
+        row = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM playlist_tracks WHERE playlist_id = ?",
+            (playlist_id,),
+        ).fetchone()
+        next_pos = int(row["next_pos"]) if row else 0
+        conn.execute(
+            """
+            INSERT INTO playlist_tracks (
+                playlist_id, video_id, codec, bitrate, position, added_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (playlist_id, video_id, codec, bitrate, next_pos, _now()),
+        )
+        conn.execute(
+            "UPDATE playlists SET updated_at = ? WHERE id = ?",
+            (_now(), playlist_id),
+        )
+        return True
+
+
+def remove_track_from_playlist(
+    playlist_id: str, video_id: str, codec: str, bitrate: str,
+) -> bool:
+    with _write() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM playlist_tracks
+             WHERE playlist_id = ? AND video_id = ? AND codec = ? AND bitrate = ?
+            """,
+            (playlist_id, video_id, codec, bitrate),
+        )
+        if cur.rowcount > 0:
+            conn.execute(
+                "UPDATE playlists SET updated_at = ? WHERE id = ?",
+                (_now(), playlist_id),
+            )
+            return True
+        return False
+
+
+def reorder_playlist(
+    playlist_id: str,
+    ordered_keys: list[tuple[str, str, str]],
+) -> int:
+    """Rewrite positions to match the given order. Keys not in the playlist are
+    skipped silently; tracks not in `ordered_keys` keep their current relative
+    order pushed to the tail. Returns the number of rows actually repositioned.
+
+    Two-phase update so we don't trip the (playlist_id, position) uniqueness if
+    we ever add it: first park everything in negative space, then assign final
+    positions.
+    """
+    with _write() as conn:
+        # Current tracks for this playlist.
+        existing_rows = conn.execute(
+            """
+            SELECT video_id, codec, bitrate, position
+              FROM playlist_tracks
+             WHERE playlist_id = ?
+             ORDER BY position ASC
+            """,
+            (playlist_id,),
+        ).fetchall()
+        existing = {(r["video_id"], r["codec"], r["bitrate"]): r["position"] for r in existing_rows}
+        if not existing:
+            return 0
+
+        # Filter requested order to ones that exist.
+        requested = [k for k in ordered_keys if k in existing]
+        # Append leftovers in their original order so we don't lose them.
+        seen = set(requested)
+        tail = [
+            (r["video_id"], r["codec"], r["bitrate"])
+            for r in existing_rows
+            if (r["video_id"], r["codec"], r["bitrate"]) not in seen
+        ]
+        final = requested + tail
+
+        # Phase 1: shove everything into negative positions to avoid PK collisions.
+        conn.execute(
+            "UPDATE playlist_tracks SET position = -position - 1 WHERE playlist_id = ?",
+            (playlist_id,),
+        )
+        # Phase 2: assign final positions.
+        for new_pos, (vid, codec, bitrate) in enumerate(final):
+            conn.execute(
+                """
+                UPDATE playlist_tracks SET position = ?
+                 WHERE playlist_id = ? AND video_id = ? AND codec = ? AND bitrate = ?
+                """,
+                (new_pos, playlist_id, vid, codec, bitrate),
+            )
+        conn.execute(
+            "UPDATE playlists SET updated_at = ? WHERE id = ?",
+            (_now(), playlist_id),
+        )
+        return len(final)
