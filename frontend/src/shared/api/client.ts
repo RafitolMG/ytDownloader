@@ -1,7 +1,12 @@
 import type {
+  CatalogResponse,
+  CatalogSort,
   HistoryResponse,
   JobRow,
   LibraryResponse,
+  PlaylistDetail,
+  PlaylistVisibility,
+  PlaylistsResponse,
   ResolutionsResponse,
   SearchResponse,
   SuggestResponse,
@@ -123,4 +128,102 @@ export const api = {
 
   trackStreamUrl: (videoId: string, codec: string, bitrate: string) =>
     `/api/track/${encodeURIComponent(videoId)}/stream?codec=${encodeURIComponent(codec)}&bitrate=${encodeURIComponent(bitrate)}`,
+
+  // ── shared catalog ──
+  catalog: (params: {
+    q?: string
+    sort?: CatalogSort
+    limit?: number
+    offset?: number
+  } = {}) => {
+    const qs = new URLSearchParams()
+    if (params.q) qs.set('q', params.q)
+    if (params.sort) qs.set('sort', params.sort)
+    if (params.limit != null) qs.set('limit', String(params.limit))
+    if (params.offset != null) qs.set('offset', String(params.offset))
+    const tail = qs.toString()
+    return json<CatalogResponse>(`/api/catalog/tracks${tail ? `?${tail}` : ''}`)
+  },
+
+  catalogAdopt: (videoId: string, codec: string, bitrate: string) =>
+    json<{ ok: true; owned: true }>(
+      `/api/catalog/tracks/${encodeURIComponent(videoId)}/${encodeURIComponent(codec)}/${encodeURIComponent(bitrate)}/own`,
+      { method: 'POST' },
+    ),
+
+  catalogUnown: (videoId: string, codec: string, bitrate: string) =>
+    json<{ ok: true; owned: false; orphaned?: boolean }>(
+      `/api/catalog/tracks/${encodeURIComponent(videoId)}/${encodeURIComponent(codec)}/${encodeURIComponent(bitrate)}/own`,
+      { method: 'DELETE' },
+    ),
+
+  // ── playlists ──
+  playlists: (opts: { owner?: 'me' | string; limit?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (opts.owner) qs.set('owner_id', opts.owner)
+    if (opts.limit != null) qs.set('limit', String(opts.limit))
+    const tail = qs.toString()
+    return json<PlaylistsResponse>(`/api/playlists${tail ? `?${tail}` : ''}`)
+  },
+
+  createPlaylist: (payload: {
+    name: string
+    description?: string | null
+    visibility?: PlaylistVisibility
+  }) =>
+    json<{ id: string }>(`/api/playlists`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  playlist: (id: string) =>
+    json<PlaylistDetail>(`/api/playlists/${encodeURIComponent(id)}`),
+
+  updatePlaylist: (
+    id: string,
+    patch: {
+      name?: string
+      description?: string | null
+      visibility?: PlaylistVisibility
+      cover_url?: string | null
+    },
+  ) =>
+    json<{ ok: true }>(`/api/playlists/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  deletePlaylist: (id: string) =>
+    json<{ ok: true }>(`/api/playlists/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+
+  addToPlaylist: (
+    id: string,
+    key: { video_id: string; codec: string; bitrate: string },
+  ) =>
+    json<{ ok: true; added: boolean }>(
+      `/api/playlists/${encodeURIComponent(id)}/tracks`,
+      { method: 'POST', body: JSON.stringify(key) },
+    ),
+
+  removeFromPlaylist: (
+    id: string,
+    videoId: string,
+    codec: string,
+    bitrate: string,
+  ) =>
+    json<{ ok: true }>(
+      `/api/playlists/${encodeURIComponent(id)}/tracks/${encodeURIComponent(videoId)}/${encodeURIComponent(codec)}/${encodeURIComponent(bitrate)}`,
+      { method: 'DELETE' },
+    ),
+
+  reorderPlaylist: (
+    id: string,
+    order: Array<{ video_id: string; codec: string; bitrate: string }>,
+  ) =>
+    json<{ ok: true; reordered: number }>(
+      `/api/playlists/${encodeURIComponent(id)}/order`,
+      { method: 'PATCH', body: JSON.stringify({ order }) },
+    ),
 }
