@@ -60,7 +60,7 @@ export default function CapturePage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <main className="max-w-5xl mx-auto px-6 py-8">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
         <AppHeader queueCount={activeCount} />
 
         <SearchBar

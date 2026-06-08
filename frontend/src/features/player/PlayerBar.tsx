@@ -30,10 +30,10 @@ export function PlayerBar() {
         />
       </div>
 
-      <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-4">
+      <div className="max-w-6xl mx-auto px-2 sm:px-4 py-2 sm:py-3 flex items-center gap-2 sm:gap-4">
         {/* Cover + title */}
-        <div className="flex items-center gap-3 min-w-0 flex-1">
-          <div className="relative w-14 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+          <div className="relative w-10 sm:w-14 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page">
             {t.thumbnail_url ? (
               <img
                 src={t.thumbnail_url}
@@ -54,11 +54,12 @@ export function PlayerBar() {
         </div>
 
         {/* Transport */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-2">
           <PlayerToggle
             onClick={p.toggleShuffle}
             active={p.shuffle}
             title={p.shuffle ? 'shuffle on' : 'shuffle off'}
+            hideOnMobile
           >
             ⇄
           </PlayerToggle>
@@ -83,6 +84,7 @@ export function PlayerBar() {
             onClick={p.cycleRepeat}
             active={p.repeat !== 'off'}
             title={`repeat: ${p.repeat}`}
+            hideOnMobile
           >
             {p.repeat === 'one' ? '↻¹' : '↻'}
           </PlayerToggle>
@@ -128,10 +130,10 @@ function PlayerButton({
   title?: string
 }) {
   const base =
-    'font-pixel text-base flex items-center justify-center transition disabled:opacity-30 disabled:cursor-not-allowed rounded-xs border'
+    'font-pixel text-sm sm:text-base flex items-center justify-center transition disabled:opacity-30 disabled:cursor-not-allowed rounded-xs border'
   const variant = primary
-    ? 'w-11 h-11 border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25'
-    : 'w-9 h-9 border-border text-ink-mid hover:text-cool hover:border-cool/70'
+    ? 'w-10 h-10 sm:w-11 sm:h-11 border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25'
+    : 'w-8 h-8 sm:w-9 sm:h-9 border-border text-ink-mid hover:text-cool hover:border-cool/70'
   return (
     <button
       type="button"
@@ -150,18 +152,20 @@ function PlayerToggle({
   onClick,
   active,
   title,
+  hideOnMobile,
 }: {
   children: React.ReactNode
   onClick: () => void
   active: boolean
   title?: string
+  hideOnMobile?: boolean
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       title={title}
-      className={`w-9 h-9 font-pixel text-base flex items-center justify-center transition rounded-xs border ${
+      className={`w-9 h-9 font-pixel text-base ${hideOnMobile ? 'hidden sm:flex' : 'flex'} items-center justify-center transition rounded-xs border ${
         active
           ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
           : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'

@@ -49,7 +49,7 @@ export default function CatalogPage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <main className="max-w-6xl mx-auto px-6 py-8 pb-32">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
         <AppHeader queueCount={activeCount} />
 
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
@@ -183,11 +183,11 @@ function CatalogRow({
   return (
     <li
       onClick={handlePlay}
-      className={`flex items-center gap-3 px-3 py-2 cursor-pointer transition group ${
+      className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition group ${
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       }`}
     >
-      <div className="font-pixel text-sm text-ink-lo w-8 text-right tabular-nums">
+      <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
         {isCurrent && player.isPlaying ? (
           <span className="text-hot">▶</span>
         ) : (
@@ -195,7 +195,7 @@ function CatalogRow({
         )}
       </div>
 
-      <div className="relative w-20 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
+      <div className="relative w-14 sm:w-20 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
         {item.thumbnail_url ? (
           <img
             src={item.thumbnail_url}
