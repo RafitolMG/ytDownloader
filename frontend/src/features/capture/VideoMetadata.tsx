@@ -13,6 +13,11 @@ type Props = {
   onSelectAudio: (q: string, mode: 'library' | 'file') => void
 }
 
+// In-app library is locked to mp3-320 — the catalog only carries one
+// canonical bitrate. The device-download grid keeps the wider choice so
+// power users can grab other formats for their own files.
+const LIBRARY_QUALITY = 'mp3-320'
+
 const AUDIO_PRESETS = [
   { value: 'mp3-192', label: 'mp3 · 192', sub: 'standard' },
   { value: 'mp3-320', label: 'mp3 · 320', sub: 'high' },
@@ -31,6 +36,7 @@ export function VideoMetadata({
   isMusic,
   onSelectAudio,
 }: Props) {
+  const libraryActive = audioMode === 'library' && isMusic
   return (
     <section className="grid grid-cols-1 md:grid-cols-[280px_1fr] gap-6 mb-6">
       {/* Thumbnail */}
@@ -78,48 +84,49 @@ export function VideoMetadata({
           {meta.uploader ?? '—'}
           {meta.duration_sec ? ` • ${fmtDuration(meta.duration_sec)}` : ''}
         </div>
-        <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
-          ▸ video · download as file
-        </div>
-        {formats.length === 0 ? (
-          <div className="font-pixel text-ink-lo">no formats yet</div>
-        ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            {formats.map((f) => (
-              <button
-                key={f.format_code}
-                type="button"
-                onClick={() => onSelect(f)}
-                className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
-                  selected?.format_code === f.format_code
-                    ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
-                    : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
-                }`}
-              >
-                <div className="text-xl leading-none">
-                  {selected?.format_code === f.format_code ? '◆' : '◇'} {f.resolution}
-                </div>
-                <div className="text-sm text-ink-lo mt-1">
-                  {f.ext} · {f.size_display}
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
 
+        {/* In-app library: only for music, single locked button (mp3-320). */}
         {isMusic && (
           <>
-            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mt-5 mb-2">
-              ♪ audio · add to library
+            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
+              ♪ in app · add to library
+            </div>
+            <button
+              type="button"
+              onClick={() => onSelectAudio(LIBRARY_QUALITY, 'library')}
+              className={`w-full text-left rounded-xs border px-4 py-3 transition font-pixel mb-5 ${
+                libraryActive
+                  ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
+                  : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
+              }`}
+            >
+              <div className="text-lg leading-none">
+                {libraryActive ? '◆' : '◇'} ♥ add to library
+              </div>
+              <div className="text-sm text-ink-lo mt-1">
+                mp3 · 320 · shared with the catalog
+              </div>
+            </button>
+          </>
+        )}
+
+        {/* Device download path. Music → audio formats grid. Video → resolution
+            grid. The two are mutually exclusive: yt-dlp already attaches the
+            best audio when downloading a video, so we don't expose a separate
+            audio knob for non-music content. */}
+        {isMusic ? (
+          <>
+            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
+              ▼ to device · download as file
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {AUDIO_PRESETS.map((q) => {
-                const isActive = selectedAudio === q.value && audioMode === 'library'
+                const isActive = selectedAudio === q.value && audioMode === 'file'
                 return (
                   <button
-                    key={`lib-${q.value}`}
+                    key={`file-${q.value}`}
                     type="button"
-                    onClick={() => onSelectAudio(q.value, 'library')}
+                    onClick={() => onSelectAudio(q.value, 'file')}
                     className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
                       isActive
                         ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
@@ -135,33 +142,38 @@ export function VideoMetadata({
               })}
             </div>
           </>
+        ) : (
+          <>
+            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
+              ▼ to device · download as video
+            </div>
+            {formats.length === 0 ? (
+              <div className="font-pixel text-ink-lo">no formats yet</div>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {formats.map((f) => (
+                  <button
+                    key={f.format_code}
+                    type="button"
+                    onClick={() => onSelect(f)}
+                    className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
+                      selected?.format_code === f.format_code
+                        ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
+                        : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
+                    }`}
+                  >
+                    <div className="text-xl leading-none">
+                      {selected?.format_code === f.format_code ? '◆' : '◇'} {f.resolution}
+                    </div>
+                    <div className="text-sm text-ink-lo mt-1">
+                      {f.ext} · {f.size_display}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
         )}
-
-        <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mt-5 mb-2">
-          ▼ audio · download as file
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {AUDIO_PRESETS.map((q) => {
-            const isActive = selectedAudio === q.value && audioMode === 'file'
-            return (
-              <button
-                key={`file-${q.value}`}
-                type="button"
-                onClick={() => onSelectAudio(q.value, 'file')}
-                className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
-                  isActive
-                    ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
-                    : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
-                }`}
-              >
-                <div className="text-lg leading-none">
-                  {isActive ? '◆' : '◇'} {q.label}
-                </div>
-                <div className="text-sm text-ink-lo mt-1">{q.sub}</div>
-              </button>
-            )
-          })}
-        </div>
       </div>
     </section>
   )

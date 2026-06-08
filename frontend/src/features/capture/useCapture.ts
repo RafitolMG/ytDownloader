@@ -70,9 +70,15 @@ export function useCapture() {
   // Mutually exclusive with selectedFormat — picking one clears the other.
   // When `audioMode === 'library'` the download is routed through the
   // library import flow; `'file'` produces a downloadable audio file.
+  // Library mode always uses mp3-320 (the catalog's canonical bitrate);
+  // file mode honours whatever preset the user picks.
   const [selectedAudio, setSelectedAudio] = useState<string | null>(null)
   const [audioMode, setAudioMode] = useState<'library' | 'file'>('library')
-  const [playlistQuality, setPlaylistQuality] = useState('mp3-192')
+  // Playlist target: 'import' goes into the shared library (always mp3-320),
+  // 'zip' bundles every track into one downloadable archive at the chosen
+  // quality.
+  const [playlistMode, setPlaylistMode] = useState<'import' | 'zip'>('import')
+  const [playlistQuality, setPlaylistQuality] = useState('mp3-320')
   /** True after a `done` event whose `filename` was null — meaning the job
    * landed in the library rather than producing a downloadable file. Drives
    * the "view library" CTA on the capture page. */
@@ -104,6 +110,8 @@ export function useCapture() {
     setSelectedFormat(null)
     setSelectedAudio(null)
     setAudioMode('library')
+    setPlaylistMode('import')
+    setPlaylistQuality('mp3-320')
     setCompletedAsImport(false)
     setImportSummary(null)
     setCommittedUrl('')
@@ -262,7 +270,13 @@ export function useCapture() {
         setStatus('queued')
         setProgress(0)
         setCompletedAsImport(false)
-        const { job_id } = await api.downloadPlaylist(url.trim(), playlistQuality)
+        const asFile = playlistMode === 'zip'
+        const { job_id } = await api.downloadPlaylist(url.trim(), {
+          // Library imports always use mp3-320 server-side; for the zip
+          // path the user picks via `playlistQuality`.
+          quality: asFile ? playlistQuality : 'mp3-320',
+          as_file: asFile,
+        })
         setJobId(job_id)
         subscribeWs(job_id)
         queryClient.invalidateQueries({ queryKey: ['jobs'] })
@@ -281,7 +295,9 @@ export function useCapture() {
       const payload = selectedAudio
         ? {
             url: url.trim(),
-            format_code: selectedAudio,
+            // Library is locked to mp3-320 regardless of what's selected;
+            // file mode honours the user's choice.
+            format_code: audioMode === 'library' ? 'mp3-320' : selectedAudio,
             as_file: audioMode === 'file',
           }
         : {
@@ -298,7 +314,7 @@ export function useCapture() {
       setErrorMsg(e instanceof Error ? e.message : String(e))
       setPhase('error')
     }
-  }, [audioMode, meta.is_playlist, playlistQuality, queryClient, selectedAudio, selectedFormat, subscribeWs, url])
+  }, [audioMode, meta.is_playlist, playlistMode, playlistQuality, queryClient, selectedAudio, selectedFormat, subscribeWs, url])
 
   const abort = useCallback(async () => {
     if (!jobId) return
@@ -339,6 +355,8 @@ export function useCapture() {
     isMusic,
     selectFormat,
     selectAudio,
+    playlistMode,
+    setPlaylistMode,
     playlistQuality,
     setPlaylistQuality,
     status,

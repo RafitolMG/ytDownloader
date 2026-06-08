@@ -51,7 +51,7 @@ export function JobRow({ job }: { job: Job }) {
   const title = job.title ?? job.playlist_title ?? job.url
 
   return (
-    <div className="card-vapor rounded-sm p-4 grid grid-cols-[80px_1fr_auto] gap-4 items-center">
+    <div className="card-vapor rounded-sm p-3 sm:p-4 grid grid-cols-[60px_1fr] sm:grid-cols-[80px_1fr_auto] gap-3 sm:gap-4 items-center">
       {/* Thumbnail */}
       <div className="relative aspect-video rounded-xs overflow-hidden border border-border/60 bg-page-mid">
         {job.thumbnail_url ? (
@@ -117,8 +117,9 @@ export function JobRow({ job }: { job: Job }) {
         ) : null}
       </div>
 
-      {/* Actions */}
-      <div className="flex flex-col gap-2 items-stretch">
+      {/* Actions — span both cols on mobile so they sit beneath the meta;
+          on sm+ they live in the third column. */}
+      <div className="col-span-2 sm:col-span-1 flex flex-row sm:flex-col gap-2 items-stretch">
         {active ? (
           <button
             type="button"

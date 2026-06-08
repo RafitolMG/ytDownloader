@@ -27,7 +27,7 @@ export default function PlaylistsPage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <main className="max-w-5xl mx-auto px-6 py-8 pb-32">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
         <AppHeader queueCount={activeCount} />
 
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">

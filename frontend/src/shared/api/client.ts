@@ -1,6 +1,7 @@
 import type {
   CatalogResponse,
   CatalogSort,
+  DiscoverResponse,
   HistoryResponse,
   JobRow,
   LibraryResponse,
@@ -68,10 +69,17 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  downloadPlaylist: (url: string, quality = 'audio') =>
+  downloadPlaylist: (
+    url: string,
+    opts: { quality?: string; as_file?: boolean } = {},
+  ) =>
     json<{ job_id: string }>('/api/download-playlist', {
       method: 'POST',
-      body: JSON.stringify({ url, quality }),
+      body: JSON.stringify({
+        url,
+        quality: opts.quality ?? 'mp3-320',
+        as_file: opts.as_file ?? false,
+      }),
     }),
 
   jobs: () => json<{ jobs: JobRow[] }>('/api/jobs'),
@@ -143,6 +151,14 @@ export const api = {
     if (params.offset != null) qs.set('offset', String(params.offset))
     const tail = qs.toString()
     return json<CatalogResponse>(`/api/catalog/tracks${tail ? `?${tail}` : ''}`)
+  },
+
+  discover: (params: { q: string; limit?: number; external_limit?: number }) => {
+    const qs = new URLSearchParams()
+    qs.set('q', params.q)
+    if (params.limit != null) qs.set('limit', String(params.limit))
+    if (params.external_limit != null) qs.set('external_limit', String(params.external_limit))
+    return json<DiscoverResponse>(`/api/catalog/discover?${qs.toString()}`)
   },
 
   catalogAdopt: (videoId: string, codec: string, bitrate: string) =>

@@ -120,12 +120,12 @@ export function SearchBar({ value, onChange, onSubmit, busy }: Props) {
   }
 
   return (
-    <section className="card-vapor rounded-sm p-5 mb-6 relative" ref={wrapperRef}>
+    <section className="card-vapor rounded-sm p-3 sm:p-5 mb-6 relative" ref={wrapperRef}>
       <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
         ░▒▓ stream capture ▓▒░
       </div>
       <form
-        className="flex items-center gap-3 font-pixel text-2xl"
+        className="flex items-center gap-2 sm:gap-3 font-pixel text-lg sm:text-2xl"
         onSubmit={(e) => {
           e.preventDefault()
           if (!busy && trimmed) commit(trimmed)
@@ -143,7 +143,7 @@ export function SearchBar({ value, onChange, onSubmit, busy }: Props) {
           spellCheck={false}
           autoComplete="off"
           autoFocus
-          className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo font-pixel text-2xl caret-cool"
+          className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo font-pixel text-lg sm:text-2xl caret-cool min-w-0"
         />
         <span className="caret-blink text-cool">▮</span>
       </form>
@@ -235,7 +235,7 @@ function DropdownRow({
           : 'text-ink-mid hover:bg-violet/10 hover:text-ink-hi'
       }`}
     >
-      <div className="relative w-24 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
+      <div className="relative w-16 sm:w-24 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
         {row.thumbnail ? (
           <img
             src={row.thumbnail}
@@ -254,7 +254,7 @@ function DropdownRow({
         )}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="font-sans text-sm font-semibold leading-snug line-clamp-2">
+        <div className="font-sans text-sm font-semibold leading-snug line-clamp-2 break-all">
           {row.title}
         </div>
         {row.subtitle && (
