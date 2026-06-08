@@ -87,6 +87,8 @@ export default function CapturePage() {
               meta={c.meta}
               tracks={c.playlistTracks}
               thumbnailUrl={c.thumbnailUrl}
+              mode={c.playlistMode}
+              onModeChange={c.setPlaylistMode}
               quality={c.playlistQuality}
               onQualityChange={c.setPlaylistQuality}
             />
