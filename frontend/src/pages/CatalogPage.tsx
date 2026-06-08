@@ -1,10 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { api } from '@/shared/api/client'
-import type { CatalogItem, CatalogSort, LibraryItem } from '@/shared/api/types'
+import type {
+  CatalogItem,
+  CatalogSort,
+  ExternalCatalogItem,
+  LibraryItem,
+} from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
+import { useLiveJobProgress } from '@/features/queue/useLiveJobProgress'
 import { AddToPlaylistMenu } from '@/features/playlists/AddToPlaylistMenu'
 
 /** Map a catalog row to the shape the audio player expects. The two types
@@ -33,6 +39,17 @@ const SORT_LABELS: Record<CatalogSort, string> = {
   artist: 'artist a→z',
 }
 
+/** Tiny debounce so each keystroke doesn't trigger a ytsearch round-trip.
+ * 400ms keeps typing feedback fast while letting bursts settle. */
+function useDebouncedValue<T>(value: T, ms: number): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), ms)
+    return () => clearTimeout(t)
+  }, [value, ms])
+  return debounced
+}
+
 export default function CatalogPage() {
   const jobsQuery = useJobs()
   const activeCount = countActive(jobsQuery.data)
@@ -40,12 +57,39 @@ export default function CatalogPage() {
   const [sort, setSort] = useState<CatalogSort>('newest')
 
   const trimmed = query.trim()
+  const debouncedQuery = useDebouncedValue(trimmed, 400)
+  const isSearching = debouncedQuery.length > 0
+
+  // Two parallel queries; only one is "enabled" at a time. The catalog query
+  // (no q) drives the idle browse + sort buttons. The discover query (with q)
+  // returns DB hits plus external candidates from ytsearch.
   const catalogQuery = useQuery({
-    queryKey: ['catalog', { q: trimmed, sort }],
-    queryFn: () => api.catalog({ q: trimmed || undefined, sort, limit: 300 }),
+    queryKey: ['catalog', { sort }],
+    queryFn: () => api.catalog({ sort, limit: 300 }),
+    enabled: !isSearching,
     staleTime: 10_000,
   })
-  const items = catalogQuery.data?.items ?? []
+  const discoverQuery = useQuery({
+    queryKey: ['discover', { q: debouncedQuery }],
+    queryFn: () => api.discover({ q: debouncedQuery, limit: 60, external_limit: 12 }),
+    enabled: isSearching,
+    // ytsearch is cached server-side already; keep the client side cool too
+    // so re-typing the same query doesn't ping again.
+    staleTime: 30_000,
+  })
+
+  const dbItems: CatalogItem[] = isSearching
+    ? discoverQuery.data?.db ?? []
+    : catalogQuery.data?.items ?? []
+  const externals: ExternalCatalogItem[] = isSearching
+    ? discoverQuery.data?.external ?? []
+    : []
+
+  const activeQuery = isSearching ? discoverQuery : catalogQuery
+  const showEmpty =
+    activeQuery.data !== undefined &&
+    dbItems.length === 0 &&
+    externals.length === 0
 
   return (
     <div className="relative z-10 min-h-full">
@@ -56,22 +100,27 @@ export default function CatalogPage() {
           <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
             ░▒▓ shared catalog ▓▒░
           </div>
-          <div className="flex items-center gap-2">
-            {(Object.keys(SORT_LABELS) as CatalogSort[]).map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setSort(s)}
-                className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 border rounded-xs transition ${
-                  sort === s
-                    ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
-                    : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'
-                }`}
-              >
-                {SORT_LABELS[s]}
-              </button>
-            ))}
-          </div>
+          {/* Sort only matters when browsing — search uses popularity. Hide
+              the chips while searching so the user doesn't pick a sort that
+              quietly does nothing. */}
+          {!isSearching && (
+            <div className="flex items-center gap-2">
+              {(Object.keys(SORT_LABELS) as CatalogSort[]).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setSort(s)}
+                  className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 border rounded-xs transition ${
+                    sort === s
+                      ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
+                      : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'
+                  }`}
+                >
+                  {SORT_LABELS[s]}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="card-vapor rounded-sm p-3 mb-6 flex items-center gap-3 font-pixel">
@@ -80,7 +129,7 @@ export default function CatalogPage() {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="search the catalog..."
+            placeholder="search the catalog and youtube..."
             spellCheck={false}
             autoComplete="off"
             className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo text-lg caret-cool"
@@ -97,39 +146,59 @@ export default function CatalogPage() {
           )}
         </div>
 
-        {catalogQuery.isLoading && (
+        {activeQuery.isLoading && (
           <div className="font-pixel text-ink-mid">··· loading catalog ···</div>
         )}
-        {catalogQuery.isError && (
+        {activeQuery.isError && (
           <div className="font-pixel text-crit">
-            failed to load catalog:{' '}
-            {catalogQuery.error instanceof Error ? catalogQuery.error.message : 'unknown'}
+            failed to load:{' '}
+            {activeQuery.error instanceof Error ? activeQuery.error.message : 'unknown'}
           </div>
         )}
-        {catalogQuery.data && items.length === 0 && (
+        {showEmpty && (
           <div className="card-vapor rounded-sm p-8 text-center">
             <div className="font-pixel text-lg text-ink-mid mb-2">
-              ⊹ empty catalog ⊹
+              ⊹ nothing found ⊹
             </div>
             <div className="font-pixel text-sm text-ink-lo">
-              {trimmed
-                ? `no tracks match "${trimmed}"`
+              {isSearching
+                ? `nothing in the catalog or on youtube matches "${debouncedQuery}"`
                 : 'no tracks have been downloaded yet.'}
             </div>
           </div>
         )}
 
-        {items.length > 0 && (
+        {dbItems.length > 0 && (
           <ul className="card-vapor rounded-sm divide-y divide-border">
-            {items.map((it, idx) => (
+            {dbItems.map((it, idx) => (
               <CatalogRow
                 key={`${it.video_id}/${it.codec}/${it.bitrate}`}
                 item={it}
                 position={idx + 1}
-                allItems={items}
+                allItems={dbItems}
               />
             ))}
           </ul>
+        )}
+
+        {externals.length > 0 && (
+          <>
+            <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+              <span className="flex-1 border-t border-border" />
+              <span>↓ found on youtube · not yet downloaded</span>
+              <span className="flex-1 border-t border-border" />
+            </div>
+            <ul className="card-vapor rounded-sm divide-y divide-border">
+              {externals.map((ext, idx) => (
+                <ExternalRow
+                  key={ext.video_id}
+                  item={ext}
+                  position={dbItems.length + idx + 1}
+                  invalidateKey={debouncedQuery}
+                />
+              ))}
+            </ul>
+          </>
         )}
       </main>
     </div>
@@ -158,6 +227,7 @@ function CatalogRow({
         : api.catalogAdopt(item.video_id, item.codec, item.bitrate),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
+      queryClient.invalidateQueries({ queryKey: ['discover'] })
       queryClient.invalidateQueries({ queryKey: ['library'] })
     },
   })
@@ -266,6 +336,113 @@ function CatalogRow({
         )}
       />
 
+    </li>
+  )
+}
+
+/** Row for a YouTube candidate not yet in the catalog. Clicking ⬇ fires a
+ * library import (mp3-320 — the catalog's canonical bitrate) and subscribes
+ * to the job's progress WS. On completion the catalog and discover queries
+ * are invalidated so the row re-renders as a CatalogRow on the next fetch. */
+function ExternalRow({
+  item,
+  position,
+  invalidateKey,
+}: {
+  item: ExternalCatalogItem
+  position: number
+  invalidateKey: string
+}) {
+  const queryClient = useQueryClient()
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [failed, setFailed] = useState<string | null>(null)
+
+  const live = useLiveJobProgress(jobId ?? '', jobId !== null)
+
+  const download = useMutation({
+    mutationFn: () =>
+      api.download({
+        url: item.source_url,
+        format_code: 'mp3-320',
+        as_file: false,
+      }),
+    onSuccess: ({ job_id }) => {
+      setJobId(job_id)
+      setFailed(null)
+    },
+    onError: (e) => setFailed(e instanceof Error ? e.message : 'download failed'),
+  })
+
+  // The hook closes its WS and emits 'done' / 'error' through query
+  // invalidation; reacting to the status here lets us flip the row UI
+  // immediately and refresh the catalog so a freshly-downloaded track
+  // shows up as a real DB row.
+  useEffect(() => {
+    if (live.status === 'done') {
+      queryClient.invalidateQueries({ queryKey: ['discover'] })
+      queryClient.invalidateQueries({ queryKey: ['catalog'] })
+      queryClient.invalidateQueries({ queryKey: ['library'] })
+    } else if (live.status === 'error') {
+      setFailed('download failed — check the queue')
+    }
+  }, [live.status, queryClient, invalidateKey])
+
+  const isPending = download.isPending || (jobId !== null && live.status !== 'done' && live.status !== 'error')
+  const pct = live.progress ?? 0
+
+  return (
+    <li className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 transition opacity-90">
+      <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
+        {String(position).padStart(2, '0')}
+      </div>
+
+      <div className="relative w-14 sm:w-20 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
+        {item.thumbnail_url ? (
+          <img
+            src={item.thumbnail_url}
+            alt=""
+            className="w-full h-full object-cover"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
+        )}
+        {item.duration_sec != null && (
+          <span className="absolute bottom-0.5 right-0.5 font-pixel text-[10px] leading-none bg-page/80 text-cool px-1 py-0.5 rounded-xs">
+            {fmtDuration(item.duration_sec)}
+          </span>
+        )}
+      </div>
+
+      <div className="flex-1 min-w-0">
+        <div className="font-sans text-sm font-medium text-ink-hi leading-snug line-clamp-2">
+          {item.title ?? item.video_id}
+        </div>
+        <div className="text-sm text-ink-lo truncate mt-0.5">
+          {item.artist ?? '—'}
+        </div>
+        {jobId && live.status !== 'done' && (
+          <div className="mt-1 font-pixel text-xs text-cool tabular-nums">
+            ··· downloading {pct.toFixed(0)}%
+          </div>
+        )}
+        {failed && (
+          <div className="mt-1 font-pixel text-xs text-crit">⚠ {failed}</div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => {
+          if (!isPending) download.mutate()
+        }}
+        disabled={isPending}
+        title="download mp3 · 320 and add to the catalog"
+        className="font-pixel text-sm flex items-center gap-1 px-2 py-1 border rounded-xs transition disabled:opacity-50 border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)]"
+      >
+        {isPending ? '···' : '⬇'}
+      </button>
     </li>
   )
 }

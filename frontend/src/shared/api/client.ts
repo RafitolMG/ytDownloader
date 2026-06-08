@@ -1,6 +1,7 @@
 import type {
   CatalogResponse,
   CatalogSort,
+  DiscoverResponse,
   HistoryResponse,
   JobRow,
   LibraryResponse,
@@ -150,6 +151,14 @@ export const api = {
     if (params.offset != null) qs.set('offset', String(params.offset))
     const tail = qs.toString()
     return json<CatalogResponse>(`/api/catalog/tracks${tail ? `?${tail}` : ''}`)
+  },
+
+  discover: (params: { q: string; limit?: number; external_limit?: number }) => {
+    const qs = new URLSearchParams()
+    qs.set('q', params.q)
+    if (params.limit != null) qs.set('limit', String(params.limit))
+    if (params.external_limit != null) qs.set('external_limit', String(params.external_limit))
+    return json<DiscoverResponse>(`/api/catalog/discover?${qs.toString()}`)
   },
 
   catalogAdopt: (videoId: string, codec: string, bitrate: string) =>
