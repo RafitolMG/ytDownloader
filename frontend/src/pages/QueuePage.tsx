@@ -31,7 +31,7 @@ export default function QueuePage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <main className="max-w-5xl mx-auto px-6 py-8">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
         <AppHeader queueCount={activeCount} />
 
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
