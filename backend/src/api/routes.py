@@ -909,6 +909,61 @@ def list_catalog(
     return {"items": items}
 
 
+@app.get("/api/catalog/discover")
+def catalog_discover(
+    q: str = "",
+    limit: int = 20,
+    external_limit: int = 10,
+    user: CurrentUser = Depends(current_user),
+):
+    """
+    Hybrid search: local catalog + YouTube candidates that aren't yet in the
+    shared library. Externals carry the metadata needed to render a row and
+    fire a download against /api/download — they're not real tracks until the
+    user clicks ⬇ and the job completes.
+
+    Dedup: an external is dropped if its `video_id` already appears in the
+    catalog results. We don't run an `is_music` check per external — that
+    would require a per-video yt-dlp call (1-2s each). The user explicitly
+    opts in by clicking the download button, so a stray podcast slipping
+    through is acceptable; they can always un-own it.
+    """
+    q_norm = (q or "").strip()
+    limit = max(1, min(limit, 100))
+    external_limit = max(0, min(external_limit, 25))
+
+    db_items = db.list_catalog(
+        user.user_id, query=q_norm or None, sort="popular", limit=limit, offset=0,
+    )
+
+    externals: list[dict] = []
+    # Browsing without a query stays purely local — external search only
+    # makes sense when the user is actually looking for something.
+    if q_norm and external_limit > 0:
+        known_ids = {it["video_id"] for it in db_items}
+        try:
+            raw = search_mod.search(q_norm, limit=external_limit + len(known_ids))
+        except Exception:
+            traceback.print_exc()
+            raw = []
+        for entry in raw:
+            if len(externals) >= external_limit:
+                break
+            vid = entry.get("id")
+            if not vid or vid in known_ids:
+                continue
+            externals.append({
+                "video_id": vid,
+                "title": entry.get("title"),
+                "artist": entry.get("channel"),
+                "thumbnail_url": entry.get("thumbnail"),
+                "duration_sec": entry.get("duration_seconds"),
+                "source_url": entry.get("url"),
+            })
+
+    return {"db": db_items, "external": externals}
+
+
 @app.post("/api/catalog/tracks/{video_id}/{codec}/{bitrate}/own")
 def catalog_adopt(
     video_id: str,
