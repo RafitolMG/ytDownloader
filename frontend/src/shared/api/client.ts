@@ -68,10 +68,17 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  downloadPlaylist: (url: string, quality = 'audio') =>
+  downloadPlaylist: (
+    url: string,
+    opts: { quality?: string; as_file?: boolean } = {},
+  ) =>
     json<{ job_id: string }>('/api/download-playlist', {
       method: 'POST',
-      body: JSON.stringify({ url, quality }),
+      body: JSON.stringify({
+        url,
+        quality: opts.quality ?? 'mp3-320',
+        as_file: opts.as_file ?? false,
+      }),
     }),
 
   jobs: () => json<{ jobs: JobRow[] }>('/api/jobs'),

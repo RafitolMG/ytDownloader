@@ -1,15 +1,20 @@
 import type { PlaylistTrack } from '@/shared/api/types'
 import type { CaptureMetadata } from './useCapture'
 
+type Mode = 'import' | 'zip'
+
 type Props = {
   meta: CaptureMetadata
   tracks: PlaylistTrack[]
   thumbnailUrl: string | null
+  mode: Mode
+  onModeChange: (m: Mode) => void
+  // Only used when mode === 'zip'; the library import is locked to mp3-320.
   quality: string
   onQualityChange: (q: string) => void
 }
 
-const AUDIO_QUALITIES = [
+const ZIP_QUALITIES = [
   { value: 'mp3-192', label: 'mp3 · 192', sub: 'standard' },
   { value: 'mp3-320', label: 'mp3 · 320', sub: 'high' },
   { value: 'm4a', label: 'm4a (aac)', sub: 'apple-friendly' },
@@ -20,9 +25,13 @@ export function PlaylistTracks({
   meta,
   tracks,
   thumbnailUrl,
+  mode,
+  onModeChange,
   quality,
   onQualityChange,
 }: Props) {
+  const importActive = mode === 'import'
+  const zipActive = mode === 'zip'
   return (
     <section className="mb-6 space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-[280px_1fr] gap-6">
@@ -52,7 +61,7 @@ export function PlaylistTracks({
           </div>
         </div>
 
-        {/* Header + quality */}
+        {/* Header + mode picker */}
         <div className="card-vapor rounded-sm p-5">
           <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
             // playlist acquired
@@ -65,28 +74,69 @@ export function PlaylistTracks({
               ? `${meta.playlist_count} track${meta.playlist_count === 1 ? '' : 's'}`
               : 'preparing tracks…'}
           </div>
-          <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
-            audio quality
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            {AUDIO_QUALITIES.map((q) => (
-              <button
-                key={q.value}
-                type="button"
-                onClick={() => onQualityChange(q.value)}
-                className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
-                  quality === q.value
-                    ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
-                    : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
-                }`}
-              >
-                <div className="text-lg leading-none">
-                  {quality === q.value ? '◆' : '◇'} {q.label}
-                </div>
-                <div className="text-sm text-ink-lo mt-1">{q.sub}</div>
-              </button>
-            ))}
-          </div>
+
+          {/* In-app import — locked to mp3-320, no selector. */}
+          <button
+            type="button"
+            onClick={() => onModeChange('import')}
+            className={`w-full text-left rounded-xs border px-4 py-3 transition font-pixel mb-3 ${
+              importActive
+                ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
+                : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
+            }`}
+          >
+            <div className="text-lg leading-none">
+              {importActive ? '◆' : '◇'} ♪ import to library
+            </div>
+            <div className="text-sm text-ink-lo mt-1">
+              mp3 · 320 · shared with the catalog
+            </div>
+          </button>
+
+          {/* Device zip — exposes the quality selector. */}
+          <button
+            type="button"
+            onClick={() => onModeChange('zip')}
+            className={`w-full text-left rounded-xs border px-4 py-3 transition font-pixel ${
+              zipActive
+                ? 'border-hot bg-hot/10 text-ink-hi shadow-[var(--shadow-glow-hot)]'
+                : 'border-border text-ink-mid hover:border-cool hover:text-cool hover:shadow-[var(--shadow-glow-cool)]'
+            }`}
+          >
+            <div className="text-lg leading-none">
+              {zipActive ? '◆' : '◇'} ▼ download as zip
+            </div>
+            <div className="text-sm text-ink-lo mt-1">
+              bundles every track to your device
+            </div>
+          </button>
+
+          {zipActive && (
+            <div className="mt-4">
+              <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-2">
+                zip · audio quality
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {ZIP_QUALITIES.map((q) => (
+                  <button
+                    key={q.value}
+                    type="button"
+                    onClick={() => onQualityChange(q.value)}
+                    className={`text-left rounded-xs border px-3 py-2 transition font-pixel ${
+                      quality === q.value
+                        ? 'border-cool bg-cool/10 text-cool shadow-[var(--shadow-glow-cool)]'
+                        : 'border-border text-ink-mid hover:border-cool hover:text-cool'
+                    }`}
+                  >
+                    <div className="text-lg leading-none">
+                      {quality === q.value ? '◆' : '◇'} {q.label}
+                    </div>
+                    <div className="text-sm text-ink-lo mt-1">{q.sub}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

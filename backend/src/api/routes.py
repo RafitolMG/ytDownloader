@@ -8,6 +8,7 @@ import threading
 import time
 import traceback
 import uuid
+import zipfile
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -131,7 +132,11 @@ class DownloadRequest(BaseModel):
 
 class PlaylistDownloadRequest(BaseModel):
     url: str
-    quality: str = 'audio'
+    # `quality` only applies when `as_file=True` (zip-to-device flow). In-app
+    # imports are always mp3-320 regardless of what the client sends — see
+    # the route body.
+    quality: str = 'mp3-320'
+    as_file: bool = False
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -433,31 +438,44 @@ def _library_path(video_id: str, codec: str, bitrate: str, ext: str) -> str:
 @app.post("/api/download-playlist")
 def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = Depends(current_user)):
     """
-    Import a playlist into the user's library. Each track is stored in the
-    shared content-addressed library at LIBRARY_DIR/{video_id}/{codec}_{bitrate}.{ext}.
+    Two flows depending on `as_file`:
 
-    Dedup rules per track:
+      - `as_file=False` (default — in-app import): every track is stored in
+        the shared content-addressed library and linked to the user. Quality
+        is forced to mp3-320 here — the client doesn't get to pick. The
+        catalog only carries one canonical bitrate.
+      - `as_file=True` (download to device): each track is extracted to a
+        per-job tmp_dir, zipped into one archive, and served via /api/file
+        like a single-video download. The library is NOT touched.
+
+    Dedup rules (in-app flow only):
       - If the (video_id, codec, bitrate) tuple exists in `tracks` AND the
-        file is present on disk → skip the download and just link this user as
-        an owner.
+        file is present on disk → skip the download and just link this user
+        as an owner.
       - If the row exists but the file is gone → re-download.
       - Otherwise → download, hash, register, link.
 
     Returns a job_id to track progress via WebSocket.
     """
+    # The in-app catalog standardises on mp3-320; ignore whatever the client
+    # sent. Only the zip-to-device flow honours `body.quality`.
+    effective_quality = body.quality if body.as_file else 'mp3-320'
     try:
-        codec, bitrate, ext = ytDownloaderFunctions.parse_audio_quality(body.quality)
+        codec, bitrate, ext = ytDownloaderFunctions.parse_audio_quality(effective_quality)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     job_id = str(uuid.uuid4())
     progress_queue: queue.Queue = queue.Queue()
-    _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": None}
+    # Zip flow stages everything in a tmp_dir; in-app flow writes straight
+    # to LIBRARY_DIR via the per-track downloader and needs no scratch space.
+    tmp_dir = tempfile.mkdtemp(prefix="ytdl_pl_") if body.as_file else None
+    _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": tmp_dir}
 
     db.create_job(
         job_id=job_id,
         url=body.url,
-        format_code=body.quality,
+        format_code=effective_quality,
         is_playlist=True,
         owner_id=user.user_id,
     )
@@ -625,8 +643,131 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
             db.fail(job_id, str(e))
             progress_queue.put({"type": "error", "message": str(e)})
 
-    threading.Thread(target=run, daemon=True).start()
+    def run_zip():
+        # Stage every track audio file in tmp_dir, then zip them as a single
+        # archive served via /api/file. Per-track failures don't abort the
+        # zip — they're surfaced as `track_skipped` and the rest still ship.
+        try:
+            try:
+                info = ytDownloaderFunctions.get_playlist_tracks(body.url)
+                db.set_metadata(
+                    job_id,
+                    playlist_title=info.get('title'),
+                    playlist_count=info.get('count'),
+                    thumbnail_url=info.get('thumbnail_url'),
+                )
+                meta_event = {k: v for k, v in info.items() if k != 'tracks'}
+                progress_queue.put({"type": "metadata", **meta_event})
+            except Exception:
+                traceback.print_exc()
+                raise
+
+            tracks = info.get('tracks') or []
+            if not tracks:
+                raise RuntimeError(
+                    "Playlist returned no tracks. It may be private, empty, or "
+                    "blocked in your region."
+                )
+
+            db.mark_started(job_id)
+            total = len(tracks)
+            playlist_title = info.get('title') or "playlist"
+            staged: list[tuple[str, str]] = []  # (src_path, arcname)
+            skipped = 0
+
+            for idx, entry in enumerate(tracks, start=1):
+                if job_id in _cancelled:
+                    raise _Cancelled()
+
+                video_id = entry['id']
+                title = entry.get('title') or video_id
+                progress_queue.put({"type": "track", "index": idx, "total": total, "title": title})
+
+                base_pct = (idx - 1) / total * 100
+
+                # Each track is staged to its own subdir so download_track_audio
+                # can drop its scratch files without colliding across tracks.
+                track_dir = os.path.join(tmp_dir, video_id)
+                arcname = f"{idx:02d} - {_safe_filename(title)}.{ext}"
+                dest_path = os.path.join(track_dir, arcname)
+
+                def on_track_progress(pct: float, _base=base_pct, _total=total):
+                    if job_id in _cancelled:
+                        raise _Cancelled()
+                    overall = _base + (pct / _total)
+                    progress_queue.put({"type": "progress", "value": round(overall, 1)})
+
+                try:
+                    ytDownloaderFunctions.download_track_audio(
+                        entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
+                        codec, bitrate, dest_path,
+                        on_progress=on_track_progress,
+                    )
+                    staged.append((dest_path, arcname))
+                except _Cancelled:
+                    raise
+                except Exception as track_err:
+                    traceback.print_exc()
+                    skipped += 1
+                    progress_queue.put({
+                        "type": "track_skipped",
+                        "index": idx,
+                        "total": total,
+                        "title": title,
+                        "message": str(track_err),
+                    })
+
+                db.update_progress(job_id, idx / total * 100)
+
+            if not staged:
+                raise RuntimeError(
+                    "No tracks could be downloaded — every one failed or was skipped."
+                )
+
+            zip_name = f"{_safe_filename(playlist_title)}.zip"
+            zip_path = os.path.join(tmp_dir, zip_name)
+            # Audio is already compressed; ZIP_STORED keeps CPU + time low.
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
+                for src, arcname in staged:
+                    zf.write(src, arcname)
+
+            _jobs[job_id]["file_path"] = zip_path
+            zip_size = os.path.getsize(zip_path)
+            db.finish(job_id, size_bytes=zip_size)
+            progress_queue.put({
+                "type": "done",
+                "filename": zip_name,
+                "imported": len(staged),
+                "reused": 0,
+                "skipped": skipped,
+            })
+
+        except _Cancelled:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            _jobs.pop(job_id, None)
+            _cancelled.discard(job_id)
+            db.cancel(job_id)
+            progress_queue.put({"type": "cancelled"})
+
+        except Exception as e:
+            traceback.print_exc()
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            _jobs.pop(job_id, None)
+            db.fail(job_id, str(e))
+            progress_queue.put({"type": "error", "message": str(e)})
+
+    target = run_zip if body.as_file else run
+    threading.Thread(target=target, daemon=True).start()
     return {"job_id": job_id}
+
+
+def _safe_filename(s: str) -> str:
+    """Strip filesystem-hostile characters from a string for use as a filename.
+    Truncates to 120 chars to keep the resulting paths well under the 255-byte
+    limit shared by ext4/NTFS/APFS."""
+    bad = '<>:"/\\|?*\0'
+    cleaned = ''.join(c if c not in bad else '_' for c in s).strip().strip('.')
+    return (cleaned or 'track')[:120]
 
 
 @app.websocket("/ws/progress/{job_id}")
