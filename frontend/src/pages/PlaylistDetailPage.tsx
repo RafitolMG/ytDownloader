@@ -85,14 +85,14 @@ export default function PlaylistDetailPage() {
 
   if (playlistQuery.isLoading) {
     return (
-      <main className="max-w-5xl mx-auto px-6 py-8">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
         <div className="font-pixel text-ink-mid">··· loading playlist ···</div>
       </main>
     )
   }
   if (playlistQuery.isError || !playlistQuery.data) {
     return (
-      <main className="max-w-5xl mx-auto px-6 py-8">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
         <div className="font-pixel text-crit">
           could not load playlist —{' '}
           {playlistQuery.error instanceof Error
@@ -128,7 +128,7 @@ export default function PlaylistDetailPage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <main className="max-w-5xl mx-auto px-6 py-8 pb-32">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
         <AppHeader queueCount={activeCount} />
 
         <div className="mb-3">
@@ -276,19 +276,19 @@ function TrackRow({
         const from = Number(e.dataTransfer.getData('text/plain'))
         if (!Number.isNaN(from)) onDropAt(from)
       }}
-      className={`flex items-center gap-3 px-3 py-2 cursor-pointer transition group ${
+      className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition group ${
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       } ${over ? 'border-t-2 border-cool' : ''}`}
     >
       {isOwner && (
         <span
-          className="font-pixel text-sm text-ink-lo/60 cursor-grab select-none"
+          className="font-pixel text-sm text-ink-lo/60 cursor-grab select-none hidden sm:inline"
           title="drag to reorder"
         >
           ⋮⋮
         </span>
       )}
-      <div className="font-pixel text-sm text-ink-lo w-8 text-right tabular-nums">
+      <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
         {isCurrent && player.isPlaying ? (
           <span className="text-hot">▶</span>
         ) : (
@@ -296,7 +296,7 @@ function TrackRow({
         )}
       </div>
 
-      <div className="relative w-20 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
+      <div className="relative w-14 sm:w-20 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
         {track.thumbnail_url ? (
           <img
             src={track.thumbnail_url}
@@ -332,7 +332,7 @@ function TrackRow({
             onRemove()
           }}
           title="remove from playlist"
-          className="font-pixel text-sm uppercase tracking-widest w-7 h-7 flex items-center justify-center border border-transparent text-ink-lo opacity-0 group-hover:opacity-100 hover:text-crit hover:border-crit/60 transition rounded-xs"
+          className="font-pixel text-sm uppercase tracking-widest w-7 h-7 flex items-center justify-center border border-transparent text-ink-lo opacity-100 lg:opacity-0 lg:group-hover:opacity-100 hover:text-crit hover:border-crit/60 transition rounded-xs"
         >
           ✕
         </button>

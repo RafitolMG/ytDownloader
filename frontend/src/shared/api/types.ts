@@ -153,6 +153,22 @@ export type CatalogResponse = {
   items: CatalogItem[]
 }
 
+/** Result from /api/catalog/discover for tracks not yet in the catalog —
+ * just enough metadata to render a row + fire a download. */
+export type ExternalCatalogItem = {
+  video_id: string
+  title: string | null
+  artist: string | null
+  thumbnail_url: string | null
+  duration_sec: number | null
+  source_url: string
+}
+
+export type DiscoverResponse = {
+  db: CatalogItem[]
+  external: ExternalCatalogItem[]
+}
+
 // ── Playlists ────────────────────────────────────────────────────────────────
 
 export type PlaylistVisibility = 'public' | 'private'
