@@ -18,7 +18,11 @@ from typing import Any, Iterator
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DATA_DIR = os.path.join(_BACKEND_ROOT, "data")
+# YTDL_DATA_DIR lets the deployment point the database at a mounted volume so it
+# survives container redeploys (sessions + play history). Defaults to the
+# in-repo ./data for local dev. In the Docker image this resolves to /app/data,
+# which Coolify should back with persistent storage.
+_DATA_DIR = os.environ.get("YTDL_DATA_DIR") or os.path.join(_BACKEND_ROOT, "data")
 _DB_PATH = os.path.join(_DATA_DIR, "queue.db")
 
 # Thread-local connection so each worker thread gets its own handle.

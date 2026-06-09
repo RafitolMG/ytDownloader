@@ -49,6 +49,12 @@ RUN mkdir -p /app/data \
     && useradd --create-home --uid 1000 --shell /usr/sbin/nologin ytdl \
     && chown -R ytdl:ytdl /app
 
+# The SQLite DB (sessions, play history, catalog metadata) lives in /app/data.
+# Back this path with persistent storage in Coolify (Service → Storage →
+# add a volume mounted at /app/data), otherwise every redeploy starts empty:
+# everyone gets logged out and daily-mix history resets.
+VOLUME ["/app/data"]
+
 USER ytdl
 
 EXPOSE 9877
