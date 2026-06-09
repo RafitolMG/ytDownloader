@@ -201,6 +201,13 @@ export type CategoryFeed = {
   external: ExternalCatalogItem[]
 }
 
+/** "More like this" radio for a track: what you already have (playable) plus
+ * new candidates to download. */
+export type RadioFeed = {
+  db: CatalogItem[]
+  external: ExternalCatalogItem[]
+}
+
 /** A rotating daily mix of playable catalog tracks, anchored to an artist. */
 export type DailyMix = {
   id: string

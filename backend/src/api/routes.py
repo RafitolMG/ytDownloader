@@ -1182,6 +1182,48 @@ def catalog_category(
     }
 
 
+@app.get("/api/catalog/radio/{video_id}")
+def catalog_radio(
+    video_id: str,
+    external_limit: int = 18,
+    user: CurrentUser = Depends(current_user),
+):
+    """"More like this" / artist radio for a track: the seed's YouTube Mix split
+    into what's already in the catalog (playable now) and new candidates to
+    download. Music-filtered (lenient — the Mix is music-seeded)."""
+    external_limit = max(0, min(external_limit, 30))
+    try:
+        rel = search_mod.related(video_id, limit=external_limit + 20)
+    except Exception:
+        traceback.print_exc()
+        rel = []
+
+    by_id = {
+        c["video_id"]: c
+        for c in db.list_catalog(user.user_id, sort="popular", limit=500)
+    }
+
+    db_items: list[dict] = []
+    externals: list[dict] = []
+    seen: set[str] = set()
+    for entry in rel:
+        vid = entry.get("id")
+        if not vid or vid in seen:
+            continue
+        seen.add(vid)
+        if vid in by_id:
+            db_items.append(by_id[vid])
+            continue
+        if len(externals) >= external_limit:
+            continue
+        item = _external_item(entry)
+        if not _is_music_candidate(item, strict=False):
+            continue
+        externals.append(item)
+
+    return {"db": db_items, "external": externals}
+
+
 @app.get("/api/catalog/daily-mixes")
 def daily_mixes(
     count: int = 4,
