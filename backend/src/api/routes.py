@@ -136,6 +136,11 @@ class DownloadRequest(BaseModel):
     # tmp_dir and serve it via /api/file like a video instead of importing
     # into the user's library.
     as_file: bool = False
+    # When false, the track is still registered in the shared catalog (so anyone
+    # can stream it) but the requester is NOT added as an owner — i.e. it's made
+    # available without becoming one of their favourites. Used when playing a
+    # not-yet-downloaded track from a daily mix.
+    own: bool = True
 
 
 class PlaylistDownloadRequest(BaseModel):
@@ -244,13 +249,15 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
 
             existing = db.get_track(video_id, codec, bitrate)
             if existing and os.path.isfile(existing['file_path']):
-                # Already in the shared library — just link this user.
-                db.link_owner(
-                    owner_id=user.user_id,
-                    video_id=video_id,
-                    codec=codec,
-                    bitrate=bitrate,
-                )
+                # Already in the shared library — link this user unless this is a
+                # catalog-only fetch (own=False).
+                if body.own:
+                    db.link_owner(
+                        owner_id=user.user_id,
+                        video_id=video_id,
+                        codec=codec,
+                        bitrate=bitrate,
+                    )
                 progress_queue.put({"type": "progress", "value": 100.0})
                 db.finish(job_id, size_bytes=existing.get('file_size'))
                 progress_queue.put({
@@ -288,12 +295,13 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
                 file_size=file_size,
                 sha256=sha256,
             )
-            db.link_owner(
-                owner_id=user.user_id,
-                video_id=video_id,
-                codec=codec,
-                bitrate=bitrate,
-            )
+            if body.own:
+                db.link_owner(
+                    owner_id=user.user_id,
+                    video_id=video_id,
+                    codec=codec,
+                    bitrate=bitrate,
+                )
             db.finish(job_id, size_bytes=file_size)
             progress_queue.put({
                 "type": "done",
@@ -1273,6 +1281,8 @@ def daily_mixes(
     rot = day_seed % len(anchors)
     todays = (anchors[rot:] + anchors[:rot])[:count]
 
+    catalog_ids = {t["video_id"] for t in pool}
+
     mixes: list[dict] = []
     for i, anchor in enumerate(todays):
         lead = db.list_tracks_by_artist(user.user_id, anchor, limit=size)
@@ -1285,6 +1295,31 @@ def daily_mixes(
         tracks = (lead + rest)[:size]
         if len(tracks) < 4:
             continue  # too thin to be a "mix"
+
+        # Sprinkle in not-yet-downloaded tracks related to the mix's lead so the
+        # mix keeps growing beyond the catalog — playing one downloads it (to the
+        # shared catalog, without favouriting). Cached per seed; best-effort.
+        externals: list[dict] = []
+        seed_vid = tracks[0]["video_id"] if tracks else None
+        if seed_vid:
+            try:
+                rel = search_mod.related(seed_vid, limit=18)
+            except Exception:
+                traceback.print_exc()
+                rel = []
+            seen_e: set[str] = set()
+            for entry in rel:
+                if len(externals) >= 8:
+                    break
+                vid = entry.get("id")
+                if not vid or vid in catalog_ids or vid in seen_e:
+                    continue
+                seen_e.add(vid)
+                item = _external_item(entry)
+                if not _is_music_candidate(item, strict=False):
+                    continue
+                externals.append(item)
+
         # "<Artist> - Topic" is YouTube's auto-channel naming — show just the artist.
         subtitle = anchor[: -len(" - Topic")] if anchor.endswith(" - Topic") else anchor
         mixes.append({
@@ -1293,6 +1328,7 @@ def daily_mixes(
             "subtitle": subtitle,
             "accent": ("hot", "cool", "violet")[i % 3],
             "tracks": tracks,
+            "external": externals,
         })
 
     return {"mixes": mixes, "personalized": personalized}

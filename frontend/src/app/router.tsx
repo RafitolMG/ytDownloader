@@ -4,6 +4,7 @@ import QueuePage from '@/pages/QueuePage'
 import CatalogPage from '@/pages/CatalogPage'
 import PlaylistsPage from '@/pages/PlaylistsPage'
 import PlaylistDetailPage from '@/pages/PlaylistDetailPage'
+import LikedSongsPage from '@/pages/LikedSongsPage'
 import LoginPage from '@/pages/LoginPage'
 import { RequireAuth } from '@/features/auth/RequireAuth'
 
@@ -43,6 +44,15 @@ export function AppRouter() {
         element={
           <RequireAuth>
             <PlaylistsPage />
+          </RequireAuth>
+        }
+      />
+      {/* Pinned "Liked Songs" — must precede the :id route. */}
+      <Route
+        path="/playlists/liked"
+        element={
+          <RequireAuth>
+            <LikedSongsPage />
           </RequireAuth>
         }
       />

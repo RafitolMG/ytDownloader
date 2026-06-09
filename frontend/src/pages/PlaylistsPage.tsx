@@ -6,6 +6,36 @@ import { api } from '@/shared/api/client'
 import type { PlaylistSummary, PlaylistVisibility } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 
+/** Pinned "Liked Songs" tile — the user's saved tracks, Spotify-style, living
+ * here in Playlists rather than in the catalog. */
+function LikedSongsCard({ count }: { count: number }) {
+  return (
+    <Link
+      to="/playlists/liked"
+      className="card-vapor rounded-sm overflow-hidden flex flex-col group hover:border-hot/60 transition"
+    >
+      <div className="relative aspect-video overflow-hidden bg-gradient-to-br from-hot/50 via-violet/30 to-cool/30 flex items-center justify-center">
+        <span className="text-5xl text-ink-hi" style={{ textShadow: '0 0 16px var(--color-hot)' }}>
+          ♥
+        </span>
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            backgroundImage:
+              'repeating-linear-gradient(to bottom, transparent 0px, transparent 2px, rgba(0,0,0,0.25) 2px, rgba(0,0,0,0.25) 3px)',
+          }}
+        />
+      </div>
+      <div className="p-3 flex-1">
+        <div className="font-sans text-sm font-semibold text-ink-hi">Liked Songs</div>
+        <div className="font-pixel text-xs text-ink-lo uppercase tracking-widest mt-1">
+          {count} track{count === 1 ? '' : 's'}
+        </div>
+      </div>
+    </Link>
+  )
+}
+
 type Tab = 'mine' | 'public'
 
 export default function PlaylistsPage() {
@@ -19,6 +49,13 @@ export default function PlaylistsPage() {
     queryFn: () => api.playlists(tab === 'mine' ? { owner: 'me' } : {}),
     staleTime: 5_000,
   })
+  const libraryQuery = useQuery({
+    queryKey: ['library'],
+    queryFn: () => api.library(500),
+    enabled: tab === 'mine',
+    staleTime: 10_000,
+  })
+  const likedCount = libraryQuery.data?.items.length ?? 0
 
   // Splitting at render-time keeps a single query in cache covering both tabs
   // (the "all" call includes mine + public).
@@ -63,24 +100,29 @@ export default function PlaylistsPage() {
           </div>
         )}
 
-        {playlistsQuery.data && visible.length === 0 && (
+        {tab === 'public' && playlistsQuery.data && visible.length === 0 && (
           <div className="card-vapor rounded-sm p-8 text-center">
             <div className="font-pixel text-lg text-ink-mid mb-2">
               ⊹ no playlists ⊹
             </div>
             <div className="font-pixel text-sm text-ink-lo">
-              {tab === 'mine'
-                ? 'create one above to start curating tracks.'
-                : 'nobody has published a public playlist yet.'}
+              nobody has published a public playlist yet.
             </div>
           </div>
         )}
 
-        {visible.length > 0 && (
+        {(tab === 'mine' || visible.length > 0) && (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+            {tab === 'mine' && <LikedSongsCard count={likedCount} />}
             {visible.map((p) => (
               <PlaylistCard key={p.id} playlist={p} />
             ))}
+          </div>
+        )}
+
+        {tab === 'mine' && playlistsQuery.data && visible.length === 0 && (
+          <div className="font-pixel text-sm text-ink-lo mt-4 text-center">
+            create a playlist above to start curating tracks.
           </div>
         )}
       </main>
