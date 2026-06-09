@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
+import httpx
 import os
 import queue
 import random
+import re
 import shutil
 import tempfile
 import threading
@@ -11,6 +13,7 @@ import traceback
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -154,9 +157,32 @@ class PlaylistDownloadRequest(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+
+def _validate_youtube_url(url: str) -> None:
+    """Reject anything that isn't an http(s) YouTube URL before it reaches
+    yt-dlp — yt-dlp speaks many extractors/protocols (incl. file://, generic
+    fetches), so an unvalidated URL is an SSRF/abuse vector."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid url")
+    host = (p.hostname or "").lower()
+    ok = p.scheme in ("http", "https") and (
+        host == "youtu.be"
+        or host.endswith(".youtu.be")
+        or host == "youtube.com"
+        or host.endswith(".youtube.com")
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail="only youtube urls are allowed")
+
+
 @app.post("/api/resolutions")
-def get_resolutions(body: ResolutionsRequest):
+def get_resolutions(
+    body: ResolutionsRequest, user: CurrentUser = Depends(current_user)
+):
     """Fetch available MP4 formats for a single video, or detect a playlist URL."""
+    _validate_youtube_url(body.url)
     try:
         if ytDownloaderFunctions.is_playlist(body.url):
             info = ytDownloaderFunctions.get_playlist_tracks(body.url)
@@ -204,6 +230,7 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
       - Anything else: standard single-video download → tmp_dir → file served
         via /api/file/{job_id}.
     """
+    _validate_youtube_url(body.url)
     is_audio_preset = ytDownloaderFunctions.is_audio_quality(body.format_code)
     is_audio_import = is_audio_preset and not body.as_file
     is_audio_file = is_audio_preset and body.as_file
@@ -473,6 +500,7 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
 
     Returns a job_id to track progress via WebSocket.
     """
+    _validate_youtube_url(body.url)
     # The in-app catalog standardises on mp3-320; ignore whatever the client
     # sent. Only the zip-to-device flow honours `body.quality`.
     effective_quality = body.quality if body.as_file else 'mp3-320'
@@ -874,6 +902,7 @@ _AUDIO_MEDIA_TYPES = {
 @app.get("/api/library")
 def list_library(limit: int = 500, user: CurrentUser = Depends(current_user)):
     """Return the caller's music library — every track they own."""
+    limit = max(1, min(limit, 500))
     return {"items": db.list_library(user.user_id, limit=limit)}
 
 
@@ -1000,6 +1029,19 @@ def _discover_feed(
         except Exception:
             traceback.print_exc()
             raw = []
+        # Some search hits are already in the catalog but didn't match the text
+        # query (different stored title/artist). Pull those in as catalog rows
+        # so they render as "add to library" (adopt, no re-download) instead of
+        # a fresh download row.
+        raw_ids = [e.get("id") for e in raw if e.get("id")]
+        already = [
+            it
+            for it in db.list_catalog_by_video_ids(user_id, raw_ids)
+            if it["video_id"] not in known_ids
+        ]
+        if already:
+            db_items.extend(already)
+            known_ids.update(it["video_id"] for it in already)
         for entry in raw:
             if len(externals) >= external_limit:
                 break
@@ -1626,6 +1668,134 @@ def stream_track(
     )
 
 
+# ── Preview (stream an undownloaded track straight from YouTube) ───────────────
+
+_PREVIEW_TTL = 3600.0
+_PREVIEW_CACHE_MAX = 256
+# Canonical YouTube video id. Validating `video_id` before it reaches yt-dlp
+# keeps the preview proxy from being pointed at arbitrary URLs/extractors (SSRF)
+# — the resolved direct URL then always comes from a real YouTube video.
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+# video_id -> (direct_url, content_type, expiry_epoch)
+_preview_cache: dict[str, tuple[str, str, float]] = {}
+
+
+def _preview_cache_put(video_id: str, entry: tuple[str, str, float]) -> None:
+    """Insert with a bound: drop expired entries first, then the soonest-to-
+    expire, so the cache can't grow without limit over a long-running process."""
+    now = time.time()
+    if len(_preview_cache) >= _PREVIEW_CACHE_MAX:
+        for k in [k for k, v in _preview_cache.items() if v[2] <= now]:
+            _preview_cache.pop(k, None)
+        while len(_preview_cache) >= _PREVIEW_CACHE_MAX:
+            oldest = min(_preview_cache, key=lambda k: _preview_cache[k][2])
+            _preview_cache.pop(oldest, None)
+    _preview_cache[video_id] = entry
+
+_PREVIEW_CONTENT_TYPES = {
+    "m4a": "audio/mp4",
+    "mp4": "audio/mp4",
+    "webm": "audio/webm",
+    "opus": "audio/webm",
+    "mp3": "audio/mpeg",
+    "ogg": "audio/ogg",
+}
+
+
+def _resolve_preview(video_id: str) -> tuple[str, str] | None:
+    """Resolve (and cache) a direct audio URL + content-type for a video.
+    Cached because every Range request (seek) would otherwise re-run yt-dlp."""
+    now = time.time()
+    hit = _preview_cache.get(video_id)
+    if hit and hit[2] > now:
+        return hit[0], hit[1]
+    try:
+        info = ytDownloaderFunctions.get_audio_stream_url(
+            f"https://www.youtube.com/watch?v={video_id}"
+        )
+    except Exception:
+        traceback.print_exc()
+        return None
+    direct = info.get("url")
+    if not direct:
+        return None
+    ct = _PREVIEW_CONTENT_TYPES.get((info.get("ext") or "").lower(), "audio/webm")
+    _preview_cache_put(video_id, (direct, ct, now + _PREVIEW_TTL))
+    return direct, ct
+
+
+def _open_preview_upstream(direct: str, range_header: str | None):
+    """Open a streaming GET to the direct YouTube URL, forwarding Range."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if range_header:
+        headers["Range"] = range_header
+    client = httpx.Client(timeout=httpx.Timeout(20.0, read=None), follow_redirects=True)
+    upstream = client.send(client.build_request("GET", direct, headers=headers), stream=True)
+    return client, upstream
+
+
+@app.get("/api/preview/{video_id}")
+def preview_track(
+    video_id: str,
+    request: Request,
+    user: CurrentUser = Depends(current_user),
+):
+    """
+    Proxy-stream a not-yet-downloaded track's audio from YouTube so it can be
+    previewed before downloading. YouTube media URLs are IP-locked and expire,
+    so we relay the bytes here rather than redirecting the browser. Honors Range
+    for seeking, and retries once with a fresh URL if the cached one 403s.
+    """
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="invalid video id")
+    resolved = _resolve_preview(video_id)
+    if resolved is None:
+        raise HTTPException(status_code=502, detail="could not resolve audio")
+    direct, content_type = resolved
+    range_header = request.headers.get("range") or request.headers.get("Range")
+
+    try:
+        client, upstream = _open_preview_upstream(direct, range_header)
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail="upstream fetch failed")
+
+    # A 403 usually means the cached URL went stale — re-resolve once.
+    if upstream.status_code == 403:
+        upstream.close()
+        client.close()
+        _preview_cache.pop(video_id, None)
+        resolved = _resolve_preview(video_id)
+        if resolved is None:
+            raise HTTPException(status_code=502, detail="could not resolve audio")
+        direct, content_type = resolved
+        try:
+            client, upstream = _open_preview_upstream(direct, range_header)
+        except Exception:
+            traceback.print_exc()
+            raise HTTPException(status_code=502, detail="upstream fetch failed")
+
+    headers = {"Accept-Ranges": "bytes"}
+    for h in ("Content-Range", "Content-Length"):
+        if h in upstream.headers:
+            headers[h] = upstream.headers[h]
+
+    def body():
+        try:
+            for chunk in upstream.iter_bytes(64 * 1024):
+                yield chunk
+        finally:
+            upstream.close()
+            client.close()
+
+    return StreamingResponse(
+        body(),
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("Content-Type", content_type),
+        headers=headers,
+    )
+
+
 # ── Job history / queue management ────────────────────────────────────────────
 
 @app.get("/api/jobs")
@@ -1761,11 +1931,18 @@ if _FRONTEND_DIST and os.path.isfile(os.path.join(_FRONTEND_DIST, "index.html"))
     # files (favicon, manifest.json) that don't have a content hash in the name.
     _NO_CACHE = {"Cache-Control": "no-cache"}
 
+    _SPA_ROOT = os.path.realpath(_FRONTEND_DIST)
+
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
         if full_path.startswith(("api/", "ws/", "assets/")):
             raise HTTPException(status_code=404)
-        candidate = os.path.join(_FRONTEND_DIST, full_path)
-        if full_path and os.path.isfile(candidate):
+        # Contain the resolved path under the dist root: `full_path` is raw
+        # URL-decoded input, so `../`-laden paths would otherwise escape the
+        # directory and serve arbitrary files (path traversal). realpath +
+        # prefix check rejects anything outside the SPA build.
+        candidate = os.path.realpath(os.path.join(_FRONTEND_DIST, full_path))
+        contained = candidate == _SPA_ROOT or candidate.startswith(_SPA_ROOT + os.sep)
+        if full_path and contained and os.path.isfile(candidate):
             return FileResponse(candidate, headers=_NO_CACHE)
         return FileResponse(_SPA_INDEX, headers=_NO_CACHE)

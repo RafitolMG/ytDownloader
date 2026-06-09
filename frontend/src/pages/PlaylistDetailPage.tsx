@@ -29,6 +29,15 @@ function toLibraryItem(t: PlaylistTrackRow): LibraryItem {
 
 export default function PlaylistDetailPage() {
   const { id = '' } = useParams<{ id: string }>()
+  // Remount on id change: React Router reuses this component instance across
+  // /playlists/:id navigations, so without a key the optimistic `localTracks`
+  // (and a pending reorder) would bleed from the previous playlist into the
+  // next until its query resolves.
+  return <PlaylistDetailView key={id} />
+}
+
+function PlaylistDetailView() {
+  const { id = '' } = useParams<{ id: string }>()
   const jobsQuery = useJobs()
   const activeCount = countActive(jobsQuery.data)
   const navigate = useNavigate()
