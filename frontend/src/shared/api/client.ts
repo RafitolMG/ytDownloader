@@ -147,6 +147,9 @@ export const api = {
   trackStreamUrl: (videoId: string, codec: string, bitrate: string) =>
     `/api/track/${encodeURIComponent(videoId)}/stream?codec=${encodeURIComponent(codec)}&bitrate=${encodeURIComponent(bitrate)}`,
 
+  /** Proxy-stream URL for previewing a not-yet-downloaded track. */
+  previewUrl: (videoId: string) => `/api/preview/${encodeURIComponent(videoId)}`,
+
   // ── shared catalog ──
   catalog: (params: {
     q?: string

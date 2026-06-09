@@ -37,6 +37,25 @@ function toLibraryItem(c: CatalogItem): LibraryItem {
   }
 }
 
+/** Map an external (undownloaded) candidate to a player item that streams via
+ * the preview proxy. The sentinel codec 'preview' tells the player to use
+ * /api/preview/{id} instead of the library stream. */
+function toPreviewItem(e: ExternalCatalogItem): LibraryItem {
+  return {
+    video_id: e.video_id,
+    codec: 'preview',
+    bitrate: '0',
+    title: e.title,
+    artist: e.artist,
+    duration_sec: e.duration_sec,
+    thumbnail_url: e.thumbnail_url,
+    source_url: e.source_url,
+    file_size: null,
+    added_at: '',
+    source_playlist_title: null,
+  }
+}
+
 /** Lets any catalog row open a "more like this" radio without prop-drilling
  * the setter through every row/section. Provided by CatalogPage. */
 const RadioCtx = createContext<((item: CatalogItem) => void) | null>(null)
@@ -579,6 +598,10 @@ function ExternalRow({
   own?: boolean
 }) {
   const dl = useExternalDownload(item, { own })
+  const player = useAudioPlayer()
+  const isPreviewing =
+    player.current?.video_id === item.video_id &&
+    player.current?.codec === 'preview'
 
   return (
     <li className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 transition opacity-90">
@@ -624,6 +647,21 @@ function ExternalRow({
 
       <button
         type="button"
+        onClick={() =>
+          isPreviewing ? player.togglePlay() : player.play([toPreviewItem(item)])
+        }
+        title="preview without downloading"
+        className={`font-pixel text-sm w-8 h-8 flex items-center justify-center border rounded-xs transition ${
+          isPreviewing
+            ? 'border-hot text-hot bg-hot/10 shadow-[var(--shadow-glow-hot)]'
+            : 'border-border text-ink-mid hover:text-hot hover:border-hot/60'
+        }`}
+      >
+        {isPreviewing && player.isPlaying ? '❚❚' : '▶'}
+      </button>
+
+      <button
+        type="button"
         onClick={dl.start}
         disabled={dl.isPending}
         title="download mp3 · 320 and add to the catalog"
@@ -639,9 +677,13 @@ function ExternalRow({
  * ExternalRow, laid out vertically so a row of them scrolls horizontally. */
 function SuggestionCard({ item }: { item: ExternalCatalogItem }) {
   const dl = useExternalDownload(item)
+  const player = useAudioPlayer()
+  const isPreviewing =
+    player.current?.video_id === item.video_id &&
+    player.current?.codec === 'preview'
 
   return (
-    <div className="w-40 sm:w-44 flex-shrink-0 snap-start card-vapor rounded-sm overflow-hidden border border-border">
+    <div className="group w-40 sm:w-44 flex-shrink-0 snap-start card-vapor rounded-sm overflow-hidden border border-border">
       <div className="relative aspect-video bg-page-mid">
         {item.thumbnail_url ? (
           <img
@@ -658,6 +700,23 @@ function SuggestionCard({ item }: { item: ExternalCatalogItem }) {
           <span className="absolute bottom-0.5 right-0.5 font-pixel text-[10px] leading-none bg-page/80 text-cool px-1 py-0.5 rounded-xs">
             {fmtDuration(item.duration_sec)}
           </span>
+        )}
+        {/* Preview play overlay. */}
+        {!dl.started && (
+          <button
+            type="button"
+            onClick={() =>
+              isPreviewing ? player.togglePlay() : player.play([toPreviewItem(item)])
+            }
+            title="preview without downloading"
+            className={`absolute inset-0 flex items-center justify-center text-2xl text-ink-hi bg-page/40 transition ${
+              isPreviewing ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+            }`}
+          >
+            <span style={{ textShadow: '0 0 10px var(--color-hot)' }}>
+              {isPreviewing && player.isPlaying ? '❚❚' : '▶'}
+            </span>
+          </button>
         )}
         {dl.started && !dl.isDone && (
           <div className="absolute inset-0 bg-page/70 flex items-center justify-center font-pixel text-xs text-cool tabular-nums">
