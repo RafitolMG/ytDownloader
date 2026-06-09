@@ -196,6 +196,32 @@ export default function CatalogPage() {
           )}
         </div>
 
+        {/* Suggestions carousel — sits up top so discovery is the first thing
+            you see, not something buried under the whole catalog. Shown only
+            while browsing the full catalog ('all', no active search). The
+            header stays put with skeletons while the Mixes load (~4s) so it's
+            obvious something's coming. */}
+        {!isSearching && !isMine && (suggestionsQuery.isLoading || suggestions.length > 0) && (
+          <section className="mb-8">
+            <div className="mb-3 flex items-center gap-3 font-pixel text-xs text-cool uppercase tracking-[0.2em]">
+              <span>✦ suggestions for you</span>
+              <span className="text-ink-lo normal-case tracking-normal">
+                related to the catalog · not downloaded yet
+              </span>
+              <span className="flex-1 border-t border-border" />
+            </div>
+            <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
+              {suggestionsQuery.isLoading && suggestions.length === 0
+                ? Array.from({ length: 8 }).map((_, i) => (
+                    <SuggestionSkeleton key={i} />
+                  ))
+                : suggestions.map((ext) => (
+                    <SuggestionCard key={ext.video_id} item={ext} />
+                  ))}
+            </div>
+          </section>
+        )}
+
         {activeQuery.isLoading && (
           <div className="font-pixel text-ink-mid">··· loading catalog ···</div>
         )}
@@ -246,38 +272,12 @@ export default function CatalogPage() {
                   key={ext.video_id}
                   item={ext}
                   position={dbItems.length + idx + 1}
-                  invalidateKey={debouncedQuery}
                 />
               ))}
             </ul>
           </>
         )}
 
-        {/* At-rest suggestions — only while browsing (no active search). */}
-        {!isSearching && suggestionsQuery.isLoading && dbItems.length > 0 && (
-          <div className="mt-6 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] text-center">
-            ··· finding songs you might like ···
-          </div>
-        )}
-        {!isSearching && suggestions.length > 0 && (
-          <>
-            <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-              <span className="flex-1 border-t border-border" />
-              <span>✦ suggestions for you · related to the catalog</span>
-              <span className="flex-1 border-t border-border" />
-            </div>
-            <ul className="card-vapor rounded-sm divide-y divide-border">
-              {suggestions.map((ext, idx) => (
-                <ExternalRow
-                  key={ext.video_id}
-                  item={ext}
-                  position={idx + 1}
-                  invalidateKey="suggestions"
-                />
-              ))}
-            </ul>
-          </>
-        )}
       </main>
     </div>
   )
@@ -418,19 +418,11 @@ function CatalogRow({
   )
 }
 
-/** Row for a YouTube candidate not yet in the catalog. Clicking ⬇ fires a
- * library import (mp3-320 — the catalog's canonical bitrate) and subscribes
- * to the job's progress WS. On completion the catalog and discover queries
- * are invalidated so the row re-renders as a CatalogRow on the next fetch. */
-function ExternalRow({
-  item,
-  position,
-  invalidateKey,
-}: {
-  item: ExternalCatalogItem
-  position: number
-  invalidateKey: string
-}) {
+/** Shared download lifecycle for a YouTube candidate (external row or
+ * suggestion card): fire an mp3-320 library import, follow the job's progress
+ * WS, and on completion invalidate the catalog views so the track re-renders
+ * as a real DB row. Returns just the bits the UIs need to draw themselves. */
+function useExternalDownload(item: ExternalCatalogItem) {
   const queryClient = useQueryClient()
   const [jobId, setJobId] = useState<string | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
@@ -451,12 +443,10 @@ function ExternalRow({
     onError: (e) => setFailed(e instanceof Error ? e.message : 'download failed'),
   })
 
-  // The hook closes its WS and emits 'done' / 'error' through query
-  // invalidation; reacting to the status here lets us flip the row UI
-  // immediately and refresh the catalog so a freshly-downloaded track
-  // shows up as a real DB row.
+  const isDone = live.status === 'done'
+
   useEffect(() => {
-    if (live.status === 'done') {
+    if (isDone) {
       queryClient.invalidateQueries({ queryKey: ['discover'] })
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
       queryClient.invalidateQueries({ queryKey: ['catalog-suggestions'] })
@@ -464,10 +454,34 @@ function ExternalRow({
     } else if (live.status === 'error') {
       setFailed('download failed — check the queue')
     }
-  }, [live.status, queryClient, invalidateKey])
+  }, [isDone, live.status, queryClient])
 
-  const isPending = download.isPending || (jobId !== null && live.status !== 'done' && live.status !== 'error')
-  const pct = live.progress ?? 0
+  const started = jobId !== null
+  const isPending =
+    download.isPending || (started && !isDone && live.status !== 'error')
+
+  return {
+    start: () => {
+      if (!isPending) download.mutate()
+    },
+    isPending,
+    isDone,
+    started,
+    pct: live.progress ?? 0,
+    failed,
+  }
+}
+
+/** Full-width list row for a YouTube candidate — used in the search results
+ * ("found on youtube") section. */
+function ExternalRow({
+  item,
+  position,
+}: {
+  item: ExternalCatalogItem
+  position: number
+}) {
+  const dl = useExternalDownload(item)
 
   return (
     <li className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 transition opacity-90">
@@ -501,28 +515,100 @@ function ExternalRow({
         <div className="text-sm text-ink-lo truncate mt-0.5">
           {item.artist ?? '—'}
         </div>
-        {jobId && live.status !== 'done' && (
+        {dl.started && !dl.isDone && (
           <div className="mt-1 font-pixel text-xs text-cool tabular-nums">
-            ··· downloading {pct.toFixed(0)}%
+            ··· downloading {dl.pct.toFixed(0)}%
           </div>
         )}
-        {failed && (
-          <div className="mt-1 font-pixel text-xs text-crit">⚠ {failed}</div>
+        {dl.failed && (
+          <div className="mt-1 font-pixel text-xs text-crit">⚠ {dl.failed}</div>
         )}
       </div>
 
       <button
         type="button"
-        onClick={() => {
-          if (!isPending) download.mutate()
-        }}
-        disabled={isPending}
+        onClick={dl.start}
+        disabled={dl.isPending}
         title="download mp3 · 320 and add to the catalog"
         className="font-pixel text-sm flex items-center gap-1 px-2 py-1 border rounded-xs transition disabled:opacity-50 border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)]"
       >
-        {isPending ? '···' : '⬇'}
+        {dl.isPending ? '···' : '⬇'}
       </button>
     </li>
+  )
+}
+
+/** Compact card for the at-rest suggestions carousel. Same download flow as
+ * ExternalRow, laid out vertically so a row of them scrolls horizontally. */
+function SuggestionCard({ item }: { item: ExternalCatalogItem }) {
+  const dl = useExternalDownload(item)
+
+  return (
+    <div className="w-40 sm:w-44 flex-shrink-0 snap-start card-vapor rounded-sm overflow-hidden border border-border">
+      <div className="relative aspect-video bg-page-mid">
+        {item.thumbnail_url ? (
+          <img
+            src={item.thumbnail_url}
+            alt=""
+            className="w-full h-full object-cover"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
+        )}
+        {item.duration_sec != null && (
+          <span className="absolute bottom-0.5 right-0.5 font-pixel text-[10px] leading-none bg-page/80 text-cool px-1 py-0.5 rounded-xs">
+            {fmtDuration(item.duration_sec)}
+          </span>
+        )}
+        {dl.started && !dl.isDone && (
+          <div className="absolute inset-0 bg-page/70 flex items-center justify-center font-pixel text-xs text-cool tabular-nums">
+            {dl.pct.toFixed(0)}%
+          </div>
+        )}
+      </div>
+
+      <div className="p-2">
+        <div
+          className="font-sans text-xs font-medium text-ink-hi leading-snug line-clamp-2 min-h-[2rem]"
+          title={item.title ?? item.video_id}
+        >
+          {item.title ?? item.video_id}
+        </div>
+        <div className="text-xs text-ink-lo truncate mt-0.5 mb-2">
+          {item.artist ?? '—'}
+        </div>
+        <button
+          type="button"
+          onClick={dl.start}
+          disabled={dl.isPending}
+          title="download mp3 · 320 and add to the catalog"
+          className="w-full font-pixel text-xs uppercase tracking-widest flex items-center justify-center gap-1 px-2 py-1 border rounded-xs transition disabled:opacity-50 border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)]"
+        >
+          {dl.isPending ? '···' : '⬇ add'}
+        </button>
+        {dl.failed && (
+          <div className="mt-1 font-pixel text-[10px] text-crit line-clamp-1">
+            ⚠ {dl.failed}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Placeholder card shown while the Mixes load. */
+function SuggestionSkeleton() {
+  return (
+    <div className="w-40 sm:w-44 flex-shrink-0 card-vapor rounded-sm overflow-hidden border border-border animate-pulse">
+      <div className="aspect-video bg-violet/10" />
+      <div className="p-2 space-y-2">
+        <div className="h-3 bg-violet/10 rounded-xs" />
+        <div className="h-3 w-2/3 bg-violet/10 rounded-xs" />
+        <div className="h-6 bg-violet/10 rounded-xs mt-2" />
+      </div>
+    </div>
   )
 }
 
