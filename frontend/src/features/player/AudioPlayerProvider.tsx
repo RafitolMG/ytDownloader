@@ -11,6 +11,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
 import type { LibraryItem } from '@/shared/api/types'
+import { useAuth } from '@/features/auth/AuthProvider'
 
 export type RepeatMode = 'off' | 'one' | 'all'
 
@@ -35,6 +36,9 @@ type PlayerCtx = {
   duration: number
   shuffle: boolean
   repeat: RepeatMode
+  /** Output volume, 0..1. */
+  volume: number
+  setVolume: (v: number) => void
   /**
    * Replace the queue and start playback at `startAt` (queue index, default 0).
    * If shuffle is on, the surrounding tracks are randomized but `startAt`
@@ -48,6 +52,18 @@ type PlayerCtx = {
   seek: (seconds: number) => void
   toggleShuffle: () => void
   cycleRepeat: () => void
+  /** Insert a track to play right after the current one. Starts playing it if
+   * nothing is loaded. */
+  playNext: (track: LibraryItem) => void
+  /** Append a track to the end of the play order (starts playback if idle). */
+  enqueue: (track: LibraryItem) => void
+  /** Drop the entry at the given position in the play order (no-op for the
+   * currently playing one). */
+  removeFromQueueAt: (orderPos: number) => void
+  /** Jump playback to the given position in the play order. */
+  jumpTo: (orderPos: number) => void
+  /** The queue in play order — what's up next, top to bottom. */
+  orderedQueue: { track: LibraryItem; orderPos: number; isCurrent: boolean }[]
 }
 
 const Ctx = createContext<PlayerCtx | null>(null)
@@ -88,6 +104,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const [duration, setDuration] = useState(NaN)
   const [shuffle, setShuffle] = useState(false)
   const [repeat, setRepeat] = useState<RepeatMode>('off')
+  const [volume, setVolumeState] = useState(1)
 
   const index = pos >= 0 && pos < order.length ? order[pos] : -1
   const current = index >= 0 && index < queue.length ? queue[index] : null
@@ -158,6 +175,54 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       setPos(shuffle ? 0 : clamped)
     },
     [shuffle],
+  )
+
+  // ── Queue editing ─────────────────────────────────────────────────────────
+  // These read the current queue/order/pos via closure (deps below) and update
+  // both arrays together, keeping `order` a valid permutation of `queue` indices.
+
+  const enqueue = useCallback(
+    (track: LibraryItem) => {
+      if (pos < 0) {
+        play([track])
+        return
+      }
+      setQueue([...queue, track])
+      setOrder([...order, queue.length])
+    },
+    [queue, order, pos, play],
+  )
+
+  const playNext = useCallback(
+    (track: LibraryItem) => {
+      if (pos < 0) {
+        play([track])
+        return
+      }
+      const newIdx = queue.length
+      setQueue([...queue, track])
+      const o = [...order]
+      o.splice(pos + 1, 0, newIdx)
+      setOrder(o)
+    },
+    [queue, order, pos, play],
+  )
+
+  const removeFromQueueAt = useCallback(
+    (orderPos: number) => {
+      // Removing the playing track is left to next()/stop(); ignore it here.
+      if (orderPos < 0 || orderPos >= order.length || orderPos === pos) return
+      setOrder(order.filter((_, i) => i !== orderPos))
+      if (orderPos < pos) setPos(pos - 1)
+    },
+    [order, pos],
+  )
+
+  const jumpTo = useCallback(
+    (orderPos: number) => {
+      if (orderPos >= 0 && orderPos < order.length) setPos(orderPos)
+    },
+    [order.length],
   )
 
   const togglePlay = useCallback(() => {
@@ -232,6 +297,14 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     setDuration(NaN)
   }, [])
 
+  // Stop playback the moment there's no session — on logout or when a 401
+  // clears the user. Otherwise the <audio> element keeps streaming (and the
+  // stream endpoint would start 401ing) after the user has signed out.
+  const { user } = useAuth()
+  useEffect(() => {
+    if (!user) stop()
+  }, [user, stop])
+
   const seek = useCallback((seconds: number) => {
     const el = audioRef.current
     if (!el || Number.isNaN(el.duration)) return
@@ -262,6 +335,68 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     setRepeat((r) => (r === 'off' ? 'all' : r === 'all' ? 'one' : 'off'))
   }, [])
 
+  const setVolume = useCallback((v: number) => {
+    const clamped = Math.max(0, Math.min(1, v))
+    const el = audioRef.current
+    if (el) el.volume = clamped
+    setVolumeState(clamped)
+  }, [])
+
+  // Re-apply volume whenever a new src loads (the element resets to 1 on some
+  // browsers) so the user's chosen level sticks across tracks.
+  useEffect(() => {
+    const el = audioRef.current
+    if (el) el.volume = volume
+  }, [current && trackKey(current), volume])
+
+  const orderedQueue = useMemo(
+    () =>
+      order
+        .map((qi, orderPos) => ({
+          track: queue[qi],
+          orderPos,
+          isCurrent: orderPos === pos,
+        }))
+        .filter((x) => x.track != null),
+    [order, queue, pos],
+  )
+
+  // ── MediaSession: lock-screen / headphone / OS media controls ──────────────
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return
+    if (!current) {
+      navigator.mediaSession.metadata = null
+      return
+    }
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: current.title ?? current.video_id,
+      artist: current.artist ?? '',
+      artwork: current.thumbnail_url
+        ? [{ src: current.thumbnail_url, sizes: '480x360', type: 'image/jpeg' }]
+        : [],
+    })
+  }, [current && trackKey(current)])
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return
+    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
+  }, [isPlaying])
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return
+    const ms = navigator.mediaSession
+    ms.setActionHandler('play', () => togglePlay())
+    ms.setActionHandler('pause', () => togglePlay())
+    ms.setActionHandler('previoustrack', () => prev())
+    ms.setActionHandler('nexttrack', () => next())
+    return () => {
+      ms.setActionHandler('play', null)
+      ms.setActionHandler('pause', null)
+      ms.setActionHandler('previoustrack', null)
+      ms.setActionHandler('nexttrack', null)
+    }
+  }, [togglePlay, prev, next])
+
   const value = useMemo<PlayerCtx>(
     () => ({
       current,
@@ -274,6 +409,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       duration,
       shuffle,
       repeat,
+      volume,
+      setVolume,
       play,
       togglePlay,
       next,
@@ -282,11 +419,17 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       seek,
       toggleShuffle,
       cycleRepeat,
+      playNext,
+      enqueue,
+      removeFromQueueAt,
+      jumpTo,
+      orderedQueue,
     }),
     [
       current, queue, index, canGoNext, canGoPrev, isPlaying, position, duration,
-      shuffle, repeat,
+      shuffle, repeat, volume, setVolume,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
+      playNext, enqueue, removeFromQueueAt, jumpTo, orderedQueue,
     ],
   )
 

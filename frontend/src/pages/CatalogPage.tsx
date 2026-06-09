@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { api } from '@/shared/api/client'
 import type {
+  ActivityItem,
+  ArtistStat,
   CatalogAccent,
   CatalogItem,
   CatalogSort,
@@ -35,7 +37,9 @@ function toLibraryItem(c: CatalogItem): LibraryItem {
   }
 }
 
-type CatalogScope = 'all' | 'mine'
+/** Lets any catalog row open a "more like this" radio without prop-drilling
+ * the setter through every row/section. Provided by CatalogPage. */
+const RadioCtx = createContext<((item: CatalogItem) => void) | null>(null)
 
 const SORT_LABELS: Record<CatalogSort, string> = {
   newest: 'newest',
@@ -61,10 +65,9 @@ export default function CatalogPage() {
   const activeCount = countActive(jobsQuery.data)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<CatalogSort>('newest')
-  // 'all' = the shared catalog (everyone's downloads + discovery); 'mine' =
-  // just the tracks you own — the former Library page, now a filter.
-  const [scope, setScope] = useState<CatalogScope>('all')
-  const isMine = scope === 'mine'
+  // The catalog is pure discovery now — your saved tracks ("favourites") live
+  // in Playlists → Liked Songs, not here.
+  const isMine = false
 
   const trimmed = query.trim()
   const debouncedQuery = useDebouncedValue(trimmed, 400)
@@ -74,8 +77,8 @@ export default function CatalogPage() {
   // (no q) drives the idle browse + sort buttons. The discover query (with q)
   // returns DB hits plus external candidates from ytsearch.
   const catalogQuery = useQuery({
-    queryKey: ['catalog', { sort, scope }],
-    queryFn: () => api.catalog({ sort, owned_only: isMine, limit: 300 }),
+    queryKey: ['catalog', { sort }],
+    queryFn: () => api.catalog({ sort, limit: 300 }),
     enabled: !isSearching,
     staleTime: 10_000,
   })
@@ -99,9 +102,24 @@ export default function CatalogPage() {
     staleTime: 5 * 60_000,
   })
 
-  // Browse "home" (Spotify-style): only when idle, scope=all, no category open.
+  // Browse "home" (Spotify-style): only when idle, scope=all, nothing drilled
+  // into (no category or mix preview open).
   const [activeCategory, setActiveCategory] = useState<Category | null>(null)
-  const browseHome = !isSearching && !isMine && activeCategory === null
+  const [activeMix, setActiveMix] = useState<DailyMix | null>(null)
+  const [activeRadio, setActiveRadio] = useState<CatalogItem | null>(null)
+  const browseHome =
+    !isSearching &&
+    !isMine &&
+    activeCategory === null &&
+    activeMix === null &&
+    activeRadio === null
+
+  // Opening a radio is exclusive with the other drill-downs.
+  const openRadio = (item: CatalogItem) => {
+    setActiveCategory(null)
+    setActiveMix(null)
+    setActiveRadio(item)
+  }
 
   const recentQuery = useQuery({
     queryKey: ['recent'],
@@ -111,7 +129,7 @@ export default function CatalogPage() {
   })
   const dailyMixesQuery = useQuery({
     queryKey: ['daily-mixes'],
-    queryFn: () => api.dailyMixes({ count: 3, size: 20 }),
+    queryFn: () => api.dailyMixes(),
     enabled: browseHome,
     staleTime: 5 * 60_000,
   })
@@ -127,10 +145,31 @@ export default function CatalogPage() {
     enabled: activeCategory !== null,
     staleTime: 60_000,
   })
+  const radioQuery = useQuery({
+    queryKey: ['radio', activeRadio?.video_id],
+    queryFn: () => api.radio(activeRadio!.video_id, { external_limit: 18 }),
+    enabled: activeRadio !== null,
+    staleTime: 60_000,
+  })
+  const statsQuery = useQuery({
+    queryKey: ['my-stats'],
+    queryFn: () => api.myStats(30),
+    enabled: browseHome,
+    staleTime: 60_000,
+  })
+  const activityQuery = useQuery({
+    queryKey: ['activity'],
+    queryFn: () => api.activity(12),
+    enabled: browseHome,
+    staleTime: 30_000,
+  })
 
   const recent = browseHome ? recentQuery.data?.items ?? [] : []
   const dailyMixes = browseHome ? dailyMixesQuery.data?.mixes ?? [] : []
   const categories = browseHome ? categoriesQuery.data?.categories ?? [] : []
+  const topTracks = browseHome ? statsQuery.data?.top_tracks ?? [] : []
+  const topArtists = browseHome ? statsQuery.data?.top_artists ?? [] : []
+  const activity = browseHome ? activityQuery.data?.items ?? [] : []
 
   const dbItems: CatalogItem[] = isSearching
     ? discoverQuery.data?.db ?? []
@@ -148,33 +187,14 @@ export default function CatalogPage() {
     externals.length === 0
 
   return (
+    <RadioCtx.Provider value={openRadio}>
     <div className="relative z-10 min-h-full">
       <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
         <AppHeader queueCount={activeCount} />
 
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-              {isMine ? '░▒▓ my library ▓▒░' : '░▒▓ shared catalog ▓▒░'}
-            </div>
-            {/* Scope toggle folds the old Library page into the catalog: 'all'
-                is the shared registry, 'mine' filters to what you own. */}
-            <div className="flex items-center border border-border rounded-xs overflow-hidden">
-              {(['all', 'mine'] as CatalogScope[]).map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setScope(s)}
-                  className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 transition ${
-                    scope === s
-                      ? 'bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)]'
-                      : 'text-ink-lo hover:text-cool'
-                  }`}
-                >
-                  {s === 'all' ? '⊕ all' : '♥ mine'}
-                </button>
-              ))}
-            </div>
+          <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+            ░▒▓ shared catalog ▓▒░
           </div>
 
           {/* Sort + play-all only matter when browsing — search uses
@@ -232,13 +252,22 @@ export default function CatalogPage() {
           )}
         </div>
 
-        {activeCategory ? (
+        {activeRadio ? (
+          <RadioView
+            seed={activeRadio}
+            feed={radioQuery.data}
+            isLoading={radioQuery.isLoading}
+            onBack={() => setActiveRadio(null)}
+          />
+        ) : activeCategory ? (
           <CategoryView
             category={activeCategory}
             feed={categoryFeedQuery.data}
             isLoading={categoryFeedQuery.isLoading}
             onBack={() => setActiveCategory(null)}
           />
+        ) : activeMix ? (
+          <MixView mix={activeMix} onBack={() => setActiveMix(null)} />
         ) : (
           <>
             {/* Spotify-style browse home: recently played, daily mixes and the
@@ -246,11 +275,15 @@ export default function CatalogPage() {
             {browseHome && (
               <BrowseHome
                 recent={recent}
+                topTracks={topTracks}
+                topArtists={topArtists}
+                activity={activity}
                 mixes={dailyMixes}
                 mixesLoading={dailyMixesQuery.isLoading}
                 personalized={dailyMixesQuery.data?.personalized ?? false}
                 categories={categories}
                 onOpenCategory={setActiveCategory}
+                onOpenMix={setActiveMix}
               />
             )}
 
@@ -334,6 +367,7 @@ export default function CatalogPage() {
 
       </main>
     </div>
+    </RadioCtx.Provider>
   )
 }
 
@@ -348,6 +382,7 @@ function CatalogRow({
 }) {
   const player = useAudioPlayer()
   const queryClient = useQueryClient()
+  const openRadio = useContext(RadioCtx)
 
   const toggleLibrary = useMutation({
     // The two branches return different literal `owned` types; widen to a
@@ -453,6 +488,8 @@ function CatalogRow({
           codec: item.codec,
           bitrate: item.bitrate,
         }}
+        track={toLibraryItem(item)}
+        onRadio={openRadio ? () => openRadio(item) : undefined}
         trigger={(open) => (
           <button
             type="button"
@@ -476,7 +513,8 @@ function CatalogRow({
  * suggestion card): fire an mp3-320 library import, follow the job's progress
  * WS, and on completion invalidate the catalog views so the track re-renders
  * as a real DB row. Returns just the bits the UIs need to draw themselves. */
-function useExternalDownload(item: ExternalCatalogItem) {
+function useExternalDownload(item: ExternalCatalogItem, opts: { own?: boolean } = {}) {
+  const own = opts.own ?? true
   const queryClient = useQueryClient()
   const [jobId, setJobId] = useState<string | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
@@ -489,6 +527,7 @@ function useExternalDownload(item: ExternalCatalogItem) {
         url: item.source_url,
         format_code: 'mp3-320',
         as_file: false,
+        own,
       }),
     onSuccess: ({ job_id }) => {
       setJobId(job_id)
@@ -504,6 +543,7 @@ function useExternalDownload(item: ExternalCatalogItem) {
       queryClient.invalidateQueries({ queryKey: ['discover'] })
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
       queryClient.invalidateQueries({ queryKey: ['catalog-suggestions'] })
+      queryClient.invalidateQueries({ queryKey: ['daily-mixes'] })
       queryClient.invalidateQueries({ queryKey: ['library'] })
     } else if (live.status === 'error') {
       setFailed('download failed — check the queue')
@@ -531,11 +571,14 @@ function useExternalDownload(item: ExternalCatalogItem) {
 function ExternalRow({
   item,
   position,
+  own,
 }: {
   item: ExternalCatalogItem
   position: number
+  /** false → download to the catalog without favouriting (daily-mix tracks). */
+  own?: boolean
 }) {
-  const dl = useExternalDownload(item)
+  const dl = useExternalDownload(item, { own })
 
   return (
     <li className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 transition opacity-90">
@@ -706,18 +749,26 @@ function SectionHeader({ title, note }: { title: string; note?: string }) {
 /** The browse "home" shown when idle on the full catalog. */
 function BrowseHome({
   recent,
+  topTracks,
+  topArtists,
+  activity,
   mixes,
   mixesLoading,
   personalized,
   categories,
   onOpenCategory,
+  onOpenMix,
 }: {
   recent: CatalogItem[]
+  topTracks: CatalogItem[]
+  topArtists: ArtistStat[]
+  activity: ActivityItem[]
   mixes: DailyMix[]
   mixesLoading: boolean
   personalized: boolean
   categories: Category[]
   onOpenCategory: (c: Category) => void
+  onOpenMix: (m: DailyMix) => void
 }) {
   return (
     <>
@@ -730,6 +781,34 @@ function BrowseHome({
                 key={`${it.video_id}/${it.codec}/${it.bitrate}`}
                 item={it}
                 queue={recent}
+                index={i}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {topTracks.length > 0 && (
+        <section className="mb-8">
+          <SectionHeader title="★ your top" note="last 30 days" />
+          {topArtists.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-3">
+              {topArtists.map((a) => (
+                <span
+                  key={a.artist}
+                  className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-cool/50 text-cool rounded-xs"
+                >
+                  {a.artist} <span className="text-ink-lo tabular-nums">·{a.play_count}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
+            {topTracks.map((it, i) => (
+              <RecentCard
+                key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+                item={it}
+                queue={topTracks}
                 index={i}
               />
             ))}
@@ -757,7 +836,9 @@ function BrowseHome({
                     </div>
                   </div>
                 ))
-              : mixes.map((m) => <DailyMixCard key={m.id} mix={m} />)}
+              : mixes.map((m) => (
+                  <DailyMixCard key={m.id} mix={m} onOpen={() => onOpenMix(m)} />
+                ))}
           </div>
         </section>
       )}
@@ -772,7 +853,79 @@ function BrowseHome({
           </div>
         </section>
       )}
+
+      {activity.length > 0 && (
+        <section className="mb-8">
+          <SectionHeader title="⊹ recent activity" note="what the crew added" />
+          <ul className="card-vapor rounded-sm divide-y divide-border">
+            {activity.map((it, i) => (
+              <ActivityRow
+                key={`${it.video_id}/${it.added_at}/${i}`}
+                item={it}
+                queue={activity}
+                index={i}
+              />
+            ))}
+          </ul>
+        </section>
+      )}
     </>
+  )
+}
+
+/** One row in the activity feed: who added what. Click plays the feed from
+ * here. */
+function ActivityRow({
+  item,
+  queue,
+  index,
+}: {
+  item: ActivityItem
+  queue: ActivityItem[]
+  index: number
+}) {
+  const player = useAudioPlayer()
+  const toLib = (a: ActivityItem): LibraryItem => ({
+    video_id: a.video_id,
+    codec: a.codec,
+    bitrate: a.bitrate,
+    title: a.title,
+    artist: a.artist,
+    duration_sec: a.duration_sec,
+    thumbnail_url: a.thumbnail_url,
+    source_url: a.source_url,
+    file_size: a.file_size,
+    added_at: a.added_at,
+    source_playlist_title: null,
+  })
+  return (
+    <li
+      onClick={() => player.play(queue.map(toLib), index)}
+      className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer hover:bg-violet/10 transition"
+    >
+      <div className="relative w-12 sm:w-14 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
+        {item.thumbnail_url ? (
+          <img
+            src={item.thumbnail_url}
+            alt=""
+            className="w-full h-full object-cover"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="font-sans text-sm text-ink-hi truncate">
+          {item.title ?? item.video_id}
+        </div>
+        <div className="text-xs text-ink-lo truncate">
+          <span className="text-cool">{item.username ?? 'someone'}</span> added ·{' '}
+          {item.artist ?? '—'}
+        </div>
+      </div>
+    </li>
   )
 }
 
@@ -818,17 +971,22 @@ function RecentCard({
   )
 }
 
-/** Daily mix tile; click plays the whole mix. */
-function DailyMixCard({ mix }: { mix: DailyMix }) {
+/** Daily mix tile. Click the card to preview the tracklist; the ▶ badge plays
+ * the whole mix straight away. */
+function DailyMixCard({ mix, onOpen }: { mix: DailyMix; onOpen: () => void }) {
   const player = useAudioPlayer()
   const a = ACCENT[mix.accent]
   const cover = mix.tracks[0]?.thumbnail_url ?? null
   return (
-    <button
-      type="button"
-      onClick={() => player.play(mix.tracks.map(toLibraryItem), 0)}
-      className={`w-40 sm:w-44 flex-shrink-0 snap-start text-left card-vapor rounded-sm overflow-hidden border ${a.border} transition ${a.glow}`}
-      title={`${mix.title} · ${mix.subtitle}`}
+    <div
+      onClick={onOpen}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') onOpen()
+      }}
+      className={`group w-40 sm:w-44 flex-shrink-0 snap-start text-left cursor-pointer card-vapor rounded-sm overflow-hidden border ${a.border} transition ${a.glow}`}
+      title={`${mix.title} · ${mix.subtitle} — preview`}
     >
       <div className={`relative aspect-square bg-gradient-to-br ${a.grad}`}>
         {cover && (
@@ -846,9 +1004,18 @@ function DailyMixCard({ mix }: { mix: DailyMix }) {
         >
           {mix.title}
         </span>
-        <span className="absolute bottom-2 right-2 text-xl text-ink-hi opacity-0 group-hover:opacity-100">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation()
+            player.play(mix.tracks.map(toLibraryItem), 0)
+          }}
+          title="play this mix"
+          aria-label="play this mix"
+          className="absolute bottom-2 right-2 w-9 h-9 flex items-center justify-center rounded-full bg-hot/80 text-ink-hi shadow-[var(--shadow-glow-hot)] opacity-0 group-hover:opacity-100 transition hover:bg-hot"
+        >
           ▶
-        </span>
+        </button>
       </div>
       <div className="p-2">
         <div className="font-sans text-xs font-medium text-ink-hi truncate">
@@ -856,11 +1023,12 @@ function DailyMixCard({ mix }: { mix: DailyMix }) {
         </div>
         <div className="text-xs text-ink-lo tabular-nums">{mix.tracks.length} tracks</div>
       </div>
-    </button>
+    </div>
   )
 }
 
-/** Browse grid tile for a curated category. */
+/** Browse grid tile for a curated category — gradient + title, no emoji
+ * (keeps the pixel/vaporwave aesthetic clean). */
 function CategoryCard({
   category,
   onClick,
@@ -873,13 +1041,17 @@ function CategoryCard({
     <button
       type="button"
       onClick={onClick}
-      className={`relative h-20 rounded-sm overflow-hidden border ${a.border} bg-gradient-to-br ${a.grad} flex items-center justify-between px-3 transition ${a.glow}`}
+      className={`relative h-20 rounded-sm overflow-hidden border ${a.border} bg-gradient-to-br ${a.grad} flex items-end p-3 transition ${a.glow} group`}
     >
-      <span className="font-pixel text-sm uppercase tracking-widest text-ink-hi">
-        {category.title}
+      {/* faint scanline-ish texture corner glyph, accent-tinted */}
+      <span
+        className={`absolute -top-1 right-1 font-pixel text-3xl opacity-30 ${a.text} select-none`}
+        aria-hidden
+      >
+        ▓▒░
       </span>
-      <span className="text-2xl" aria-hidden>
-        {category.emoji}
+      <span className="relative font-pixel text-sm uppercase tracking-widest text-ink-hi">
+        {category.title}
       </span>
     </button>
   )
@@ -910,10 +1082,7 @@ function CategoryView({
         >
           ← back
         </button>
-        <span className="text-2xl" aria-hidden>
-          {category.emoji}
-        </span>
-        <h2 className="font-pixel text-lg uppercase tracking-widest text-ink-hi">
+        <h2 className={`font-pixel text-lg uppercase tracking-widest ${ACCENT[category.accent].text}`}>
           {category.title}
         </h2>
         {db.length > 0 && (
@@ -968,6 +1137,188 @@ function CategoryView({
       {!isLoading && db.length === 0 && external.length === 0 && (
         <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
           nothing found for this category right now.
+        </div>
+      )}
+    </section>
+  )
+}
+
+/** Daily-mix preview: the full tracklist with play-all, opened from a mix card. */
+function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) {
+  const player = useAudioPlayer()
+  const a = ACCENT[mix.accent]
+  const cover = mix.tracks[0]?.thumbnail_url ?? null
+  return (
+    <section>
+      <div className="flex items-center gap-4 mb-5 flex-wrap">
+        <button
+          type="button"
+          onClick={onBack}
+          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool hover:border-cool/70 transition rounded-xs"
+        >
+          ← back
+        </button>
+        <div
+          className={`relative w-16 h-16 rounded-sm overflow-hidden border ${a.border} bg-gradient-to-br ${a.grad} flex-shrink-0`}
+        >
+          {cover && (
+            <img
+              src={cover}
+              alt=""
+              className="w-full h-full object-cover opacity-60"
+              referrerPolicy="no-referrer"
+            />
+          )}
+        </div>
+        <div className="min-w-0">
+          <div className={`font-pixel text-lg uppercase tracking-widest ${a.text}`}>
+            {mix.title}
+          </div>
+          <div className="font-sans text-sm text-ink-mid truncate">
+            {mix.subtitle} · {mix.tracks.length} tracks
+          </div>
+        </div>
+        {mix.tracks.length > 0 && (
+          <button
+            type="button"
+            onClick={() => player.play(mix.tracks.map(toLibraryItem), 0)}
+            className="font-pixel text-xs uppercase tracking-widest px-4 py-2 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+          >
+            ▶ play all
+          </button>
+        )}
+      </div>
+
+      <ul className="card-vapor rounded-sm divide-y divide-border">
+        {mix.tracks.map((it, idx) => (
+          <CatalogRow
+            key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+            item={it}
+            position={idx + 1}
+            allItems={mix.tracks}
+          />
+        ))}
+      </ul>
+
+      {mix.external.length > 0 && (
+        <>
+          <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+            <span className="flex-1 border-t border-border" />
+            <span>↓ more in this mix · download to play</span>
+            <span className="flex-1 border-t border-border" />
+          </div>
+          <ul className="card-vapor rounded-sm divide-y divide-border">
+            {mix.external.map((ext, idx) => (
+              <ExternalRow
+                key={ext.video_id}
+                item={ext}
+                position={mix.tracks.length + idx + 1}
+                own={false}
+              />
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
+}
+
+/** "More like this" radio from a seed track: what you already have (playable)
+ * + new candidates to download. */
+function RadioView({
+  seed,
+  feed,
+  isLoading,
+  onBack,
+}: {
+  seed: CatalogItem
+  feed: { db: CatalogItem[]; external: ExternalCatalogItem[] } | undefined
+  isLoading: boolean
+  onBack: () => void
+}) {
+  const player = useAudioPlayer()
+  const db = feed?.db ?? []
+  const external = feed?.external ?? []
+  return (
+    <section>
+      <div className="flex items-center gap-3 mb-5 flex-wrap">
+        <button
+          type="button"
+          onClick={onBack}
+          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool hover:border-cool/70 transition rounded-xs"
+        >
+          ← back
+        </button>
+        <div className="relative w-14 h-14 rounded-sm overflow-hidden border border-cool/50 bg-page-mid flex-shrink-0">
+          {seed.thumbnail_url ? (
+            <img
+              src={seed.thumbnail_url}
+              alt=""
+              className="w-full h-full object-cover"
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
+          )}
+        </div>
+        <div className="min-w-0">
+          <div className="font-pixel text-lg uppercase tracking-widest text-cool">
+            ≈ radio
+          </div>
+          <div className="font-sans text-sm text-ink-mid truncate">
+            like {seed.title ?? seed.video_id}
+          </div>
+        </div>
+        {db.length > 0 && (
+          <button
+            type="button"
+            onClick={() => player.play(db.map(toLibraryItem), 0)}
+            className="font-pixel text-xs uppercase tracking-widest px-4 py-2 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+          >
+            ▶ play all
+          </button>
+        )}
+      </div>
+
+      {isLoading && (
+        <div className="font-pixel text-ink-mid">··· tuning the radio ···</div>
+      )}
+
+      {db.length > 0 && (
+        <ul className="card-vapor rounded-sm divide-y divide-border mb-2">
+          {db.map((it, idx) => (
+            <CatalogRow
+              key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+              item={it}
+              position={idx + 1}
+              allItems={db}
+            />
+          ))}
+        </ul>
+      )}
+
+      {external.length > 0 && (
+        <>
+          <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+            <span className="flex-1 border-t border-border" />
+            <span>↓ download more like this</span>
+            <span className="flex-1 border-t border-border" />
+          </div>
+          <ul className="card-vapor rounded-sm divide-y divide-border">
+            {external.map((ext, idx) => (
+              <ExternalRow
+                key={ext.video_id}
+                item={ext}
+                position={db.length + idx + 1}
+              />
+            ))}
+          </ul>
+        </>
+      )}
+
+      {!isLoading && db.length === 0 && external.length === 0 && (
+        <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
+          couldn't tune a radio for this track right now.
         </div>
       )}
     </section>
