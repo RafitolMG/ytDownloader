@@ -77,16 +77,24 @@ export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) 
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') setOpen(false)
     }
-    const onScrollOrResize = () => setOpen(false)
+    // Close when the *page* scrolls (the fixed menu would drift from its
+    // trigger), but ignore scrolls inside the menu's own overflow list — those
+    // shouldn't dismiss it.
+    function onScroll(e: Event) {
+      const t = e.target as Node | null
+      if (t && menuRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    const onResize = () => setOpen(false)
     document.addEventListener('mousedown', onClick)
     document.addEventListener('keydown', onKey)
-    window.addEventListener('scroll', onScrollOrResize, true)
-    window.addEventListener('resize', onScrollOrResize)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onResize)
     return () => {
       document.removeEventListener('mousedown', onClick)
       document.removeEventListener('keydown', onKey)
-      window.removeEventListener('scroll', onScrollOrResize, true)
-      window.removeEventListener('resize', onScrollOrResize)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onResize)
     }
   }, [open])
 

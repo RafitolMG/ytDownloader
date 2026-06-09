@@ -22,6 +22,10 @@ type PlayerCtx = {
   queue: LibraryItem[]
   /** Index of `current` within `queue`. -1 when nothing is loaded. */
   index: number
+  /** Position within the play *order* (0-based). Unlike `index` this tracks
+   * the play sequence, so it's the right value for an "N of M" counter under
+   * shuffle. -1 when nothing is loaded. */
+  orderPos: number
   /** True when `next()` will produce a track to play. In shuffle mode that
    * includes the implicit reshuffle on wrap. Drives the next button's
    * disabled state — `index < queue.length-1` would be wrong in shuffle. */
@@ -122,12 +126,18 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   // Has the current track load already been counted as a play? Reset on every
   // track change so each load can be recorded at most once.
   const playRecordedRef = useRef(false)
+  // Accumulated wall-clock the current track has actually been *playing* (ms),
+  // so the play-recording threshold survives pause/resume instead of restarting
+  // its countdown each time. Reset on track change.
+  const listenedMsRef = useRef(0)
 
   // Load the new src whenever the logical current track changes.
   useEffect(() => {
     const el = audioRef.current
     if (!el || !current) return
+    let cancelled = false
     playRecordedRef.current = false
+    listenedMsRef.current = 0
     // codec 'preview' = a not-yet-downloaded track proxy-streamed from YouTube.
     el.src =
       current.codec === 'preview'
@@ -136,18 +146,30 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     el.currentTime = 0
     setPosition(0)
     setDuration(NaN)
-    void el.play().catch(() => setIsPlaying(false))
+    // Ignore the AbortError from a play() that a rapid track switch interrupts:
+    // only flip isPlaying off if this load is still the active one. Otherwise a
+    // stale rejection desyncs the UI after the next track has already started.
+    void el.play().catch(() => {
+      if (!cancelled) setIsPlaying(false)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [current && trackKey(current)])
 
   // Record a play after ~20s of actual listening so skips don't pollute the
   // history that drives "recently played" and personalized daily mixes. The
-  // timer (re)arms whenever playback resumes and is cleared on pause / track
-  // change; once fired, the guard prevents double-counting this load.
+  // 20s is cumulative across pause/resume: each playing segment adds its
+  // wall-clock to `listenedMsRef`, and the timer is armed for only the time
+  // still remaining — so pausing at 19s and resuming records almost at once
+  // instead of restarting the full countdown. Reset per track above.
   useEffect(() => {
     // Don't log plays for previews — the track isn't in the DB (the FK would
     // fail) and a preview isn't a real listen.
     if (!current || current.codec === 'preview' || !isPlaying || playRecordedRef.current)
       return
+    const segmentStart = Date.now()
+    const remaining = Math.max(0, 20_000 - listenedMsRef.current)
     const t = setTimeout(() => {
       playRecordedRef.current = true
       void api
@@ -164,8 +186,11 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         .catch(() => {
           /* losing a play event is harmless */
         })
-    }, 20_000)
-    return () => clearTimeout(t)
+    }, remaining)
+    return () => {
+      listenedMsRef.current += Date.now() - segmentStart
+      clearTimeout(t)
+    }
   }, [current && trackKey(current), isPlaying, queryClient])
 
   const play = useCallback(
@@ -409,6 +434,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       current,
       queue,
       index,
+      orderPos: pos,
       canGoNext,
       canGoPrev,
       isPlaying,
@@ -433,7 +459,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       orderedQueue,
     }),
     [
-      current, queue, index, canGoNext, canGoPrev, isPlaying, position, duration,
+      current, queue, index, pos, canGoNext, canGoPrev, isPlaying, position, duration,
       shuffle, repeat, volume, setVolume,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
       playNext, enqueue, removeFromQueueAt, jumpTo, orderedQueue,
