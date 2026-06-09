@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import os
 import queue
+import random
 import shutil
 import tempfile
 import threading
@@ -9,6 +10,7 @@ import time
 import traceback
 import uuid
 import zipfile
+from datetime import datetime, timezone
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +18,13 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src import config, db, search as search_mod, ytDownloaderFunctions
+from src import (
+    catalog_categories as categories_mod,
+    config,
+    db,
+    search as search_mod,
+    ytDownloaderFunctions,
+)
 from src.api.auth_routes import router as auth_router
 from src.auth import CurrentUser, current_user
 
@@ -914,6 +922,53 @@ def list_catalog(
     return {"items": items}
 
 
+def _external_item(entry: dict) -> dict:
+    """Shape a yt-dlp flat entry (from search or related) into the external
+    candidate dict the frontend renders as a downloadable row/card."""
+    return {
+        "video_id": entry.get("id"),
+        "title": entry.get("title"),
+        "artist": entry.get("channel"),
+        "thumbnail_url": entry.get("thumbnail"),
+        "duration_sec": entry.get("duration_seconds"),
+        "source_url": entry.get("url"),
+    }
+
+
+def _discover_feed(
+    user_id: str, q_norm: str, limit: int, external_limit: int,
+) -> dict:
+    """Shared hybrid feed: catalog matches + YouTube candidates not yet in the
+    library. Used by both the search box and the curated category pages.
+
+    Externals are deduped against the catalog matches by video_id; we skip the
+    per-video is_music check (too slow) since the user opts in by downloading.
+    """
+    db_items = db.list_catalog(
+        user_id, query=q_norm or None, sort="popular", limit=limit, offset=0,
+    )
+
+    externals: list[dict] = []
+    # No query → purely local. External search only makes sense when looking
+    # for something specific (search box) or a category seed is supplied.
+    if q_norm and external_limit > 0:
+        known_ids = {it["video_id"] for it in db_items}
+        try:
+            raw = search_mod.search(q_norm, limit=external_limit + len(known_ids))
+        except Exception:
+            traceback.print_exc()
+            raw = []
+        for entry in raw:
+            if len(externals) >= external_limit:
+                break
+            vid = entry.get("id")
+            if not vid or vid in known_ids:
+                continue
+            externals.append(_external_item(entry))
+
+    return {"db": db_items, "external": externals}
+
+
 @app.get("/api/catalog/discover")
 def catalog_discover(
     q: str = "",
@@ -936,37 +991,7 @@ def catalog_discover(
     q_norm = (q or "").strip()
     limit = max(1, min(limit, 100))
     external_limit = max(0, min(external_limit, 25))
-
-    db_items = db.list_catalog(
-        user.user_id, query=q_norm or None, sort="popular", limit=limit, offset=0,
-    )
-
-    externals: list[dict] = []
-    # Browsing without a query stays purely local — external search only
-    # makes sense when the user is actually looking for something.
-    if q_norm and external_limit > 0:
-        known_ids = {it["video_id"] for it in db_items}
-        try:
-            raw = search_mod.search(q_norm, limit=external_limit + len(known_ids))
-        except Exception:
-            traceback.print_exc()
-            raw = []
-        for entry in raw:
-            if len(externals) >= external_limit:
-                break
-            vid = entry.get("id")
-            if not vid or vid in known_ids:
-                continue
-            externals.append({
-                "video_id": vid,
-                "title": entry.get("title"),
-                "artist": entry.get("channel"),
-                "thumbnail_url": entry.get("thumbnail"),
-                "duration_sec": entry.get("duration_seconds"),
-                "source_url": entry.get("url"),
-            })
-
-    return {"db": db_items, "external": externals}
+    return _discover_feed(user.user_id, q_norm, limit, external_limit)
 
 
 @app.get("/api/catalog/suggestions")
@@ -1023,17 +1048,140 @@ def catalog_suggestions(
             if not vid or vid in known_ids or vid in seen:
                 continue
             seen.add(vid)
-            suggestions.append({
-                "video_id": vid,
-                "title": entry.get("title"),
-                "artist": entry.get("channel"),
-                "thumbnail_url": entry.get("thumbnail"),
-                "duration_sec": entry.get("duration_seconds"),
-                "source_url": entry.get("url"),
-            })
+            suggestions.append(_external_item(entry))
         depth += 1
 
     return {"external": suggestions}
+
+
+# ── Play history ───────────────────────────────────────────────────────────────
+
+class PlayEvent(BaseModel):
+    video_id: str
+    codec: str
+    bitrate: str
+
+
+@app.post("/api/track/play")
+def track_play(body: PlayEvent, user: CurrentUser = Depends(current_user)):
+    """Record a playback. Fire-and-forget from the client after ~20s of
+    listening. Swallows failures (e.g. a track removed mid-play) — losing a
+    play event must never break playback."""
+    try:
+        db.record_play(user.user_id, body.video_id, body.codec, body.bitrate)
+    except Exception:
+        traceback.print_exc()
+    return {"ok": True}
+
+
+@app.get("/api/me/recent")
+def recent_plays(limit: int = 20, user: CurrentUser = Depends(current_user)):
+    """The caller's recently played tracks (distinct, newest first)."""
+    limit = max(1, min(limit, 50))
+    return {"items": db.list_recent_plays(user.user_id, limit=limit)}
+
+
+# ── Browse: categories + daily mixes ────────────────────────────────────────────
+
+@app.get("/api/catalog/categories")
+def catalog_categories():
+    """The curated Browse grid. Static config — no auth needed beyond the SPA."""
+    return {
+        "categories": [
+            {k: c[k] for k in ("slug", "title", "emoji", "accent")}
+            for c in categories_mod.CATEGORIES
+        ]
+    }
+
+
+@app.get("/api/catalog/category/{slug}")
+def catalog_category(
+    slug: str,
+    limit: int = 12,
+    external_limit: int = 18,
+    user: CurrentUser = Depends(current_user),
+):
+    """A category feed: the curated seed search run through the discover
+    pipeline — catalog tracks you can play + YouTube candidates to download."""
+    cat = categories_mod.CATEGORY_BY_SLUG.get(slug)
+    if cat is None:
+        raise HTTPException(status_code=404, detail="unknown category")
+    limit = max(1, min(limit, 50))
+    external_limit = max(0, min(external_limit, 30))
+    feed = _discover_feed(user.user_id, cat["query"], limit, external_limit)
+    return {
+        "category": {k: cat[k] for k in ("slug", "title", "emoji", "accent")},
+        **feed,
+    }
+
+
+@app.get("/api/catalog/daily-mixes")
+def daily_mixes(
+    count: int = 3,
+    size: int = 20,
+    user: CurrentUser = Depends(current_user),
+):
+    """Rotating daily mixes of *playable* catalog tracks.
+
+    Personalized when the user has listening history (anchored to their most-
+    played artists); otherwise anchored to the catalog's most popular artists.
+    A per-day seed rotates which artists anchor today's mixes and shuffles each
+    mix deterministically, so they're stable within a day and change the next.
+    """
+    count = max(1, min(count, 5))
+    size = max(5, min(size, 40))
+    day_seed = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+
+    # Seeds: most-played artists (personalized) or, failing that, the artists
+    # behind the most popular catalog tracks.
+    anchors = [a["artist"] for a in db.top_played_artists(user.user_id, limit=12)]
+    personalized = bool(anchors)
+
+    popular_pool = db.list_catalog(user.user_id, sort="popular", limit=80)
+    if not anchors:
+        seen_a: set[str] = set()
+        for it in popular_pool:
+            a = (it.get("artist") or "").strip()
+            if a and a not in seen_a:
+                seen_a.add(a)
+                anchors.append(a)
+            if len(anchors) >= 12:
+                break
+
+    if not anchors:
+        return {"mixes": [], "personalized": False}
+
+    # Rotate which anchors lead today.
+    rot = day_seed % len(anchors)
+    todays = (anchors[rot:] + anchors[:rot])[:count]
+
+    mixes: list[dict] = []
+    for i, anchor in enumerate(todays):
+        tracks = db.list_tracks_by_artist(user.user_id, anchor, limit=size)
+        have = {(t["video_id"], t["codec"], t["bitrate"]) for t in tracks}
+        # Fill out the mix with popular catalog tracks so it never feels empty.
+        for f in popular_pool:
+            if len(tracks) >= size:
+                break
+            key = (f["video_id"], f["codec"], f["bitrate"])
+            if key in have:
+                continue
+            tracks.append(f)
+            have.add(key)
+        # Stable-per-day shuffle (distinct seed per mix so they don't align).
+        random.Random(day_seed + i).shuffle(tracks)
+        tracks = tracks[:size]
+        if len(tracks) < 4:
+            continue  # too thin to be a "mix"
+        mixes.append({
+            "id": f"daily-{day_seed}-{i}",
+            "title": f"Daily Mix {i + 1}",
+            "subtitle": anchor,
+            "accent": ("hot", "cool", "violet")[i % 3],
+            "tracks": tracks,
+        })
+
+    return {"mixes": mixes, "personalized": personalized}
 
 
 @app.post("/api/catalog/tracks/{video_id}/{codec}/{bitrate}/own")
