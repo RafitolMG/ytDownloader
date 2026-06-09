@@ -894,17 +894,22 @@ _CATALOG_SORTS = {"newest", "popular", "title", "artist"}
 def list_catalog(
     q: str | None = None,
     sort: str = "newest",
+    owned_only: bool = False,
     limit: int = 200,
     offset: int = 0,
     user: CurrentUser = Depends(current_user),
 ):
-    """Paginated global track listing with per-viewer is_owned/is_liked flags."""
+    """Paginated global track listing with per-viewer is_owned/is_liked flags.
+
+    `owned_only=true` returns just the caller's library — the catalog's "mine"
+    view that replaced the standalone Library page."""
     if sort not in _CATALOG_SORTS:
         sort = "newest"
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
     items = db.list_catalog(
-        user.user_id, query=q, sort=sort, limit=limit, offset=offset,
+        user.user_id, query=q, sort=sort, owned_only=owned_only,
+        limit=limit, offset=offset,
     )
     return {"items": items}
 
@@ -962,6 +967,73 @@ def catalog_discover(
             })
 
     return {"db": db_items, "external": externals}
+
+
+@app.get("/api/catalog/suggestions")
+def catalog_suggestions(
+    limit: int = 18,
+    user: CurrentUser = Depends(current_user),
+):
+    """
+    At-rest discovery: seed YouTube Mixes from the catalog's most popular
+    tracks and surface related songs that aren't in the shared library yet.
+
+    Why this shape:
+      - Seeds come from `sort="popular"` so suggestions track what the group
+        actually listens to, not a random corner of the catalog.
+      - Results are round-robin interleaved across seeds so one artist's mix
+        doesn't dominate the list.
+      - Dedup is against the *entire* catalog (everything downloaded), not just
+        the seeds, so we never suggest something already owned.
+
+    Best-effort: an empty/cold catalog or a failing mix yields fewer (or zero)
+    suggestions rather than an error.
+    """
+    limit = max(1, min(limit, 40))
+
+    # One generous read does double duty: pick popular seeds AND build the
+    # dedup set of everything already in the shared library.
+    catalog = db.list_catalog(user.user_id, sort="popular", limit=500, offset=0)
+    if not catalog:
+        return {"external": []}
+
+    known_ids = {it["video_id"] for it in catalog}
+
+    # A few seeds is plenty — each Mix returns ~12 related videos and fetching
+    # them is the slow part (one yt-dlp call each, cached 15min after).
+    mixes: list[list[dict]] = []
+    for seed in catalog[:4]:
+        try:
+            mixes.append(search_mod.related(seed["video_id"], limit=12))
+        except Exception:
+            traceback.print_exc()
+            mixes.append([])
+
+    seen: set[str] = set()
+    suggestions: list[dict] = []
+    depth = 0
+    # Round-robin: take the i-th entry from every mix before the (i+1)-th, so
+    # the head of the list is a spread across seeds rather than one full mix.
+    while len(suggestions) < limit and any(depth < len(m) for m in mixes):
+        for mix in mixes:
+            if depth >= len(mix) or len(suggestions) >= limit:
+                continue
+            entry = mix[depth]
+            vid = entry.get("id")
+            if not vid or vid in known_ids or vid in seen:
+                continue
+            seen.add(vid)
+            suggestions.append({
+                "video_id": vid,
+                "title": entry.get("title"),
+                "artist": entry.get("channel"),
+                "thumbnail_url": entry.get("thumbnail"),
+                "duration_sec": entry.get("duration_seconds"),
+                "source_url": entry.get("url"),
+            })
+        depth += 1
+
+    return {"external": suggestions}
 
 
 @app.post("/api/catalog/tracks/{video_id}/{codec}/{bitrate}/own")
