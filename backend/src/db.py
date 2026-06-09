@@ -138,6 +138,12 @@ CREATE TABLE IF NOT EXISTS track_owners (
 );
 
 CREATE INDEX IF NOT EXISTS idx_track_owners_owner ON track_owners(owner_id, added_at DESC);
+-- The catalog's owner_count (COUNT) and is_owned (EXISTS) correlated subqueries
+-- filter on (video_id, codec, bitrate) with no leading owner_id, so the PK and
+-- the owner index above can't serve them. Without this, every catalog row scans
+-- all of track_owners twice — and discover/suggestions/radio/daily-mixes each
+-- read 400-500 rows. This index turns those scans into lookups.
+CREATE INDEX IF NOT EXISTS idx_track_owners_track ON track_owners(video_id, codec, bitrate);
 
 -- `track_likes`: heart/favorite. Independent from ownership so a user can
 -- like a track without adding it to their library, and vice versa.
