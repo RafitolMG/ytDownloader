@@ -216,6 +216,36 @@ export type DailyMixesResponse = {
   personalized: boolean
 }
 
+/** A library-addition event for the shared activity feed. Carries enough to
+ * render + play the track, plus who added it and when. */
+export type ActivityItem = {
+  username: string | null
+  added_at: string
+  video_id: string
+  codec: string
+  bitrate: string
+  title: string | null
+  artist: string | null
+  duration_sec: number | null
+  thumbnail_url: string | null
+  source_url: string
+  file_size: number | null
+}
+
+export type ActivityResponse = {
+  items: ActivityItem[]
+}
+
+export type ArtistStat = { artist: string; play_count: number }
+
+/** Personal listening stats over a window — a lightweight "wrapped". */
+export type StatsResponse = {
+  window_days: number
+  total_plays: number
+  top_tracks: CatalogItem[]
+  top_artists: ArtistStat[]
+}
+
 // ── Playlists ────────────────────────────────────────────────────────────────
 
 export type PlaylistVisibility = 'public' | 'private'

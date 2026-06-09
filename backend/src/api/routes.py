@@ -10,7 +10,7 @@ import time
 import traceback
 import uuid
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -1121,6 +1121,29 @@ def recent_plays(limit: int = 20, user: CurrentUser = Depends(current_user)):
     """The caller's recently played tracks (distinct, newest first)."""
     limit = max(1, min(limit, 50))
     return {"items": db.list_recent_plays(user.user_id, limit=limit)}
+
+
+@app.get("/api/me/stats")
+def my_stats(window_days: int = 30, user: CurrentUser = Depends(current_user)):
+    """Personal listening stats over a window — top tracks/artists + totals,
+    a lightweight 'wrapped'. window_days <= 0 means all time."""
+    window_days = max(0, min(window_days, 3650))
+    since = None
+    if window_days > 0:
+        since = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
+    return {
+        "window_days": window_days,
+        "total_plays": db.count_plays(user.user_id, since=since),
+        "top_tracks": db.top_played_tracks(user.user_id, limit=12, since=since),
+        "top_artists": db.top_played_artists(user.user_id, limit=8, since=since),
+    }
+
+
+@app.get("/api/activity")
+def activity(limit: int = 30, user: CurrentUser = Depends(current_user)):
+    """Recent library additions across all users — the shared activity feed."""
+    limit = max(1, min(limit, 100))
+    return {"items": db.list_recent_additions(limit=limit)}
 
 
 # ── Browse: categories + daily mixes ────────────────────────────────────────────

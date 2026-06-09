@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { api } from '@/shared/api/client'
 import type {
+  ActivityItem,
+  ArtistStat,
   CatalogAccent,
   CatalogItem,
   CatalogSort,
@@ -130,10 +132,25 @@ export default function CatalogPage() {
     enabled: activeCategory !== null,
     staleTime: 60_000,
   })
+  const statsQuery = useQuery({
+    queryKey: ['my-stats'],
+    queryFn: () => api.myStats(30),
+    enabled: browseHome,
+    staleTime: 60_000,
+  })
+  const activityQuery = useQuery({
+    queryKey: ['activity'],
+    queryFn: () => api.activity(12),
+    enabled: browseHome,
+    staleTime: 30_000,
+  })
 
   const recent = browseHome ? recentQuery.data?.items ?? [] : []
   const dailyMixes = browseHome ? dailyMixesQuery.data?.mixes ?? [] : []
   const categories = browseHome ? categoriesQuery.data?.categories ?? [] : []
+  const topTracks = browseHome ? statsQuery.data?.top_tracks ?? [] : []
+  const topArtists = browseHome ? statsQuery.data?.top_artists ?? [] : []
+  const activity = browseHome ? activityQuery.data?.items ?? [] : []
 
   const dbItems: CatalogItem[] = isSearching
     ? discoverQuery.data?.db ?? []
@@ -251,6 +268,9 @@ export default function CatalogPage() {
             {browseHome && (
               <BrowseHome
                 recent={recent}
+                topTracks={topTracks}
+                topArtists={topArtists}
+                activity={activity}
                 mixes={dailyMixes}
                 mixesLoading={dailyMixesQuery.isLoading}
                 personalized={dailyMixesQuery.data?.personalized ?? false}
@@ -713,6 +733,9 @@ function SectionHeader({ title, note }: { title: string; note?: string }) {
 /** The browse "home" shown when idle on the full catalog. */
 function BrowseHome({
   recent,
+  topTracks,
+  topArtists,
+  activity,
   mixes,
   mixesLoading,
   personalized,
@@ -721,6 +744,9 @@ function BrowseHome({
   onOpenMix,
 }: {
   recent: CatalogItem[]
+  topTracks: CatalogItem[]
+  topArtists: ArtistStat[]
+  activity: ActivityItem[]
   mixes: DailyMix[]
   mixesLoading: boolean
   personalized: boolean
@@ -739,6 +765,34 @@ function BrowseHome({
                 key={`${it.video_id}/${it.codec}/${it.bitrate}`}
                 item={it}
                 queue={recent}
+                index={i}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {topTracks.length > 0 && (
+        <section className="mb-8">
+          <SectionHeader title="★ your top" note="last 30 days" />
+          {topArtists.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-3">
+              {topArtists.map((a) => (
+                <span
+                  key={a.artist}
+                  className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-cool/50 text-cool rounded-xs"
+                >
+                  {a.artist} <span className="text-ink-lo tabular-nums">·{a.play_count}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
+            {topTracks.map((it, i) => (
+              <RecentCard
+                key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+                item={it}
+                queue={topTracks}
                 index={i}
               />
             ))}
@@ -783,7 +837,79 @@ function BrowseHome({
           </div>
         </section>
       )}
+
+      {activity.length > 0 && (
+        <section className="mb-8">
+          <SectionHeader title="⊹ recent activity" note="what the crew added" />
+          <ul className="card-vapor rounded-sm divide-y divide-border">
+            {activity.map((it, i) => (
+              <ActivityRow
+                key={`${it.video_id}/${it.added_at}/${i}`}
+                item={it}
+                queue={activity}
+                index={i}
+              />
+            ))}
+          </ul>
+        </section>
+      )}
     </>
+  )
+}
+
+/** One row in the activity feed: who added what. Click plays the feed from
+ * here. */
+function ActivityRow({
+  item,
+  queue,
+  index,
+}: {
+  item: ActivityItem
+  queue: ActivityItem[]
+  index: number
+}) {
+  const player = useAudioPlayer()
+  const toLib = (a: ActivityItem): LibraryItem => ({
+    video_id: a.video_id,
+    codec: a.codec,
+    bitrate: a.bitrate,
+    title: a.title,
+    artist: a.artist,
+    duration_sec: a.duration_sec,
+    thumbnail_url: a.thumbnail_url,
+    source_url: a.source_url,
+    file_size: a.file_size,
+    added_at: a.added_at,
+    source_playlist_title: null,
+  })
+  return (
+    <li
+      onClick={() => player.play(queue.map(toLib), index)}
+      className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer hover:bg-violet/10 transition"
+    >
+      <div className="relative w-12 sm:w-14 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
+        {item.thumbnail_url ? (
+          <img
+            src={item.thumbnail_url}
+            alt=""
+            className="w-full h-full object-cover"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="font-sans text-sm text-ink-hi truncate">
+          {item.title ?? item.video_id}
+        </div>
+        <div className="text-xs text-ink-lo truncate">
+          <span className="text-cool">{item.username ?? 'someone'}</span> added ·{' '}
+          {item.artist ?? '—'}
+        </div>
+      </div>
+    </li>
   )
 }
 
