@@ -715,6 +715,32 @@ def list_catalog(
     return [dict(r) for r in rows]
 
 
+def list_catalog_by_video_ids(
+    viewer_id: str, video_ids: list[str]
+) -> list[dict[str, Any]]:
+    """Return catalog rows (same shape as `list_catalog`) for the given
+    video_ids, annotated with `is_owned`/`owner_count` for `viewer_id`.
+
+    Used by discover to detect search hits that are already in the catalog —
+    even when their stored title/artist text doesn't match the query — so they
+    surface as "add to library" (adopt, no re-download) rather than a fresh
+    external download.
+    """
+    if not video_ids:
+        return []
+    placeholders = ",".join("?" for _ in video_ids)
+    conn = _get_conn()
+    rows = conn.execute(
+        f"""
+        SELECT {_TRACK_COLS}
+          FROM tracks t
+         WHERE t.video_id IN ({placeholders})
+        """,
+        (viewer_id, *video_ids),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ── Play history ───────────────────────────────────────────────────────────────
 
 # Reused SELECT for catalog-item-shaped rows. The single `?` is the viewer for

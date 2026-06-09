@@ -1001,6 +1001,19 @@ def _discover_feed(
         except Exception:
             traceback.print_exc()
             raw = []
+        # Some search hits are already in the catalog but didn't match the text
+        # query (different stored title/artist). Pull those in as catalog rows
+        # so they render as "add to library" (adopt, no re-download) instead of
+        # a fresh download row.
+        raw_ids = [e.get("id") for e in raw if e.get("id")]
+        already = [
+            it
+            for it in db.list_catalog_by_video_ids(user_id, raw_ids)
+            if it["video_id"] not in known_ids
+        ]
+        if already:
+            db_items.extend(already)
+            known_ids.update(it["video_id"] for it in already)
         for entry in raw:
             if len(externals) >= external_limit:
                 break
