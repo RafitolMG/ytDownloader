@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
 import type { LibraryItem } from '@/shared/api/types'
 
@@ -75,6 +76,7 @@ function buildOrder(length: number, startAt: number, shuffle: boolean): number[]
 }
 
 export function AudioPlayerProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient()
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [queue, setQueue] = useState<LibraryItem[]>([])
   /** Permutation of queue indices. `order[pos]` is the queue index playing. */
@@ -100,16 +102,47 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   // and doesn't need to be reflected in this flag.
   const canGoPrev = pos > 0 || (pos >= 0 && repeat === 'all')
 
+  // Has the current track load already been counted as a play? Reset on every
+  // track change so each load can be recorded at most once.
+  const playRecordedRef = useRef(false)
+
   // Load the new src whenever the logical current track changes.
   useEffect(() => {
     const el = audioRef.current
     if (!el || !current) return
+    playRecordedRef.current = false
     el.src = api.trackStreamUrl(current.video_id, current.codec, current.bitrate)
     el.currentTime = 0
     setPosition(0)
     setDuration(NaN)
     void el.play().catch(() => setIsPlaying(false))
   }, [current && trackKey(current)])
+
+  // Record a play after ~20s of actual listening so skips don't pollute the
+  // history that drives "recently played" and personalized daily mixes. The
+  // timer (re)arms whenever playback resumes and is cleared on pause / track
+  // change; once fired, the guard prevents double-counting this load.
+  useEffect(() => {
+    if (!current || !isPlaying || playRecordedRef.current) return
+    const t = setTimeout(() => {
+      playRecordedRef.current = true
+      void api
+        .recordPlay({
+          video_id: current.video_id,
+          codec: current.codec,
+          bitrate: current.bitrate,
+        })
+        .then(() => {
+          // Refresh the browse surfaces that lean on listening history.
+          queryClient.invalidateQueries({ queryKey: ['recent'] })
+          queryClient.invalidateQueries({ queryKey: ['daily-mixes'] })
+        })
+        .catch(() => {
+          /* losing a play event is harmless */
+        })
+    }, 20_000)
+    return () => clearTimeout(t)
+  }, [current && trackKey(current), isPlaying, queryClient])
 
   const play = useCallback(
     (nextQueue: LibraryItem[], startAt = 0) => {

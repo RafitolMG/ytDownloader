@@ -3,8 +3,11 @@ import { useEffect, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { api } from '@/shared/api/client'
 import type {
+  CatalogAccent,
   CatalogItem,
   CatalogSort,
+  Category,
+  DailyMix,
   ExternalCatalogItem,
   LibraryItem,
 } from '@/shared/api/types'
@@ -95,6 +98,39 @@ export default function CatalogPage() {
     enabled: !isSearching && !isMine,
     staleTime: 5 * 60_000,
   })
+
+  // Browse "home" (Spotify-style): only when idle, scope=all, no category open.
+  const [activeCategory, setActiveCategory] = useState<Category | null>(null)
+  const browseHome = !isSearching && !isMine && activeCategory === null
+
+  const recentQuery = useQuery({
+    queryKey: ['recent'],
+    queryFn: () => api.recentPlays(20),
+    enabled: browseHome,
+    staleTime: 30_000,
+  })
+  const dailyMixesQuery = useQuery({
+    queryKey: ['daily-mixes'],
+    queryFn: () => api.dailyMixes({ count: 3, size: 20 }),
+    enabled: browseHome,
+    staleTime: 5 * 60_000,
+  })
+  const categoriesQuery = useQuery({
+    queryKey: ['categories'],
+    queryFn: () => api.categories(),
+    enabled: browseHome,
+    staleTime: 60 * 60_000,
+  })
+  const categoryFeedQuery = useQuery({
+    queryKey: ['category', activeCategory?.slug],
+    queryFn: () => api.category(activeCategory!.slug, { external_limit: 18 }),
+    enabled: activeCategory !== null,
+    staleTime: 60_000,
+  })
+
+  const recent = browseHome ? recentQuery.data?.items ?? [] : []
+  const dailyMixes = browseHome ? dailyMixesQuery.data?.mixes ?? [] : []
+  const categories = browseHome ? categoriesQuery.data?.categories ?? [] : []
 
   const dbItems: CatalogItem[] = isSearching
     ? discoverQuery.data?.db ?? []
@@ -196,88 +232,106 @@ export default function CatalogPage() {
           )}
         </div>
 
-        {activeQuery.isLoading && (
-          <div className="font-pixel text-ink-mid">··· loading catalog ···</div>
-        )}
-        {activeQuery.isError && (
-          <div className="font-pixel text-crit">
-            failed to load:{' '}
-            {activeQuery.error instanceof Error ? activeQuery.error.message : 'unknown'}
-          </div>
-        )}
-        {showEmpty && (
-          <div className="card-vapor rounded-sm p-8 text-center">
-            <div className="font-pixel text-lg text-ink-mid mb-2">
-              ⊹ nothing found ⊹
-            </div>
-            <div className="font-pixel text-sm text-ink-lo">
-              {isSearching
-                ? `nothing in the catalog or on youtube matches "${debouncedQuery}"`
-                : isMine
-                  ? 'your library is empty — tap ♡ on any catalog track to save it here.'
-                  : 'no tracks have been downloaded yet.'}
-            </div>
-          </div>
-        )}
-
-        {dbItems.length > 0 && (
-          <ul className="card-vapor rounded-sm divide-y divide-border">
-            {dbItems.map((it, idx) => (
-              <CatalogRow
-                key={`${it.video_id}/${it.codec}/${it.bitrate}`}
-                item={it}
-                position={idx + 1}
-                allItems={dbItems}
+        {activeCategory ? (
+          <CategoryView
+            category={activeCategory}
+            feed={categoryFeedQuery.data}
+            isLoading={categoryFeedQuery.isLoading}
+            onBack={() => setActiveCategory(null)}
+          />
+        ) : (
+          <>
+            {/* Spotify-style browse home: recently played, daily mixes and the
+                category grid — only when idle on the full catalog. */}
+            {browseHome && (
+              <BrowseHome
+                recent={recent}
+                mixes={dailyMixes}
+                mixesLoading={dailyMixesQuery.isLoading}
+                personalized={dailyMixesQuery.data?.personalized ?? false}
+                categories={categories}
+                onOpenCategory={setActiveCategory}
               />
-            ))}
-          </ul>
-        )}
+            )}
 
-        {externals.length > 0 && (
-          <>
-            <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-              <span className="flex-1 border-t border-border" />
-              <span>↓ found on youtube · not yet downloaded</span>
-              <span className="flex-1 border-t border-border" />
-            </div>
-            <ul className="card-vapor rounded-sm divide-y divide-border">
-              {externals.map((ext, idx) => (
-                <ExternalRow
-                  key={ext.video_id}
-                  item={ext}
-                  position={dbItems.length + idx + 1}
-                  invalidateKey={debouncedQuery}
-                />
-              ))}
-            </ul>
+            {/* Suggestions carousel — discovery up top, not buried. Header +
+                skeletons stay put while the Mixes load (~4s). */}
+            {!isSearching && !isMine && (suggestionsQuery.isLoading || suggestions.length > 0) && (
+              <section className="mb-8">
+                <SectionHeader title="✦ suggestions for you" note="related to the catalog · not downloaded yet" />
+                <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
+                  {suggestionsQuery.isLoading && suggestions.length === 0
+                    ? Array.from({ length: 8 }).map((_, i) => (
+                        <SuggestionSkeleton key={i} />
+                      ))
+                    : suggestions.map((ext) => (
+                        <SuggestionCard key={ext.video_id} item={ext} />
+                      ))}
+                </div>
+              </section>
+            )}
+
+            {activeQuery.isLoading && (
+              <div className="font-pixel text-ink-mid">··· loading catalog ···</div>
+            )}
+            {activeQuery.isError && (
+              <div className="font-pixel text-crit">
+                failed to load:{' '}
+                {activeQuery.error instanceof Error ? activeQuery.error.message : 'unknown'}
+              </div>
+            )}
+            {showEmpty && (
+              <div className="card-vapor rounded-sm p-8 text-center">
+                <div className="font-pixel text-lg text-ink-mid mb-2">
+                  ⊹ nothing found ⊹
+                </div>
+                <div className="font-pixel text-sm text-ink-lo">
+                  {isSearching
+                    ? `nothing in the catalog or on youtube matches "${debouncedQuery}"`
+                    : isMine
+                      ? 'your library is empty — tap ♡ on any catalog track to save it here.'
+                      : 'no tracks have been downloaded yet.'}
+                </div>
+              </div>
+            )}
+
+            {dbItems.length > 0 && (
+              <section>
+                {browseHome && <SectionHeader title="▤ the full catalog" />}
+                <ul className="card-vapor rounded-sm divide-y divide-border">
+                  {dbItems.map((it, idx) => (
+                    <CatalogRow
+                      key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+                      item={it}
+                      position={idx + 1}
+                      allItems={dbItems}
+                    />
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {externals.length > 0 && (
+              <>
+                <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+                  <span className="flex-1 border-t border-border" />
+                  <span>↓ found on youtube · not yet downloaded</span>
+                  <span className="flex-1 border-t border-border" />
+                </div>
+                <ul className="card-vapor rounded-sm divide-y divide-border">
+                  {externals.map((ext, idx) => (
+                    <ExternalRow
+                      key={ext.video_id}
+                      item={ext}
+                      position={dbItems.length + idx + 1}
+                    />
+                  ))}
+                </ul>
+              </>
+            )}
           </>
         )}
 
-        {/* At-rest suggestions — only while browsing (no active search). */}
-        {!isSearching && suggestionsQuery.isLoading && dbItems.length > 0 && (
-          <div className="mt-6 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] text-center">
-            ··· finding songs you might like ···
-          </div>
-        )}
-        {!isSearching && suggestions.length > 0 && (
-          <>
-            <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-              <span className="flex-1 border-t border-border" />
-              <span>✦ suggestions for you · related to the catalog</span>
-              <span className="flex-1 border-t border-border" />
-            </div>
-            <ul className="card-vapor rounded-sm divide-y divide-border">
-              {suggestions.map((ext, idx) => (
-                <ExternalRow
-                  key={ext.video_id}
-                  item={ext}
-                  position={idx + 1}
-                  invalidateKey="suggestions"
-                />
-              ))}
-            </ul>
-          </>
-        )}
       </main>
     </div>
   )
@@ -418,19 +472,11 @@ function CatalogRow({
   )
 }
 
-/** Row for a YouTube candidate not yet in the catalog. Clicking ⬇ fires a
- * library import (mp3-320 — the catalog's canonical bitrate) and subscribes
- * to the job's progress WS. On completion the catalog and discover queries
- * are invalidated so the row re-renders as a CatalogRow on the next fetch. */
-function ExternalRow({
-  item,
-  position,
-  invalidateKey,
-}: {
-  item: ExternalCatalogItem
-  position: number
-  invalidateKey: string
-}) {
+/** Shared download lifecycle for a YouTube candidate (external row or
+ * suggestion card): fire an mp3-320 library import, follow the job's progress
+ * WS, and on completion invalidate the catalog views so the track re-renders
+ * as a real DB row. Returns just the bits the UIs need to draw themselves. */
+function useExternalDownload(item: ExternalCatalogItem) {
   const queryClient = useQueryClient()
   const [jobId, setJobId] = useState<string | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
@@ -451,12 +497,10 @@ function ExternalRow({
     onError: (e) => setFailed(e instanceof Error ? e.message : 'download failed'),
   })
 
-  // The hook closes its WS and emits 'done' / 'error' through query
-  // invalidation; reacting to the status here lets us flip the row UI
-  // immediately and refresh the catalog so a freshly-downloaded track
-  // shows up as a real DB row.
+  const isDone = live.status === 'done'
+
   useEffect(() => {
-    if (live.status === 'done') {
+    if (isDone) {
       queryClient.invalidateQueries({ queryKey: ['discover'] })
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
       queryClient.invalidateQueries({ queryKey: ['catalog-suggestions'] })
@@ -464,10 +508,34 @@ function ExternalRow({
     } else if (live.status === 'error') {
       setFailed('download failed — check the queue')
     }
-  }, [live.status, queryClient, invalidateKey])
+  }, [isDone, live.status, queryClient])
 
-  const isPending = download.isPending || (jobId !== null && live.status !== 'done' && live.status !== 'error')
-  const pct = live.progress ?? 0
+  const started = jobId !== null
+  const isPending =
+    download.isPending || (started && !isDone && live.status !== 'error')
+
+  return {
+    start: () => {
+      if (!isPending) download.mutate()
+    },
+    isPending,
+    isDone,
+    started,
+    pct: live.progress ?? 0,
+    failed,
+  }
+}
+
+/** Full-width list row for a YouTube candidate — used in the search results
+ * ("found on youtube") section. */
+function ExternalRow({
+  item,
+  position,
+}: {
+  item: ExternalCatalogItem
+  position: number
+}) {
+  const dl = useExternalDownload(item)
 
   return (
     <li className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 transition opacity-90">
@@ -501,28 +569,408 @@ function ExternalRow({
         <div className="text-sm text-ink-lo truncate mt-0.5">
           {item.artist ?? '—'}
         </div>
-        {jobId && live.status !== 'done' && (
+        {dl.started && !dl.isDone && (
           <div className="mt-1 font-pixel text-xs text-cool tabular-nums">
-            ··· downloading {pct.toFixed(0)}%
+            ··· downloading {dl.pct.toFixed(0)}%
           </div>
         )}
-        {failed && (
-          <div className="mt-1 font-pixel text-xs text-crit">⚠ {failed}</div>
+        {dl.failed && (
+          <div className="mt-1 font-pixel text-xs text-crit">⚠ {dl.failed}</div>
         )}
       </div>
 
       <button
         type="button"
-        onClick={() => {
-          if (!isPending) download.mutate()
-        }}
-        disabled={isPending}
+        onClick={dl.start}
+        disabled={dl.isPending}
         title="download mp3 · 320 and add to the catalog"
         className="font-pixel text-sm flex items-center gap-1 px-2 py-1 border rounded-xs transition disabled:opacity-50 border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)]"
       >
-        {isPending ? '···' : '⬇'}
+        {dl.isPending ? '···' : '⬇'}
       </button>
     </li>
+  )
+}
+
+/** Compact card for the at-rest suggestions carousel. Same download flow as
+ * ExternalRow, laid out vertically so a row of them scrolls horizontally. */
+function SuggestionCard({ item }: { item: ExternalCatalogItem }) {
+  const dl = useExternalDownload(item)
+
+  return (
+    <div className="w-40 sm:w-44 flex-shrink-0 snap-start card-vapor rounded-sm overflow-hidden border border-border">
+      <div className="relative aspect-video bg-page-mid">
+        {item.thumbnail_url ? (
+          <img
+            src={item.thumbnail_url}
+            alt=""
+            className="w-full h-full object-cover"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
+        )}
+        {item.duration_sec != null && (
+          <span className="absolute bottom-0.5 right-0.5 font-pixel text-[10px] leading-none bg-page/80 text-cool px-1 py-0.5 rounded-xs">
+            {fmtDuration(item.duration_sec)}
+          </span>
+        )}
+        {dl.started && !dl.isDone && (
+          <div className="absolute inset-0 bg-page/70 flex items-center justify-center font-pixel text-xs text-cool tabular-nums">
+            {dl.pct.toFixed(0)}%
+          </div>
+        )}
+      </div>
+
+      <div className="p-2">
+        <div
+          className="font-sans text-xs font-medium text-ink-hi leading-snug line-clamp-2 min-h-[2rem]"
+          title={item.title ?? item.video_id}
+        >
+          {item.title ?? item.video_id}
+        </div>
+        <div className="text-xs text-ink-lo truncate mt-0.5 mb-2">
+          {item.artist ?? '—'}
+        </div>
+        <button
+          type="button"
+          onClick={dl.start}
+          disabled={dl.isPending}
+          title="download mp3 · 320 and add to the catalog"
+          className="w-full font-pixel text-xs uppercase tracking-widest flex items-center justify-center gap-1 px-2 py-1 border rounded-xs transition disabled:opacity-50 border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)]"
+        >
+          {dl.isPending ? '···' : '⬇ add'}
+        </button>
+        {dl.failed && (
+          <div className="mt-1 font-pixel text-[10px] text-crit line-clamp-1">
+            ⚠ {dl.failed}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Placeholder card shown while the Mixes load. */
+function SuggestionSkeleton() {
+  return (
+    <div className="w-40 sm:w-44 flex-shrink-0 card-vapor rounded-sm overflow-hidden border border-border animate-pulse">
+      <div className="aspect-video bg-violet/10" />
+      <div className="p-2 space-y-2">
+        <div className="h-3 bg-violet/10 rounded-xs" />
+        <div className="h-3 w-2/3 bg-violet/10 rounded-xs" />
+        <div className="h-6 bg-violet/10 rounded-xs mt-2" />
+      </div>
+    </div>
+  )
+}
+
+// Accent → literal Tailwind classes (kept whole so the JIT sees them).
+const ACCENT: Record<
+  CatalogAccent,
+  { border: string; text: string; grad: string; glow: string }
+> = {
+  hot: {
+    border: 'border-hot/50',
+    text: 'text-hot',
+    grad: 'from-hot/40 via-violet/20 to-cool/20',
+    glow: 'hover:shadow-[var(--shadow-glow-hot)]',
+  },
+  cool: {
+    border: 'border-cool/50',
+    text: 'text-cool',
+    grad: 'from-cool/40 via-violet/20 to-hot/20',
+    glow: 'hover:shadow-[var(--shadow-glow-cool)]',
+  },
+  violet: {
+    border: 'border-violet/50',
+    text: 'text-violet',
+    grad: 'from-violet/40 via-hot/20 to-cool/20',
+    glow: 'hover:shadow-[var(--shadow-glow-cool)]',
+  },
+}
+
+function SectionHeader({ title, note }: { title: string; note?: string }) {
+  return (
+    <div className="mb-3 flex items-center gap-3 font-pixel text-xs text-cool uppercase tracking-[0.2em]">
+      <span className="whitespace-nowrap">{title}</span>
+      {note && (
+        <span className="text-ink-lo normal-case tracking-normal truncate">{note}</span>
+      )}
+      <span className="flex-1 border-t border-border" />
+    </div>
+  )
+}
+
+/** The browse "home" shown when idle on the full catalog. */
+function BrowseHome({
+  recent,
+  mixes,
+  mixesLoading,
+  personalized,
+  categories,
+  onOpenCategory,
+}: {
+  recent: CatalogItem[]
+  mixes: DailyMix[]
+  mixesLoading: boolean
+  personalized: boolean
+  categories: Category[]
+  onOpenCategory: (c: Category) => void
+}) {
+  return (
+    <>
+      {recent.length > 0 && (
+        <section className="mb-8">
+          <SectionHeader title="↺ recently played" />
+          <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
+            {recent.map((it, i) => (
+              <RecentCard
+                key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+                item={it}
+                queue={recent}
+                index={i}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {(mixesLoading || mixes.length > 0) && (
+        <section className="mb-8">
+          <SectionHeader
+            title="◈ daily mixes"
+            note={personalized ? 'tuned to what you play' : 'fresh every day'}
+          />
+          <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
+            {mixesLoading && mixes.length === 0
+              ? Array.from({ length: 3 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="w-40 sm:w-44 flex-shrink-0 card-vapor rounded-sm overflow-hidden border border-border animate-pulse"
+                  >
+                    <div className="aspect-square bg-violet/10" />
+                    <div className="p-2 space-y-2">
+                      <div className="h-3 bg-violet/10 rounded-xs" />
+                      <div className="h-3 w-1/2 bg-violet/10 rounded-xs" />
+                    </div>
+                  </div>
+                ))
+              : mixes.map((m) => <DailyMixCard key={m.id} mix={m} />)}
+          </div>
+        </section>
+      )}
+
+      {categories.length > 0 && (
+        <section className="mb-8">
+          <SectionHeader title="▦ browse" />
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            {categories.map((c) => (
+              <CategoryCard key={c.slug} category={c} onClick={() => onOpenCategory(c)} />
+            ))}
+          </div>
+        </section>
+      )}
+    </>
+  )
+}
+
+/** Square cover card for the recently-played strip; click plays from here. */
+function RecentCard({
+  item,
+  queue,
+  index,
+}: {
+  item: CatalogItem
+  queue: CatalogItem[]
+  index: number
+}) {
+  const player = useAudioPlayer()
+  return (
+    <button
+      type="button"
+      onClick={() => player.play(queue.map(toLibraryItem), index)}
+      className="w-32 sm:w-36 flex-shrink-0 snap-start text-left group"
+      title={`${item.title ?? item.video_id} — ${item.artist ?? ''}`}
+    >
+      <div className="relative aspect-square rounded-sm overflow-hidden border border-border bg-page-mid">
+        {item.thumbnail_url ? (
+          <img
+            src={item.thumbnail_url}
+            alt=""
+            className="w-full h-full object-cover"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
+        )}
+        <span className="absolute inset-0 flex items-center justify-center text-2xl text-ink-hi opacity-0 group-hover:opacity-100 bg-page/40 transition">
+          ▶
+        </span>
+      </div>
+      <div className="mt-1 font-sans text-xs font-medium text-ink-hi line-clamp-2 leading-snug">
+        {item.title ?? item.video_id}
+      </div>
+      <div className="text-xs text-ink-lo truncate">{item.artist ?? '—'}</div>
+    </button>
+  )
+}
+
+/** Daily mix tile; click plays the whole mix. */
+function DailyMixCard({ mix }: { mix: DailyMix }) {
+  const player = useAudioPlayer()
+  const a = ACCENT[mix.accent]
+  const cover = mix.tracks[0]?.thumbnail_url ?? null
+  return (
+    <button
+      type="button"
+      onClick={() => player.play(mix.tracks.map(toLibraryItem), 0)}
+      className={`w-40 sm:w-44 flex-shrink-0 snap-start text-left card-vapor rounded-sm overflow-hidden border ${a.border} transition ${a.glow}`}
+      title={`${mix.title} · ${mix.subtitle}`}
+    >
+      <div className={`relative aspect-square bg-gradient-to-br ${a.grad}`}>
+        {cover && (
+          <img
+            src={cover}
+            alt=""
+            className="w-full h-full object-cover opacity-60"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+          />
+        )}
+        <span
+          className={`absolute top-2 left-2 font-pixel text-xs uppercase tracking-widest ${a.text}`}
+          style={{ textShadow: '0 0 8px currentColor' }}
+        >
+          {mix.title}
+        </span>
+        <span className="absolute bottom-2 right-2 text-xl text-ink-hi opacity-0 group-hover:opacity-100">
+          ▶
+        </span>
+      </div>
+      <div className="p-2">
+        <div className="font-sans text-xs font-medium text-ink-hi truncate">
+          {mix.subtitle}
+        </div>
+        <div className="text-xs text-ink-lo tabular-nums">{mix.tracks.length} tracks</div>
+      </div>
+    </button>
+  )
+}
+
+/** Browse grid tile for a curated category. */
+function CategoryCard({
+  category,
+  onClick,
+}: {
+  category: Category
+  onClick: () => void
+}) {
+  const a = ACCENT[category.accent]
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`relative h-20 rounded-sm overflow-hidden border ${a.border} bg-gradient-to-br ${a.grad} flex items-center justify-between px-3 transition ${a.glow}`}
+    >
+      <span className="font-pixel text-sm uppercase tracking-widest text-ink-hi">
+        {category.title}
+      </span>
+      <span className="text-2xl" aria-hidden>
+        {category.emoji}
+      </span>
+    </button>
+  )
+}
+
+/** Expanded category feed: playable catalog tracks + downloadable candidates. */
+function CategoryView({
+  category,
+  feed,
+  isLoading,
+  onBack,
+}: {
+  category: Category
+  feed: { db: CatalogItem[]; external: ExternalCatalogItem[] } | undefined
+  isLoading: boolean
+  onBack: () => void
+}) {
+  const player = useAudioPlayer()
+  const db = feed?.db ?? []
+  const external = feed?.external ?? []
+  return (
+    <section>
+      <div className="flex items-center gap-3 mb-5 flex-wrap">
+        <button
+          type="button"
+          onClick={onBack}
+          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool hover:border-cool/70 transition rounded-xs"
+        >
+          ← back
+        </button>
+        <span className="text-2xl" aria-hidden>
+          {category.emoji}
+        </span>
+        <h2 className="font-pixel text-lg uppercase tracking-widest text-ink-hi">
+          {category.title}
+        </h2>
+        {db.length > 0 && (
+          <button
+            type="button"
+            onClick={() => player.play(db.map(toLibraryItem), 0)}
+            className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+          >
+            ▶ play all
+          </button>
+        )}
+      </div>
+
+      {isLoading && (
+        <div className="font-pixel text-ink-mid">
+          ··· loading {category.title.toLowerCase()} ···
+        </div>
+      )}
+
+      {db.length > 0 && (
+        <ul className="card-vapor rounded-sm divide-y divide-border mb-2">
+          {db.map((it, idx) => (
+            <CatalogRow
+              key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+              item={it}
+              position={idx + 1}
+              allItems={db}
+            />
+          ))}
+        </ul>
+      )}
+
+      {external.length > 0 && (
+        <>
+          <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+            <span className="flex-1 border-t border-border" />
+            <span>↓ download more {category.title.toLowerCase()}</span>
+            <span className="flex-1 border-t border-border" />
+          </div>
+          <ul className="card-vapor rounded-sm divide-y divide-border">
+            {external.map((ext, idx) => (
+              <ExternalRow
+                key={ext.video_id}
+                item={ext}
+                position={db.length + idx + 1}
+              />
+            ))}
+          </ul>
+        </>
+      )}
+
+      {!isLoading && db.length === 0 && external.length === 0 && (
+        <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
+          nothing found for this category right now.
+        </div>
+      )}
+    </section>
   )
 }
 

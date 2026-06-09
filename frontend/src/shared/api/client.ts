@@ -8,6 +8,10 @@ import type {
   PlaylistDetail,
   PlaylistVisibility,
   PlaylistsResponse,
+  CategoriesResponse,
+  CategoryFeed,
+  DailyMixesResponse,
+  RecentResponse,
   ResolutionsResponse,
   SearchResponse,
   SuggestionsResponse,
@@ -170,6 +174,42 @@ export const api = {
     const tail = qs.toString()
     return json<SuggestionsResponse>(
       `/api/catalog/suggestions${tail ? `?${tail}` : ''}`,
+    )
+  },
+
+  // ── browse: play history, categories, daily mixes ──
+  recordPlay: (key: { video_id: string; codec: string; bitrate: string }) =>
+    json<{ ok: true }>('/api/track/play', {
+      method: 'POST',
+      body: JSON.stringify(key),
+    }),
+
+  recentPlays: (limit = 20) =>
+    json<RecentResponse>(`/api/me/recent?limit=${limit}`),
+
+  categories: () => json<CategoriesResponse>('/api/catalog/categories'),
+
+  category: (
+    slug: string,
+    opts: { limit?: number; external_limit?: number } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    if (opts.limit != null) qs.set('limit', String(opts.limit))
+    if (opts.external_limit != null)
+      qs.set('external_limit', String(opts.external_limit))
+    const tail = qs.toString()
+    return json<CategoryFeed>(
+      `/api/catalog/category/${encodeURIComponent(slug)}${tail ? `?${tail}` : ''}`,
+    )
+  },
+
+  dailyMixes: (opts: { count?: number; size?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (opts.count != null) qs.set('count', String(opts.count))
+    if (opts.size != null) qs.set('size', String(opts.size))
+    const tail = qs.toString()
+    return json<DailyMixesResponse>(
+      `/api/catalog/daily-mixes${tail ? `?${tail}` : ''}`,
     )
   },
 
