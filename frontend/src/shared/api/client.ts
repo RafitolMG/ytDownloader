@@ -205,12 +205,9 @@ export const api = {
 
   dailyMixes: (opts: { count?: number; size?: number } = {}) => {
     const qs = new URLSearchParams()
-    if (opts.count != null) qs.set('count', String(opts.count))
-    if (opts.size != null) qs.set('size', String(opts.size))
-    const tail = qs.toString()
-    return json<DailyMixesResponse>(
-      `/api/catalog/daily-mixes${tail ? `?${tail}` : ''}`,
-    )
+    qs.set('count', String(opts.count ?? 4))
+    qs.set('size', String(opts.size ?? 40))
+    return json<DailyMixesResponse>(`/api/catalog/daily-mixes?${qs.toString()}`)
   },
 
   catalogAdopt: (videoId: string, codec: string, bitrate: string) =>

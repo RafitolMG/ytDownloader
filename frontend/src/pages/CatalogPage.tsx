@@ -99,9 +99,12 @@ export default function CatalogPage() {
     staleTime: 5 * 60_000,
   })
 
-  // Browse "home" (Spotify-style): only when idle, scope=all, no category open.
+  // Browse "home" (Spotify-style): only when idle, scope=all, nothing drilled
+  // into (no category or mix preview open).
   const [activeCategory, setActiveCategory] = useState<Category | null>(null)
-  const browseHome = !isSearching && !isMine && activeCategory === null
+  const [activeMix, setActiveMix] = useState<DailyMix | null>(null)
+  const browseHome =
+    !isSearching && !isMine && activeCategory === null && activeMix === null
 
   const recentQuery = useQuery({
     queryKey: ['recent'],
@@ -111,7 +114,7 @@ export default function CatalogPage() {
   })
   const dailyMixesQuery = useQuery({
     queryKey: ['daily-mixes'],
-    queryFn: () => api.dailyMixes({ count: 3, size: 20 }),
+    queryFn: () => api.dailyMixes(),
     enabled: browseHome,
     staleTime: 5 * 60_000,
   })
@@ -239,6 +242,8 @@ export default function CatalogPage() {
             isLoading={categoryFeedQuery.isLoading}
             onBack={() => setActiveCategory(null)}
           />
+        ) : activeMix ? (
+          <MixView mix={activeMix} onBack={() => setActiveMix(null)} />
         ) : (
           <>
             {/* Spotify-style browse home: recently played, daily mixes and the
@@ -251,6 +256,7 @@ export default function CatalogPage() {
                 personalized={dailyMixesQuery.data?.personalized ?? false}
                 categories={categories}
                 onOpenCategory={setActiveCategory}
+                onOpenMix={setActiveMix}
               />
             )}
 
@@ -711,6 +717,7 @@ function BrowseHome({
   personalized,
   categories,
   onOpenCategory,
+  onOpenMix,
 }: {
   recent: CatalogItem[]
   mixes: DailyMix[]
@@ -718,6 +725,7 @@ function BrowseHome({
   personalized: boolean
   categories: Category[]
   onOpenCategory: (c: Category) => void
+  onOpenMix: (m: DailyMix) => void
 }) {
   return (
     <>
@@ -757,7 +765,9 @@ function BrowseHome({
                     </div>
                   </div>
                 ))
-              : mixes.map((m) => <DailyMixCard key={m.id} mix={m} />)}
+              : mixes.map((m) => (
+                  <DailyMixCard key={m.id} mix={m} onOpen={() => onOpenMix(m)} />
+                ))}
           </div>
         </section>
       )}
@@ -818,17 +828,22 @@ function RecentCard({
   )
 }
 
-/** Daily mix tile; click plays the whole mix. */
-function DailyMixCard({ mix }: { mix: DailyMix }) {
+/** Daily mix tile. Click the card to preview the tracklist; the ▶ badge plays
+ * the whole mix straight away. */
+function DailyMixCard({ mix, onOpen }: { mix: DailyMix; onOpen: () => void }) {
   const player = useAudioPlayer()
   const a = ACCENT[mix.accent]
   const cover = mix.tracks[0]?.thumbnail_url ?? null
   return (
-    <button
-      type="button"
-      onClick={() => player.play(mix.tracks.map(toLibraryItem), 0)}
-      className={`w-40 sm:w-44 flex-shrink-0 snap-start text-left card-vapor rounded-sm overflow-hidden border ${a.border} transition ${a.glow}`}
-      title={`${mix.title} · ${mix.subtitle}`}
+    <div
+      onClick={onOpen}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') onOpen()
+      }}
+      className={`group w-40 sm:w-44 flex-shrink-0 snap-start text-left cursor-pointer card-vapor rounded-sm overflow-hidden border ${a.border} transition ${a.glow}`}
+      title={`${mix.title} · ${mix.subtitle} — preview`}
     >
       <div className={`relative aspect-square bg-gradient-to-br ${a.grad}`}>
         {cover && (
@@ -846,9 +861,18 @@ function DailyMixCard({ mix }: { mix: DailyMix }) {
         >
           {mix.title}
         </span>
-        <span className="absolute bottom-2 right-2 text-xl text-ink-hi opacity-0 group-hover:opacity-100">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation()
+            player.play(mix.tracks.map(toLibraryItem), 0)
+          }}
+          title="play this mix"
+          aria-label="play this mix"
+          className="absolute bottom-2 right-2 w-9 h-9 flex items-center justify-center rounded-full bg-hot/80 text-ink-hi shadow-[var(--shadow-glow-hot)] opacity-0 group-hover:opacity-100 transition hover:bg-hot"
+        >
           ▶
-        </span>
+        </button>
       </div>
       <div className="p-2">
         <div className="font-sans text-xs font-medium text-ink-hi truncate">
@@ -856,11 +880,12 @@ function DailyMixCard({ mix }: { mix: DailyMix }) {
         </div>
         <div className="text-xs text-ink-lo tabular-nums">{mix.tracks.length} tracks</div>
       </div>
-    </button>
+    </div>
   )
 }
 
-/** Browse grid tile for a curated category. */
+/** Browse grid tile for a curated category — gradient + title, no emoji
+ * (keeps the pixel/vaporwave aesthetic clean). */
 function CategoryCard({
   category,
   onClick,
@@ -873,13 +898,17 @@ function CategoryCard({
     <button
       type="button"
       onClick={onClick}
-      className={`relative h-20 rounded-sm overflow-hidden border ${a.border} bg-gradient-to-br ${a.grad} flex items-center justify-between px-3 transition ${a.glow}`}
+      className={`relative h-20 rounded-sm overflow-hidden border ${a.border} bg-gradient-to-br ${a.grad} flex items-end p-3 transition ${a.glow} group`}
     >
-      <span className="font-pixel text-sm uppercase tracking-widest text-ink-hi">
-        {category.title}
+      {/* faint scanline-ish texture corner glyph, accent-tinted */}
+      <span
+        className={`absolute -top-1 right-1 font-pixel text-3xl opacity-30 ${a.text} select-none`}
+        aria-hidden
+      >
+        ▓▒░
       </span>
-      <span className="text-2xl" aria-hidden>
-        {category.emoji}
+      <span className="relative font-pixel text-sm uppercase tracking-widest text-ink-hi">
+        {category.title}
       </span>
     </button>
   )
@@ -910,10 +939,7 @@ function CategoryView({
         >
           ← back
         </button>
-        <span className="text-2xl" aria-hidden>
-          {category.emoji}
-        </span>
-        <h2 className="font-pixel text-lg uppercase tracking-widest text-ink-hi">
+        <h2 className={`font-pixel text-lg uppercase tracking-widest ${ACCENT[category.accent].text}`}>
           {category.title}
         </h2>
         {db.length > 0 && (
@@ -970,6 +996,66 @@ function CategoryView({
           nothing found for this category right now.
         </div>
       )}
+    </section>
+  )
+}
+
+/** Daily-mix preview: the full tracklist with play-all, opened from a mix card. */
+function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) {
+  const player = useAudioPlayer()
+  const a = ACCENT[mix.accent]
+  const cover = mix.tracks[0]?.thumbnail_url ?? null
+  return (
+    <section>
+      <div className="flex items-center gap-4 mb-5 flex-wrap">
+        <button
+          type="button"
+          onClick={onBack}
+          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool hover:border-cool/70 transition rounded-xs"
+        >
+          ← back
+        </button>
+        <div
+          className={`relative w-16 h-16 rounded-sm overflow-hidden border ${a.border} bg-gradient-to-br ${a.grad} flex-shrink-0`}
+        >
+          {cover && (
+            <img
+              src={cover}
+              alt=""
+              className="w-full h-full object-cover opacity-60"
+              referrerPolicy="no-referrer"
+            />
+          )}
+        </div>
+        <div className="min-w-0">
+          <div className={`font-pixel text-lg uppercase tracking-widest ${a.text}`}>
+            {mix.title}
+          </div>
+          <div className="font-sans text-sm text-ink-mid truncate">
+            {mix.subtitle} · {mix.tracks.length} tracks
+          </div>
+        </div>
+        {mix.tracks.length > 0 && (
+          <button
+            type="button"
+            onClick={() => player.play(mix.tracks.map(toLibraryItem), 0)}
+            className="font-pixel text-xs uppercase tracking-widest px-4 py-2 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+          >
+            ▶ play all
+          </button>
+        )}
+      </div>
+
+      <ul className="card-vapor rounded-sm divide-y divide-border">
+        {mix.tracks.map((it, idx) => (
+          <CatalogRow
+            key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+            item={it}
+            position={idx + 1}
+            allItems={mix.tracks}
+          />
+        ))}
+      </ul>
     </section>
   )
 }
