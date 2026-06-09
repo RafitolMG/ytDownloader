@@ -459,6 +459,7 @@ function CatalogRow({
           codec: item.codec,
           bitrate: item.bitrate,
         }}
+        track={toLibraryItem(item)}
         trigger={(open) => (
           <button
             type="button"
