@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Navigate, useLocation, useNavigate, type Location } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '@/features/auth/AuthProvider'
@@ -13,12 +13,10 @@ export default function LoginPage() {
   const location = useLocation() as Location & { state: LocationState | null }
   const redirectTo = location.state?.from ?? '/'
 
-  // Already authenticated? Skip the form.
-  useEffect(() => {
-    /* no-op — render handles this via early return below */
-  }, [user, loading])
-  if (!loading && user) return <Navigate to={redirectTo} replace />
-
+  // All hooks must run unconditionally and in a stable order — keep them above
+  // the early return below, or React crashes the whole tree with "rendered
+  // fewer hooks than expected" the moment `user` flips truthy (e.g. right after
+  // a successful login, or when an authenticated user opens /login).
   const [usernameOrEmail, setUsernameOrEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
@@ -29,6 +27,9 @@ export default function LoginPage() {
     queryFn: api.authConfig,
     staleTime: Infinity,
   })
+
+  // Already authenticated? Skip the form.
+  if (!loading && user) return <Navigate to={redirectTo} replace />
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
