@@ -935,14 +935,44 @@ def _external_item(entry: dict) -> dict:
     }
 
 
+def _is_music_candidate(item: dict, *, strict: bool) -> bool:
+    """Best-effort "this is a music track" check on a flat search/related entry.
+
+    The real is_music heuristic needs the full video info (categories, music
+    metadata), which flat extraction omits — so we use the strongest signals
+    available without a per-video fetch:
+      - a "<Artist> - Topic" channel is always music (YouTube Music upload);
+      - otherwise fall back to duration. Real songs run ~1-15 min; this cleanly
+        drops the hour-long compilation streams, DJ mixes and podcasts that
+        dominate generic genre searches, plus sub-minute shorts.
+
+    `strict` (category/search feeds) requires a song-length duration. The
+    lenient mode (radio Mixes, already seeded from music) only rejects the
+    obvious non-songs so a missing duration still passes.
+    """
+    artist = (item.get("artist") or "")
+    if artist.endswith(" - Topic"):
+        return True
+    dur = item.get("duration_sec")
+    if strict:
+        return dur is not None and 60 <= dur <= 900
+    return dur is None or 45 <= dur <= 1800
+
+
 def _discover_feed(
-    user_id: str, q_norm: str, limit: int, external_limit: int,
+    user_id: str,
+    q_norm: str,
+    limit: int,
+    external_limit: int,
+    *,
+    music_only: bool = False,
 ) -> dict:
     """Shared hybrid feed: catalog matches + YouTube candidates not yet in the
     library. Used by both the search box and the curated category pages.
 
-    Externals are deduped against the catalog matches by video_id; we skip the
-    per-video is_music check (too slow) since the user opts in by downloading.
+    Externals are deduped against the catalog matches by video_id. With
+    `music_only` (categories), candidates are filtered to song-like tracks and
+    we over-fetch to compensate for what the filter drops.
     """
     db_items = db.list_catalog(
         user_id, query=q_norm or None, sort="popular", limit=limit, offset=0,
@@ -953,8 +983,12 @@ def _discover_feed(
     # for something specific (search box) or a category seed is supplied.
     if q_norm and external_limit > 0:
         known_ids = {it["video_id"] for it in db_items}
+        fetch = external_limit + len(known_ids)
+        if music_only:
+            # Long mixes get dropped, so cast a wider net to still fill the page.
+            fetch = min(50, fetch * 3)
         try:
-            raw = search_mod.search(q_norm, limit=external_limit + len(known_ids))
+            raw = search_mod.search(q_norm, limit=fetch)
         except Exception:
             traceback.print_exc()
             raw = []
@@ -964,7 +998,10 @@ def _discover_feed(
             vid = entry.get("id")
             if not vid or vid in known_ids:
                 continue
-            externals.append(_external_item(entry))
+            item = _external_item(entry)
+            if music_only and not _is_music_candidate(item, strict=True):
+                continue
+            externals.append(item)
 
     return {"db": db_items, "external": externals}
 
@@ -1047,8 +1084,13 @@ def catalog_suggestions(
             vid = entry.get("id")
             if not vid or vid in known_ids or vid in seen:
                 continue
+            item = _external_item(entry)
+            # Radio Mixes are music-seeded; the lenient filter only trims the
+            # odd hour-long upload or sub-minute clip that sneaks in.
+            if not _is_music_candidate(item, strict=False):
+                continue
             seen.add(vid)
-            suggestions.append(_external_item(entry))
+            suggestions.append(item)
         depth += 1
 
     return {"external": suggestions}
@@ -1088,7 +1130,7 @@ def catalog_categories():
     """The curated Browse grid. Static config — no auth needed beyond the SPA."""
     return {
         "categories": [
-            {k: c[k] for k in ("slug", "title", "emoji", "accent")}
+            {k: c[k] for k in ("slug", "title", "accent")}
             for c in categories_mod.CATEGORIES
         ]
     }
@@ -1108,17 +1150,19 @@ def catalog_category(
         raise HTTPException(status_code=404, detail="unknown category")
     limit = max(1, min(limit, 50))
     external_limit = max(0, min(external_limit, 30))
-    feed = _discover_feed(user.user_id, cat["query"], limit, external_limit)
+    feed = _discover_feed(
+        user.user_id, cat["query"], limit, external_limit, music_only=True,
+    )
     return {
-        "category": {k: cat[k] for k in ("slug", "title", "emoji", "accent")},
+        "category": {k: cat[k] for k in ("slug", "title", "accent")},
         **feed,
     }
 
 
 @app.get("/api/catalog/daily-mixes")
 def daily_mixes(
-    count: int = 3,
-    size: int = 20,
+    count: int = 4,
+    size: int = 40,
     user: CurrentUser = Depends(current_user),
 ):
     """Rotating daily mixes of *playable* catalog tracks.
@@ -1127,26 +1171,35 @@ def daily_mixes(
     played artists); otherwise anchored to the catalog's most popular artists.
     A per-day seed rotates which artists anchor today's mixes and shuffles each
     mix deterministically, so they're stable within a day and change the next.
+
+    Each mix leads with the anchor artist's tracks then fills with a per-mix
+    shuffle of the rest of the catalog — so mixes are long and each one draws a
+    different slice (variety across mixes, not the same popular tail repeated).
+    Mix length is naturally bounded by how much music has been downloaded.
     """
-    count = max(1, min(count, 5))
-    size = max(5, min(size, 40))
+    count = max(1, min(count, 6))
+    size = max(5, min(size, 60))
     day_seed = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
 
-    # Seeds: most-played artists (personalized) or, failing that, the artists
-    # behind the most popular catalog tracks.
+    def key(t: dict) -> tuple:
+        return (t["video_id"], t["codec"], t["bitrate"])
+
+    # Seeds: most-played artists first (personalized), then top up with artists
+    # behind the most popular catalog tracks so there are always several mixes
+    # to choose from even with thin listening history.
     anchors = [a["artist"] for a in db.top_played_artists(user.user_id, limit=12)]
     personalized = bool(anchors)
 
-    popular_pool = db.list_catalog(user.user_id, sort="popular", limit=80)
-    if not anchors:
-        seen_a: set[str] = set()
-        for it in popular_pool:
-            a = (it.get("artist") or "").strip()
-            if a and a not in seen_a:
-                seen_a.add(a)
-                anchors.append(a)
-            if len(anchors) >= 12:
-                break
+    # Wide pool so mixes can be long and varied as the catalog grows.
+    pool = db.list_catalog(user.user_id, sort="popular", limit=400)
+    seen_a: set[str] = {a for a in anchors}
+    for it in pool:
+        if len(anchors) >= max(count, 6):
+            break
+        a = (it.get("artist") or "").strip()
+        if a and a not in seen_a:
+            seen_a.add(a)
+            anchors.append(a)
 
     if not anchors:
         return {"mixes": [], "personalized": False}
@@ -1157,26 +1210,22 @@ def daily_mixes(
 
     mixes: list[dict] = []
     for i, anchor in enumerate(todays):
-        tracks = db.list_tracks_by_artist(user.user_id, anchor, limit=size)
-        have = {(t["video_id"], t["codec"], t["bitrate"]) for t in tracks}
-        # Fill out the mix with popular catalog tracks so it never feels empty.
-        for f in popular_pool:
-            if len(tracks) >= size:
-                break
-            key = (f["video_id"], f["codec"], f["bitrate"])
-            if key in have:
-                continue
-            tracks.append(f)
-            have.add(key)
-        # Stable-per-day shuffle (distinct seed per mix so they don't align).
-        random.Random(day_seed + i).shuffle(tracks)
-        tracks = tracks[:size]
+        lead = db.list_tracks_by_artist(user.user_id, anchor, limit=size)
+        random.Random(day_seed * 7 + i).shuffle(lead)
+        have = {key(t) for t in lead}
+        # Everything else, shuffled with a per-mix seed so each mix pulls a
+        # different cross-section of the catalog rather than the same tail.
+        rest = [t for t in pool if key(t) not in have]
+        random.Random(day_seed + i).shuffle(rest)
+        tracks = (lead + rest)[:size]
         if len(tracks) < 4:
             continue  # too thin to be a "mix"
+        # "<Artist> - Topic" is YouTube's auto-channel naming — show just the artist.
+        subtitle = anchor[: -len(" - Topic")] if anchor.endswith(" - Topic") else anchor
         mixes.append({
             "id": f"daily-{day_seed}-{i}",
             "title": f"Daily Mix {i + 1}",
-            "subtitle": anchor,
+            "subtitle": subtitle,
             "accent": ("hot", "cool", "violet")[i % 3],
             "tracks": tracks,
         })

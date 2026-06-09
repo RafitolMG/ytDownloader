@@ -187,7 +187,6 @@ export type CatalogAccent = 'hot' | 'cool' | 'violet'
 export type Category = {
   slug: string
   title: string
-  emoji: string
   accent: CatalogAccent
 }
 
