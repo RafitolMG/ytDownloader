@@ -128,7 +128,11 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     const el = audioRef.current
     if (!el || !current) return
     playRecordedRef.current = false
-    el.src = api.trackStreamUrl(current.video_id, current.codec, current.bitrate)
+    // codec 'preview' = a not-yet-downloaded track proxy-streamed from YouTube.
+    el.src =
+      current.codec === 'preview'
+        ? api.previewUrl(current.video_id)
+        : api.trackStreamUrl(current.video_id, current.codec, current.bitrate)
     el.currentTime = 0
     setPosition(0)
     setDuration(NaN)
@@ -140,7 +144,10 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   // timer (re)arms whenever playback resumes and is cleared on pause / track
   // change; once fired, the guard prevents double-counting this load.
   useEffect(() => {
-    if (!current || !isPlaying || playRecordedRef.current) return
+    // Don't log plays for previews — the track isn't in the DB (the FK would
+    // fail) and a preview isn't a real listen.
+    if (!current || current.codec === 'preview' || !isPlaying || playRecordedRef.current)
+      return
     const t = setTimeout(() => {
       playRecordedRef.current = true
       void api

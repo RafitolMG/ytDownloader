@@ -612,6 +612,42 @@ def is_audio_quality(format_code: str) -> bool:
     return format_code in _AUDIO_QUALITIES
 
 
+def get_audio_stream_url(url):
+    """
+    Resolve a direct, ready-to-stream audio URL for a video without downloading.
+
+    Returns { 'url': <googlevideo direct url>, 'ext': <container>, 'duration': int|None }.
+    Used to *preview* a track that isn't in the library yet — the backend proxies
+    these bytes (YouTube URLs are IP-locked, so the browser can't fetch them).
+
+    Picks the best audio-only progressive format; falls back to whatever yt-dlp
+    resolves as the top-level URL.
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'format': 'bestaudio/best',
+        **_get_cookie_opts(),
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    formats = info.get('formats') or []
+    audio = [
+        f for f in formats
+        if f.get('url')
+        and f.get('acodec') not in (None, 'none')
+        and f.get('vcodec') in (None, 'none')
+    ]
+    audio.sort(key=lambda f: (f.get('abr') or f.get('tbr') or 0))
+    best = audio[-1] if audio else None
+
+    direct = best['url'] if best else info.get('url')
+    ext = (best or {}).get('ext') or info.get('ext') or 'webm'
+    return {'url': direct, 'ext': ext, 'duration': info.get('duration')}
+
+
 def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
     """
     Download a single video as audio with the given codec+bitrate, writing the

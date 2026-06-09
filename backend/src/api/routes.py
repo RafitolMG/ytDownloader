@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import httpx
 import os
 import queue
 import random
@@ -1623,6 +1624,114 @@ def stream_track(
             "Content-Length": str(length),
             "Cache-Control": "private, max-age=3600",
         },
+    )
+
+
+# ── Preview (stream an undownloaded track straight from YouTube) ───────────────
+
+_PREVIEW_TTL = 3600.0
+# video_id -> (direct_url, content_type, expiry_epoch)
+_preview_cache: dict[str, tuple[str, str, float]] = {}
+
+_PREVIEW_CONTENT_TYPES = {
+    "m4a": "audio/mp4",
+    "mp4": "audio/mp4",
+    "webm": "audio/webm",
+    "opus": "audio/webm",
+    "mp3": "audio/mpeg",
+    "ogg": "audio/ogg",
+}
+
+
+def _resolve_preview(video_id: str) -> tuple[str, str] | None:
+    """Resolve (and cache) a direct audio URL + content-type for a video.
+    Cached because every Range request (seek) would otherwise re-run yt-dlp."""
+    now = time.time()
+    hit = _preview_cache.get(video_id)
+    if hit and hit[2] > now:
+        return hit[0], hit[1]
+    try:
+        info = ytDownloaderFunctions.get_audio_stream_url(
+            f"https://www.youtube.com/watch?v={video_id}"
+        )
+    except Exception:
+        traceback.print_exc()
+        return None
+    direct = info.get("url")
+    if not direct:
+        return None
+    ct = _PREVIEW_CONTENT_TYPES.get((info.get("ext") or "").lower(), "audio/webm")
+    _preview_cache[video_id] = (direct, ct, now + _PREVIEW_TTL)
+    return direct, ct
+
+
+def _open_preview_upstream(direct: str, range_header: str | None):
+    """Open a streaming GET to the direct YouTube URL, forwarding Range."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if range_header:
+        headers["Range"] = range_header
+    client = httpx.Client(timeout=httpx.Timeout(20.0, read=None), follow_redirects=True)
+    upstream = client.send(client.build_request("GET", direct, headers=headers), stream=True)
+    return client, upstream
+
+
+@app.get("/api/preview/{video_id}")
+def preview_track(
+    video_id: str,
+    request: Request,
+    user: CurrentUser = Depends(current_user),
+):
+    """
+    Proxy-stream a not-yet-downloaded track's audio from YouTube so it can be
+    previewed before downloading. YouTube media URLs are IP-locked and expire,
+    so we relay the bytes here rather than redirecting the browser. Honors Range
+    for seeking, and retries once with a fresh URL if the cached one 403s.
+    """
+    resolved = _resolve_preview(video_id)
+    if resolved is None:
+        raise HTTPException(status_code=502, detail="could not resolve audio")
+    direct, content_type = resolved
+    range_header = request.headers.get("range") or request.headers.get("Range")
+
+    try:
+        client, upstream = _open_preview_upstream(direct, range_header)
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail="upstream fetch failed")
+
+    # A 403 usually means the cached URL went stale — re-resolve once.
+    if upstream.status_code == 403:
+        upstream.close()
+        client.close()
+        _preview_cache.pop(video_id, None)
+        resolved = _resolve_preview(video_id)
+        if resolved is None:
+            raise HTTPException(status_code=502, detail="could not resolve audio")
+        direct, content_type = resolved
+        try:
+            client, upstream = _open_preview_upstream(direct, range_header)
+        except Exception:
+            traceback.print_exc()
+            raise HTTPException(status_code=502, detail="upstream fetch failed")
+
+    headers = {"Accept-Ranges": "bytes"}
+    for h in ("Content-Range", "Content-Length"):
+        if h in upstream.headers:
+            headers[h] = upstream.headers[h]
+
+    def body():
+        try:
+            for chunk in upstream.iter_bytes(64 * 1024):
+                yield chunk
+        finally:
+            upstream.close()
+            client.close()
+
+    return StreamingResponse(
+        body(),
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("Content-Type", content_type),
+        headers=headers,
     )
 
 
