@@ -3,10 +3,11 @@ import { NavLink } from 'react-router-dom'
 // Labels collapse to icon-only below `md` so the nav fits on phones/small
 // tablets without wrapping into a second row. Each tab carries an aria-label
 // so the icon-only state is still understandable to screen readers.
+//
+// The queue isn't here — it's a transient status surface, so it lives behind
+// the QueueIndicator in the header rather than as a destination tab.
 const TABS: { to: string; icon: string; label: string }[] = [
   { to: '/', icon: '▶', label: 'capture' },
-  { to: '/queue', icon: '☰', label: 'queue' },
-  { to: '/library', icon: '♪', label: 'library' },
   { to: '/catalog', icon: '⊕', label: 'catalog' },
   { to: '/playlists', icon: '≣', label: 'playlists' },
 ]
@@ -14,7 +15,7 @@ const TABS: { to: string; icon: string; label: string }[] = [
 const baseCls =
   'font-pixel text-base md:text-lg uppercase tracking-widest px-2 md:px-3 py-1 rounded-xs border transition flex items-center gap-2'
 
-export function NavTabs({ queueCount }: { queueCount: number }) {
+export function NavTabs() {
   return (
     <nav className="flex items-center gap-1 md:gap-2 flex-wrap">
       {TABS.map((t) => (
@@ -34,14 +35,6 @@ export function NavTabs({ queueCount }: { queueCount: number }) {
         >
           <span>{t.icon}</span>
           <span className="hidden md:inline">{t.label}</span>
-          {t.to === '/queue' && queueCount > 0 && (
-            <span
-              className="text-cool text-sm"
-              style={{ textShadow: '0 0 6px var(--color-cool)' }}
-            >
-              ·{queueCount}
-            </span>
-          )}
         </NavLink>
       ))}
     </nav>

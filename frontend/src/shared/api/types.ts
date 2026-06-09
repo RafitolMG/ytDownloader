@@ -169,6 +169,12 @@ export type DiscoverResponse = {
   external: ExternalCatalogItem[]
 }
 
+/** At-rest suggestions from /api/catalog/suggestions — YouTube Mix tracks
+ * related to the catalog's popular songs that aren't downloaded yet. */
+export type SuggestionsResponse = {
+  external: ExternalCatalogItem[]
+}
+
 // ── Playlists ────────────────────────────────────────────────────────────────
 
 export type PlaylistVisibility = 'public' | 'private'

@@ -1,9 +1,13 @@
+import { useState } from 'react'
 import { ChromaticTitle } from './ChromaticTitle'
 import { NavTabs } from './NavTabs'
+import { QueueIndicator } from './QueueIndicator'
+import { QueueDrawer } from '@/features/queue/QueueDrawer'
 import { useAuth } from '@/features/auth/AuthProvider'
 
 export function AppHeader({ queueCount }: { queueCount: number }) {
   const { user, logout } = useAuth()
+  const [queueOpen, setQueueOpen] = useState(false)
   return (
     <header className="flex items-center justify-between border-b border-border/60 pb-3 sm:pb-4 mb-6 sm:mb-8 gap-3 sm:gap-4 flex-wrap">
       <div className="flex items-baseline gap-2 sm:gap-3 vhs-tracking">
@@ -12,7 +16,9 @@ export function AppHeader({ queueCount }: { queueCount: number }) {
       </div>
 
       <div className="flex items-center gap-3 sm:gap-4 flex-wrap">
-        <NavTabs queueCount={queueCount} />
+        <NavTabs />
+        <QueueIndicator count={queueCount} onClick={() => setQueueOpen(true)} />
+        <QueueDrawer open={queueOpen} onClose={() => setQueueOpen(false)} />
         {user && (
           <div className="flex items-center gap-1 sm:gap-2 font-pixel text-sm sm:text-base">
             <span className="text-ink-mid hidden sm:inline">▸</span>
