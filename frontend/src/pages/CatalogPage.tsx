@@ -37,8 +37,6 @@ function toLibraryItem(c: CatalogItem): LibraryItem {
   }
 }
 
-type CatalogScope = 'all' | 'mine'
-
 /** Lets any catalog row open a "more like this" radio without prop-drilling
  * the setter through every row/section. Provided by CatalogPage. */
 const RadioCtx = createContext<((item: CatalogItem) => void) | null>(null)
@@ -67,10 +65,9 @@ export default function CatalogPage() {
   const activeCount = countActive(jobsQuery.data)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<CatalogSort>('newest')
-  // 'all' = the shared catalog (everyone's downloads + discovery); 'mine' =
-  // just the tracks you own — the former Library page, now a filter.
-  const [scope, setScope] = useState<CatalogScope>('all')
-  const isMine = scope === 'mine'
+  // The catalog is pure discovery now — your saved tracks ("favourites") live
+  // in Playlists → Liked Songs, not here.
+  const isMine = false
 
   const trimmed = query.trim()
   const debouncedQuery = useDebouncedValue(trimmed, 400)
@@ -80,8 +77,8 @@ export default function CatalogPage() {
   // (no q) drives the idle browse + sort buttons. The discover query (with q)
   // returns DB hits plus external candidates from ytsearch.
   const catalogQuery = useQuery({
-    queryKey: ['catalog', { sort, scope }],
-    queryFn: () => api.catalog({ sort, owned_only: isMine, limit: 300 }),
+    queryKey: ['catalog', { sort }],
+    queryFn: () => api.catalog({ sort, limit: 300 }),
     enabled: !isSearching,
     staleTime: 10_000,
   })
@@ -196,28 +193,8 @@ export default function CatalogPage() {
         <AppHeader queueCount={activeCount} />
 
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-              {isMine ? '░▒▓ my library ▓▒░' : '░▒▓ shared catalog ▓▒░'}
-            </div>
-            {/* Scope toggle folds the old Library page into the catalog: 'all'
-                is the shared registry, 'mine' filters to what you own. */}
-            <div className="flex items-center border border-border rounded-xs overflow-hidden">
-              {(['all', 'mine'] as CatalogScope[]).map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setScope(s)}
-                  className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 transition ${
-                    scope === s
-                      ? 'bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)]'
-                      : 'text-ink-lo hover:text-cool'
-                  }`}
-                >
-                  {s === 'all' ? '⊕ all' : '♥ mine'}
-                </button>
-              ))}
-            </div>
+          <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+            ░▒▓ shared catalog ▓▒░
           </div>
 
           {/* Sort + play-all only matter when browsing — search uses
@@ -536,7 +513,8 @@ function CatalogRow({
  * suggestion card): fire an mp3-320 library import, follow the job's progress
  * WS, and on completion invalidate the catalog views so the track re-renders
  * as a real DB row. Returns just the bits the UIs need to draw themselves. */
-function useExternalDownload(item: ExternalCatalogItem) {
+function useExternalDownload(item: ExternalCatalogItem, opts: { own?: boolean } = {}) {
+  const own = opts.own ?? true
   const queryClient = useQueryClient()
   const [jobId, setJobId] = useState<string | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
@@ -549,6 +527,7 @@ function useExternalDownload(item: ExternalCatalogItem) {
         url: item.source_url,
         format_code: 'mp3-320',
         as_file: false,
+        own,
       }),
     onSuccess: ({ job_id }) => {
       setJobId(job_id)
@@ -564,6 +543,7 @@ function useExternalDownload(item: ExternalCatalogItem) {
       queryClient.invalidateQueries({ queryKey: ['discover'] })
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
       queryClient.invalidateQueries({ queryKey: ['catalog-suggestions'] })
+      queryClient.invalidateQueries({ queryKey: ['daily-mixes'] })
       queryClient.invalidateQueries({ queryKey: ['library'] })
     } else if (live.status === 'error') {
       setFailed('download failed — check the queue')
@@ -591,11 +571,14 @@ function useExternalDownload(item: ExternalCatalogItem) {
 function ExternalRow({
   item,
   position,
+  own,
 }: {
   item: ExternalCatalogItem
   position: number
+  /** false → download to the catalog without favouriting (daily-mix tracks). */
+  own?: boolean
 }) {
-  const dl = useExternalDownload(item)
+  const dl = useExternalDownload(item, { own })
 
   return (
     <li className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 transition opacity-90">
@@ -1216,6 +1199,26 @@ function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) {
           />
         ))}
       </ul>
+
+      {mix.external.length > 0 && (
+        <>
+          <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+            <span className="flex-1 border-t border-border" />
+            <span>↓ more in this mix · download to play</span>
+            <span className="flex-1 border-t border-border" />
+          </div>
+          <ul className="card-vapor rounded-sm divide-y divide-border">
+            {mix.external.map((ext, idx) => (
+              <ExternalRow
+                key={ext.video_id}
+                item={ext}
+                position={mix.tracks.length + idx + 1}
+                own={false}
+              />
+            ))}
+          </ul>
+        </>
+      )}
     </section>
   )
 }

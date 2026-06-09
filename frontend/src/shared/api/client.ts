@@ -71,6 +71,8 @@ export const api = {
     resolution?: string | null
     ext?: string | null
     as_file?: boolean
+    /** false → register in the shared catalog without owning (favouriting) it. */
+    own?: boolean
   }) =>
     json<{ job_id: string }>('/api/download', {
       method: 'POST',

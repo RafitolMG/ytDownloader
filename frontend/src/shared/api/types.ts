@@ -208,13 +208,15 @@ export type RadioFeed = {
   external: ExternalCatalogItem[]
 }
 
-/** A rotating daily mix of playable catalog tracks, anchored to an artist. */
+/** A rotating daily mix: playable catalog tracks anchored to an artist, plus
+ * related tracks not downloaded yet (playing one fetches it to the catalog). */
 export type DailyMix = {
   id: string
   title: string
   subtitle: string
   accent: CatalogAccent
   tracks: CatalogItem[]
+  external: ExternalCatalogItem[]
 }
 
 export type DailyMixesResponse = {
