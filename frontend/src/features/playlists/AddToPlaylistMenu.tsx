@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api, ApiError } from '@/shared/api/client'
 import type { LibraryItem } from '@/shared/api/types'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
@@ -21,14 +22,41 @@ type Props = {
 export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) {
   const player = useAudioPlayer()
   const [open, setOpen] = useState(false)
-  // Open upward when the trigger is too close to the bottom of the viewport, so
-  // the menu isn't clipped / hidden behind the player bar on the last rows.
-  const [dropUp, setDropUp] = useState(false)
+  // The menu is portalled to <body> so it escapes the backdrop-filter stacking
+  // contexts of the surrounding card lists (otherwise a later list paints over
+  // it). Positioned with fixed coords measured from the trigger, flipping up
+  // when near the bottom of the viewport.
+  const [coords, setCoords] = useState<{
+    right: number
+    top?: number
+    bottom?: number
+  } | null>(null)
   const [newName, setNewName] = useState('')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLDivElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
   const qc = useQueryClient()
+
+  const openMenu = () => {
+    setError(null)
+    if (open) {
+      setOpen(false)
+      return
+    }
+    const el = triggerRef.current
+    if (el) {
+      const r = el.getBoundingClientRect()
+      const dropUp = window.innerHeight - r.bottom < 360
+      setCoords({
+        right: Math.max(8, window.innerWidth - r.right),
+        ...(dropUp
+          ? { bottom: window.innerHeight - r.top + 4 }
+          : { top: r.bottom + 4 }),
+      })
+    }
+    setOpen(true)
+  }
 
   const playlistsQuery = useQuery({
     queryKey: ['playlists', 'mine'],
@@ -37,22 +65,28 @@ export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) 
     staleTime: 5_000,
   })
 
-  // Dismiss on outside-click / Escape.
+  // Dismiss on outside-click / Escape, and close on scroll/resize (the menu is
+  // fixed-positioned, so it would otherwise drift away from its trigger).
   useEffect(() => {
     if (!open) return
     function onClick(e: MouseEvent) {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
+      const t = e.target as Node
+      if (menuRef.current?.contains(t) || triggerRef.current?.contains(t)) return
+      setOpen(false)
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') setOpen(false)
     }
+    const onScrollOrResize = () => setOpen(false)
     document.addEventListener('mousedown', onClick)
     document.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onScrollOrResize, true)
+    window.addEventListener('resize', onScrollOrResize)
     return () => {
       document.removeEventListener('mousedown', onClick)
       document.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onScrollOrResize, true)
+      window.removeEventListener('resize', onScrollOrResize)
     }
   }, [open])
 
@@ -85,26 +119,21 @@ export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) 
   })
 
   return (
-    <div className="relative inline-block" ref={popoverRef}>
-      {trigger(() => {
-        setError(null)
-        setOpen((v) => {
-          const next = !v
-          if (next && popoverRef.current) {
-            const r = popoverRef.current.getBoundingClientRect()
-            // ~340px tall menu + the fixed player bar at the bottom.
-            setDropUp(window.innerHeight - r.bottom < 360)
-          }
-          return next
-        })
-      })}
-      {open && (
-        <div
-          className={`absolute right-0 z-50 w-72 card-vapor rounded-sm p-3 shadow-[var(--shadow-glow-cool)] ${
-            dropUp ? 'bottom-full mb-1' : 'top-full mt-1'
-          }`}
-          onClick={(e) => e.stopPropagation()}
-        >
+    <div className="relative inline-block" ref={triggerRef}>
+      {trigger(openMenu)}
+      {open && coords &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={{
+              position: 'fixed',
+              right: coords.right,
+              top: coords.top,
+              bottom: coords.bottom,
+            }}
+            className="z-[60] w-72 card-vapor rounded-sm p-3 shadow-[var(--shadow-glow-cool)]"
+            onClick={(e) => e.stopPropagation()}
+          >
           {(track || onRadio) && (
             <div className="mb-2 pb-2 border-b border-border/60 flex flex-col gap-1">
               {track && (
@@ -211,8 +240,9 @@ export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) 
               {error}
             </div>
           )}
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }
