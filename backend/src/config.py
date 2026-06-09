@@ -46,6 +46,17 @@ FRONTEND_ORIGIN: str = _env("FRONTEND_ORIGIN", "").rstrip("/")
 # backend gets ADMIN. The startup banner logs a loud warning when enabled.
 DEV_AUTH_BYPASS: bool = _env_bool("DEV_AUTH_BYPASS", False)
 
+# Fail closed: DEV_AUTH_BYPASS disables auth entirely (every request is ADMIN),
+# so it must never run with a production posture. SESSION_COOKIE_SECURE is the
+# prod marker (production must enable it), so refuse to start in that combo
+# rather than silently serving an open backend.
+if DEV_AUTH_BYPASS and SESSION_COOKIE_SECURE:
+    raise RuntimeError(
+        "DEV_AUTH_BYPASS is enabled together with SESSION_COOKIE_SECURE "
+        "(a production setting). This would expose the backend with no auth. "
+        "Refusing to start — unset DEV_AUTH_BYPASS in production."
+    )
+
 # Music library — content-addressed audio storage. Every track downloaded as
 # part of a playlist (or future single-track audio jobs) lives at
 # {LIBRARY_DIR}/{video_id}/{codec}_{bitrate}.{ext}. Shared across users so the
