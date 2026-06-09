@@ -634,6 +634,7 @@ def list_catalog(
     *,
     query: str | None = None,
     sort: str = 'newest',
+    owned_only: bool = False,
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -642,15 +643,31 @@ def list_catalog(
 
     `query` is a case-insensitive substring match against title/artist.
     `sort` is one of `_CATALOG_SORTS` keys; unknown values fall back to 'newest'.
+    `owned_only` restricts results to tracks `viewer_id` has in their library —
+    this is what powers the catalog's "mine" view (the former Library page).
     """
     order_by = _CATALOG_SORTS.get(sort, _CATALOG_SORTS['newest'])
-    params: list[Any] = [viewer_id]
-    where = ''
+
+    # Positional params must line up with the order `?` placeholders appear in
+    # the final SQL text: the SELECT's is_owned EXISTS first, then WHERE
+    # conditions, then LIMIT/OFFSET.
+    conditions: list[str] = []
+    where_params: list[Any] = []
     if query:
-        where = " WHERE (t.title LIKE ? OR t.artist LIKE ?)"
+        conditions.append("(t.title LIKE ? OR t.artist LIKE ?)")
         wildcard = f"%{query}%"
-        params.extend([wildcard, wildcard])
-    params.extend([limit, offset])
+        where_params.extend([wildcard, wildcard])
+    if owned_only:
+        conditions.append(
+            """EXISTS(SELECT 1 FROM track_owners o4
+                    WHERE o4.owner_id = ?
+                      AND o4.video_id = t.video_id
+                      AND o4.codec    = t.codec
+                      AND o4.bitrate  = t.bitrate)"""
+        )
+        where_params.append(viewer_id)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    params: list[Any] = [viewer_id, *where_params, limit, offset]
 
     conn = _get_conn()
     rows = conn.execute(

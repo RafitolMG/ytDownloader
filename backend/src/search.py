@@ -47,6 +47,9 @@ class _TTLCache:
 
 _SUGGEST_CACHE = _TTLCache(ttl_seconds=60)
 _SEARCH_CACHE = _TTLCache(ttl_seconds=300)
+# Mixes barely shift over a session and each call is a 1-3s yt-dlp round-trip,
+# so cache them longer than plain searches.
+_RELATED_CACHE = _TTLCache(ttl_seconds=900)
 
 
 # ── Suggest (autocomplete strings) ────────────────────────────────────────────
@@ -152,4 +155,53 @@ def search(q: str, limit: int = 20) -> list[dict]:
     entries = (info or {}).get("entries") or []
     results = [shaped for e in entries if (shaped := _shape_entry(e)) is not None]
     _SEARCH_CACHE.set(cache_key, results)
+    return results
+
+
+def related(video_id: str, limit: int = 20) -> list[dict]:
+    """
+    Return the YouTube Mix ("radio") for a video — the related tracks YouTube
+    would auto-queue after it. Implemented as a flat extraction of the RD<id>
+    auto-playlist, so it's the same cheap listing-level fetch as search().
+
+    The seed video itself is filtered out. Best-effort: returns an empty list
+    on any failure rather than raising, since this feeds at-rest suggestions,
+    not a user-initiated action.
+    """
+    video_id = (video_id or "").strip()
+    if not video_id:
+        return []
+    limit = max(1, min(limit, 50))
+
+    cached = _RELATED_CACHE.get(video_id)
+    if cached is not None:
+        return cached
+
+    # RD<id> is YouTube's deterministic "start a radio from this video" mix.
+    mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",
+        "skip_download": True,
+        "ignore_no_formats_error": True,
+        # +1 leaves room to drop the seed without coming up short.
+        "playlist_items": f"1-{limit + 1}",
+        **_get_cookie_opts(),
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(mix_url, download=False)
+    except Exception as e:
+        log.warning("related failed for video_id=%r: %s", video_id, e)
+        return []
+
+    entries = (info or {}).get("entries") or []
+    results = [
+        shaped
+        for e in entries
+        if (shaped := _shape_entry(e)) is not None and shaped["id"] != video_id
+    ]
+    _RELATED_CACHE.set(video_id, results)
     return results

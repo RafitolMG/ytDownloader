@@ -32,6 +32,8 @@ function toLibraryItem(c: CatalogItem): LibraryItem {
   }
 }
 
+type CatalogScope = 'all' | 'mine'
+
 const SORT_LABELS: Record<CatalogSort, string> = {
   newest: 'newest',
   popular: '♥ most saved',
@@ -51,10 +53,15 @@ function useDebouncedValue<T>(value: T, ms: number): T {
 }
 
 export default function CatalogPage() {
+  const player = useAudioPlayer()
   const jobsQuery = useJobs()
   const activeCount = countActive(jobsQuery.data)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<CatalogSort>('newest')
+  // 'all' = the shared catalog (everyone's downloads + discovery); 'mine' =
+  // just the tracks you own — the former Library page, now a filter.
+  const [scope, setScope] = useState<CatalogScope>('all')
+  const isMine = scope === 'mine'
 
   const trimmed = query.trim()
   const debouncedQuery = useDebouncedValue(trimmed, 400)
@@ -64,8 +71,8 @@ export default function CatalogPage() {
   // (no q) drives the idle browse + sort buttons. The discover query (with q)
   // returns DB hits plus external candidates from ytsearch.
   const catalogQuery = useQuery({
-    queryKey: ['catalog', { sort }],
-    queryFn: () => api.catalog({ sort, limit: 300 }),
+    queryKey: ['catalog', { sort, scope }],
+    queryFn: () => api.catalog({ sort, owned_only: isMine, limit: 300 }),
     enabled: !isSearching,
     staleTime: 10_000,
   })
@@ -77,6 +84,17 @@ export default function CatalogPage() {
     // so re-typing the same query doesn't ping again.
     staleTime: 30_000,
   })
+  // At-rest discovery: YouTube Mix tracks related to the catalog's popular
+  // songs that aren't downloaded yet. Only fetched while browsing (no query);
+  // the seeding + mix fetch is slow, so cache it generously.
+  // Suggestions are a discovery aid — only relevant when browsing the full
+  // catalog ('all'), not while viewing your own library or searching.
+  const suggestionsQuery = useQuery({
+    queryKey: ['catalog-suggestions'],
+    queryFn: () => api.suggestions({ limit: 18 }),
+    enabled: !isSearching && !isMine,
+    staleTime: 5 * 60_000,
+  })
 
   const dbItems: CatalogItem[] = isSearching
     ? discoverQuery.data?.db ?? []
@@ -84,6 +102,8 @@ export default function CatalogPage() {
   const externals: ExternalCatalogItem[] = isSearching
     ? discoverQuery.data?.external ?? []
     : []
+  const suggestions: ExternalCatalogItem[] =
+    isSearching || isMine ? [] : suggestionsQuery.data?.external ?? []
 
   const activeQuery = isSearching ? discoverQuery : catalogQuery
   const showEmpty =
@@ -97,14 +117,44 @@ export default function CatalogPage() {
         <AppHeader queueCount={activeCount} />
 
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-          <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-            ░▒▓ shared catalog ▓▒░
+          <div className="flex items-center gap-3">
+            <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+              {isMine ? '░▒▓ my library ▓▒░' : '░▒▓ shared catalog ▓▒░'}
+            </div>
+            {/* Scope toggle folds the old Library page into the catalog: 'all'
+                is the shared registry, 'mine' filters to what you own. */}
+            <div className="flex items-center border border-border rounded-xs overflow-hidden">
+              {(['all', 'mine'] as CatalogScope[]).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setScope(s)}
+                  className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 transition ${
+                    scope === s
+                      ? 'bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)]'
+                      : 'text-ink-lo hover:text-cool'
+                  }`}
+                >
+                  {s === 'all' ? '⊕ all' : '♥ mine'}
+                </button>
+              ))}
+            </div>
           </div>
-          {/* Sort only matters when browsing — search uses popularity. Hide
-              the chips while searching so the user doesn't pick a sort that
-              quietly does nothing. */}
+
+          {/* Sort + play-all only matter when browsing — search uses
+              popularity. Hidden while searching so the user doesn't pick a
+              sort that quietly does nothing. */}
           {!isSearching && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              {dbItems.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => player.play(dbItems.map(toLibraryItem), 0)}
+                  className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+                >
+                  ▶ play all
+                </button>
+              )}
               {(Object.keys(SORT_LABELS) as CatalogSort[]).map((s) => (
                 <button
                   key={s}
@@ -163,7 +213,9 @@ export default function CatalogPage() {
             <div className="font-pixel text-sm text-ink-lo">
               {isSearching
                 ? `nothing in the catalog or on youtube matches "${debouncedQuery}"`
-                : 'no tracks have been downloaded yet.'}
+                : isMine
+                  ? 'your library is empty — tap ♡ on any catalog track to save it here.'
+                  : 'no tracks have been downloaded yet.'}
             </div>
           </div>
         )}
@@ -195,6 +247,32 @@ export default function CatalogPage() {
                   item={ext}
                   position={dbItems.length + idx + 1}
                   invalidateKey={debouncedQuery}
+                />
+              ))}
+            </ul>
+          </>
+        )}
+
+        {/* At-rest suggestions — only while browsing (no active search). */}
+        {!isSearching && suggestionsQuery.isLoading && dbItems.length > 0 && (
+          <div className="mt-6 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] text-center">
+            ··· finding songs you might like ···
+          </div>
+        )}
+        {!isSearching && suggestions.length > 0 && (
+          <>
+            <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+              <span className="flex-1 border-t border-border" />
+              <span>✦ suggestions for you · related to the catalog</span>
+              <span className="flex-1 border-t border-border" />
+            </div>
+            <ul className="card-vapor rounded-sm divide-y divide-border">
+              {suggestions.map((ext, idx) => (
+                <ExternalRow
+                  key={ext.video_id}
+                  item={ext}
+                  position={idx + 1}
+                  invalidateKey="suggestions"
                 />
               ))}
             </ul>
@@ -381,6 +459,7 @@ function ExternalRow({
     if (live.status === 'done') {
       queryClient.invalidateQueries({ queryKey: ['discover'] })
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
+      queryClient.invalidateQueries({ queryKey: ['catalog-suggestions'] })
       queryClient.invalidateQueries({ queryKey: ['library'] })
     } else if (live.status === 'error') {
       setFailed('download failed — check the queue')

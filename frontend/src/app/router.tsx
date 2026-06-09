@@ -1,7 +1,6 @@
-import { Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes } from 'react-router-dom'
 import CapturePage from '@/pages/CapturePage'
 import QueuePage from '@/pages/QueuePage'
-import LibraryPage from '@/pages/LibraryPage'
 import CatalogPage from '@/pages/CatalogPage'
 import PlaylistsPage from '@/pages/PlaylistsPage'
 import PlaylistDetailPage from '@/pages/PlaylistDetailPage'
@@ -28,14 +27,9 @@ export function AppRouter() {
           </RequireAuth>
         }
       />
-      <Route
-        path="/library"
-        element={
-          <RequireAuth>
-            <LibraryPage />
-          </RequireAuth>
-        }
-      />
+      {/* Library folded into the catalog's "mine" view — keep the old path
+          working for bookmarks. */}
+      <Route path="/library" element={<Navigate to="/catalog" replace />} />
       <Route
         path="/catalog"
         element={

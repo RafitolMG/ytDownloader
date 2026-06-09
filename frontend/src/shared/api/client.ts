@@ -10,6 +10,7 @@ import type {
   PlaylistsResponse,
   ResolutionsResponse,
   SearchResponse,
+  SuggestionsResponse,
   SuggestResponse,
 } from './types'
 
@@ -141,12 +142,14 @@ export const api = {
   catalog: (params: {
     q?: string
     sort?: CatalogSort
+    owned_only?: boolean
     limit?: number
     offset?: number
   } = {}) => {
     const qs = new URLSearchParams()
     if (params.q) qs.set('q', params.q)
     if (params.sort) qs.set('sort', params.sort)
+    if (params.owned_only) qs.set('owned_only', 'true')
     if (params.limit != null) qs.set('limit', String(params.limit))
     if (params.offset != null) qs.set('offset', String(params.offset))
     const tail = qs.toString()
@@ -159,6 +162,15 @@ export const api = {
     if (params.limit != null) qs.set('limit', String(params.limit))
     if (params.external_limit != null) qs.set('external_limit', String(params.external_limit))
     return json<DiscoverResponse>(`/api/catalog/discover?${qs.toString()}`)
+  },
+
+  suggestions: (params: { limit?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (params.limit != null) qs.set('limit', String(params.limit))
+    const tail = qs.toString()
+    return json<SuggestionsResponse>(
+      `/api/catalog/suggestions${tail ? `?${tail}` : ''}`,
+    )
   },
 
   catalogAdopt: (videoId: string, codec: string, bitrate: string) =>
