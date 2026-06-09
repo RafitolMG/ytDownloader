@@ -84,6 +84,10 @@ export default function CatalogPage() {
   const activeCount = countActive(jobsQuery.data)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<CatalogSort>('newest')
+  // The full catalog is a long list and lives at the bottom of the browse
+  // home; collapse it by default so its sort controls sit with the list (not
+  // stranded at the top of the page) and don't bury the curated sections.
+  const [catalogOpen, setCatalogOpen] = useState(false)
   // The catalog is pure discovery now — your saved tracks ("favourites") live
   // in Playlists → Liked Songs, not here.
   const isMine = false
@@ -215,37 +219,6 @@ export default function CatalogPage() {
           <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
             ░▒▓ shared catalog ▓▒░
           </div>
-
-          {/* Sort + play-all only matter when browsing — search uses
-              popularity. Hidden while searching so the user doesn't pick a
-              sort that quietly does nothing. */}
-          {!isSearching && (
-            <div className="flex items-center gap-2 flex-wrap">
-              {dbItems.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => player.play(dbItems.map(toLibraryItem), 0)}
-                  className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
-                >
-                  ▶ play all
-                </button>
-              )}
-              {(Object.keys(SORT_LABELS) as CatalogSort[]).map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setSort(s)}
-                  className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 border rounded-xs transition ${
-                    sort === s
-                      ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
-                      : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'
-                  }`}
-                >
-                  {SORT_LABELS[s]}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
 
         <div className="card-vapor rounded-sm p-3 mb-6 flex items-center gap-3 font-pixel">
@@ -347,9 +320,68 @@ export default function CatalogPage() {
               </div>
             )}
 
-            {dbItems.length > 0 && (
+            {dbItems.length > 0 && browseHome && (
               <section>
-                {browseHome && <SectionHeader title="▤ the full catalog" />}
+                {/* Collapsible "full catalog" submenu: the toggle, sort filters
+                    and play-all all live right above the list they drive. */}
+                <button
+                  type="button"
+                  onClick={() => setCatalogOpen((o) => !o)}
+                  className="w-full mb-3 flex items-center gap-3 font-pixel text-xs text-cool uppercase tracking-[0.2em] hover:text-ink-hi transition"
+                >
+                  <span className="whitespace-nowrap">
+                    {catalogOpen ? '▾' : '▸'} ▤ the full catalog
+                  </span>
+                  <span className="text-ink-lo normal-case tracking-normal tabular-nums">
+                    {dbItems.length} tracks
+                  </span>
+                  <span className="flex-1 border-t border-border" />
+                </button>
+
+                {catalogOpen && (
+                  <>
+                    <div className="mb-3 flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => player.play(dbItems.map(toLibraryItem), 0)}
+                        className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+                      >
+                        ▶ play all
+                      </button>
+                      {(Object.keys(SORT_LABELS) as CatalogSort[]).map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          onClick={() => setSort(s)}
+                          className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 border rounded-xs transition ${
+                            sort === s
+                              ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
+                              : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'
+                          }`}
+                        >
+                          {SORT_LABELS[s]}
+                        </button>
+                      ))}
+                    </div>
+                    <ul className="card-vapor rounded-sm divide-y divide-border">
+                      {dbItems.map((it, idx) => (
+                        <CatalogRow
+                          key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+                          item={it}
+                          position={idx + 1}
+                          allItems={dbItems}
+                        />
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </section>
+            )}
+
+            {/* Search results (discover db hits) — no collapse, no sort: the
+                query already ranks them and the list is short. */}
+            {dbItems.length > 0 && !browseHome && (
+              <section>
                 <ul className="card-vapor rounded-sm divide-y divide-border">
                   {dbItems.map((it, idx) => (
                     <CatalogRow
@@ -583,6 +615,66 @@ function useExternalDownload(item: ExternalCatalogItem, opts: { own?: boolean } 
     pct: live.progress ?? 0,
     failed,
   }
+}
+
+/** "Download all" for a batch of YouTube candidates (a mix / category / radio
+ * tail). Fires every download at once — each call just enqueues a background
+ * job and returns immediately — then refreshes the catalog views. Per-row
+ * progress lives in the queue; here we only show how many were queued. */
+function DownloadAllButton({
+  items,
+  own,
+}: {
+  items: ExternalCatalogItem[]
+  /** false → add to the catalog without favouriting (daily-mix tracks). */
+  own?: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [queued, setQueued] = useState(0)
+  const [failed, setFailed] = useState(false)
+
+  const dl = useMutation({
+    mutationFn: async () => {
+      const results = await Promise.allSettled(
+        items.map((it) =>
+          api.download({
+            url: it.source_url,
+            format_code: 'mp3-320',
+            as_file: false,
+            own: own ?? true,
+          }),
+        ),
+      )
+      return results.filter((r) => r.status === 'fulfilled').length
+    },
+    onSuccess: (ok) => {
+      setQueued(ok)
+      setFailed(ok < items.length)
+      queryClient.invalidateQueries({ queryKey: ['discover'] })
+      queryClient.invalidateQueries({ queryKey: ['catalog'] })
+      queryClient.invalidateQueries({ queryKey: ['daily-mixes'] })
+      queryClient.invalidateQueries({ queryKey: ['library'] })
+    },
+    onError: () => setFailed(true),
+  })
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!dl.isPending) dl.mutate()
+      }}
+      disabled={dl.isPending || queued > 0}
+      title="download every track below to the catalog"
+      className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)] disabled:opacity-50 transition rounded-xs whitespace-nowrap"
+    >
+      {dl.isPending
+        ? '··· queueing'
+        : queued > 0
+          ? `✓ queued ${queued}${failed ? ' (some failed)' : ''}`
+          : `⬇ download all (${items.length})`}
+    </button>
+  )
 }
 
 /** Full-width list row for a YouTube candidate — used in the search results
@@ -1177,9 +1269,9 @@ function CategoryView({
       {external.length > 0 && (
         <>
           <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-            <span className="flex-1 border-t border-border" />
             <span>↓ download more {category.title.toLowerCase()}</span>
             <span className="flex-1 border-t border-border" />
+            <DownloadAllButton items={external} />
           </div>
           <ul className="card-vapor rounded-sm divide-y divide-border">
             {external.map((ext, idx) => (
@@ -1262,9 +1354,9 @@ function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) {
       {mix.external.length > 0 && (
         <>
           <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-            <span className="flex-1 border-t border-border" />
             <span>↓ more in this mix · download to play</span>
             <span className="flex-1 border-t border-border" />
+            <DownloadAllButton items={mix.external} own={false} />
           </div>
           <ul className="card-vapor rounded-sm divide-y divide-border">
             {mix.external.map((ext, idx) => (
@@ -1359,9 +1451,9 @@ function RadioView({
       {external.length > 0 && (
         <>
           <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-            <span className="flex-1 border-t border-border" />
             <span>↓ download more like this</span>
             <span className="flex-1 border-t border-border" />
+            <DownloadAllButton items={external} />
           </div>
           <ul className="card-vapor rounded-sm divide-y divide-border">
             {external.map((ext, idx) => (
