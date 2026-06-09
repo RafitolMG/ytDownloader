@@ -93,41 +93,40 @@ export function PlayerBar() {
           </PlayerToggle>
         </div>
 
-        {/* Time */}
-        <div className="hidden sm:block font-pixel text-sm text-ink-lo tabular-nums min-w-[5.5rem] text-right">
-          {fmtTime(p.position)} / {fmtTime(dur)}
-        </div>
+        {/* Right cluster: time · volume · queue · close. Kept together with a
+            consistent gap and shrink-0 so the controls never collide. */}
+        <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+          {/* Time */}
+          <div className="hidden sm:block font-pixel text-sm text-ink-lo tabular-nums min-w-[5.5rem] text-right">
+            {fmtTime(p.position)} / {fmtTime(dur)}
+          </div>
 
-        {/* Volume */}
-        <div className="hidden md:flex items-center gap-1.5 w-28">
-          <button
-            type="button"
-            onClick={() => p.setVolume(p.volume > 0 ? 0 : 1)}
-            title={p.volume > 0 ? 'mute' : 'unmute'}
-            className={`font-pixel text-base transition w-5 text-center ${
-              p.volume === 0
-                ? 'text-crit'
-                : 'text-ink-lo hover:text-cool'
-            }`}
-          >
-            {p.volume === 0 ? '♪̸' : '♪'}
-          </button>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
-            value={p.volume}
-            onChange={(e) => p.setVolume(Number(e.target.value))}
-            aria-label="volume"
-            className="flex-1 accent-[var(--color-cool)] cursor-pointer"
-          />
-        </div>
+          {/* Volume */}
+          <div className="hidden md:flex items-center gap-1.5 w-24 flex-shrink-0">
+            <button
+              type="button"
+              onClick={() => p.setVolume(p.volume > 0 ? 0 : 1)}
+              title={p.volume > 0 ? 'mute' : 'unmute'}
+              className={`font-pixel text-base transition w-5 text-center flex-shrink-0 ${
+                p.volume === 0 ? 'text-crit' : 'text-ink-lo hover:text-cool'
+              }`}
+            >
+              {p.volume === 0 ? '♪̸' : '♪'}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={p.volume}
+              onChange={(e) => p.setVolume(Number(e.target.value))}
+              aria-label="volume"
+              className="flex-1 min-w-0 accent-[var(--color-cool)] cursor-pointer"
+            />
+          </div>
 
-        {/* Queue toggle + position + close */}
-        <div className="flex items-center gap-2">
           {p.queue.length > 1 && (
-            <span className="hidden md:inline font-pixel text-xs text-ink-lo uppercase tracking-widest">
+            <span className="hidden lg:inline font-pixel text-xs text-ink-lo uppercase tracking-widest tabular-nums">
               {p.index + 1}/{p.queue.length}
             </span>
           )}
@@ -136,7 +135,7 @@ export function PlayerBar() {
             onClick={() => setQueueOpen((v) => !v)}
             title="queue"
             aria-label="play queue"
-            className={`font-pixel text-base w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center transition rounded-xs border ${
+            className={`font-pixel text-base w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center flex-shrink-0 transition rounded-xs border ${
               queueOpen
                 ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
                 : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
@@ -147,7 +146,7 @@ export function PlayerBar() {
           <button
             type="button"
             onClick={p.stop}
-            className="font-pixel text-sm uppercase tracking-widest px-2 py-1 border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 transition rounded-xs"
+            className="font-pixel text-sm uppercase tracking-widest px-2 py-1 flex-shrink-0 border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 transition rounded-xs"
             title="close player"
           >
             ✕
