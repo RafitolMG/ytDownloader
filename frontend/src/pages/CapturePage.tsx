@@ -60,7 +60,7 @@ export default function CapturePage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
         <AppHeader queueCount={activeCount} />
 
         <SearchBar
@@ -160,10 +160,10 @@ export default function CapturePage() {
               )}
             </div>
             <Link
-              to="/library"
+              to="/playlists/liked"
               className="font-pixel text-lg uppercase tracking-widest px-4 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
             >
-              ♪ view library
+              ♪ view liked songs
             </Link>
           </div>
         )}

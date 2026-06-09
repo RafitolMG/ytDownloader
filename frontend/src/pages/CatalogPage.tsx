@@ -37,6 +37,25 @@ function toLibraryItem(c: CatalogItem): LibraryItem {
   }
 }
 
+/** Map an external (undownloaded) candidate to a player item that streams via
+ * the preview proxy. The sentinel codec 'preview' tells the player to use
+ * /api/preview/{id} instead of the library stream. */
+function toPreviewItem(e: ExternalCatalogItem): LibraryItem {
+  return {
+    video_id: e.video_id,
+    codec: 'preview',
+    bitrate: '0',
+    title: e.title,
+    artist: e.artist,
+    duration_sec: e.duration_sec,
+    thumbnail_url: e.thumbnail_url,
+    source_url: e.source_url,
+    file_size: null,
+    added_at: '',
+    source_playlist_title: null,
+  }
+}
+
 /** Lets any catalog row open a "more like this" radio without prop-drilling
  * the setter through every row/section. Provided by CatalogPage. */
 const RadioCtx = createContext<((item: CatalogItem) => void) | null>(null)
@@ -65,6 +84,10 @@ export default function CatalogPage() {
   const activeCount = countActive(jobsQuery.data)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<CatalogSort>('newest')
+  // The full catalog is a long list and lives at the bottom of the browse
+  // home; collapse it by default so its sort controls sit with the list (not
+  // stranded at the top of the page) and don't bury the curated sections.
+  const [catalogOpen, setCatalogOpen] = useState(false)
   // The catalog is pure discovery now — your saved tracks ("favourites") live
   // in Playlists → Liked Songs, not here.
   const isMine = false
@@ -196,37 +219,6 @@ export default function CatalogPage() {
           <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
             ░▒▓ shared catalog ▓▒░
           </div>
-
-          {/* Sort + play-all only matter when browsing — search uses
-              popularity. Hidden while searching so the user doesn't pick a
-              sort that quietly does nothing. */}
-          {!isSearching && (
-            <div className="flex items-center gap-2 flex-wrap">
-              {dbItems.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => player.play(dbItems.map(toLibraryItem), 0)}
-                  className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
-                >
-                  ▶ play all
-                </button>
-              )}
-              {(Object.keys(SORT_LABELS) as CatalogSort[]).map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setSort(s)}
-                  className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 border rounded-xs transition ${
-                    sort === s
-                      ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
-                      : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'
-                  }`}
-                >
-                  {SORT_LABELS[s]}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
 
         <div className="card-vapor rounded-sm p-3 mb-6 flex items-center gap-3 font-pixel">
@@ -328,9 +320,68 @@ export default function CatalogPage() {
               </div>
             )}
 
-            {dbItems.length > 0 && (
+            {dbItems.length > 0 && browseHome && (
               <section>
-                {browseHome && <SectionHeader title="▤ the full catalog" />}
+                {/* Collapsible "full catalog" submenu: the toggle, sort filters
+                    and play-all all live right above the list they drive. */}
+                <button
+                  type="button"
+                  onClick={() => setCatalogOpen((o) => !o)}
+                  className="w-full mb-3 flex items-center gap-3 font-pixel text-xs text-cool uppercase tracking-[0.2em] hover:text-ink-hi transition"
+                >
+                  <span className="whitespace-nowrap">
+                    {catalogOpen ? '▾' : '▸'} ▤ the full catalog
+                  </span>
+                  <span className="text-ink-lo normal-case tracking-normal tabular-nums">
+                    {dbItems.length} tracks
+                  </span>
+                  <span className="flex-1 border-t border-border" />
+                </button>
+
+                {catalogOpen && (
+                  <>
+                    <div className="mb-3 flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => player.play(dbItems.map(toLibraryItem), 0)}
+                        className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+                      >
+                        ▶ play all
+                      </button>
+                      {(Object.keys(SORT_LABELS) as CatalogSort[]).map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          onClick={() => setSort(s)}
+                          className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 border rounded-xs transition ${
+                            sort === s
+                              ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
+                              : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'
+                          }`}
+                        >
+                          {SORT_LABELS[s]}
+                        </button>
+                      ))}
+                    </div>
+                    <ul className="card-vapor rounded-sm divide-y divide-border">
+                      {dbItems.map((it, idx) => (
+                        <CatalogRow
+                          key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+                          item={it}
+                          position={idx + 1}
+                          allItems={dbItems}
+                        />
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </section>
+            )}
+
+            {/* Search results (discover db hits) — no collapse, no sort: the
+                query already ranks them and the list is short. */}
+            {dbItems.length > 0 && !browseHome && (
+              <section>
                 <ul className="card-vapor rounded-sm divide-y divide-border">
                   {dbItems.map((it, idx) => (
                     <CatalogRow
@@ -566,6 +617,66 @@ function useExternalDownload(item: ExternalCatalogItem, opts: { own?: boolean } 
   }
 }
 
+/** "Download all" for a batch of YouTube candidates (a mix / category / radio
+ * tail). Fires every download at once — each call just enqueues a background
+ * job and returns immediately — then refreshes the catalog views. Per-row
+ * progress lives in the queue; here we only show how many were queued. */
+function DownloadAllButton({
+  items,
+  own,
+}: {
+  items: ExternalCatalogItem[]
+  /** false → add to the catalog without favouriting (daily-mix tracks). */
+  own?: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [queued, setQueued] = useState(0)
+  const [failed, setFailed] = useState(false)
+
+  const dl = useMutation({
+    mutationFn: async () => {
+      const results = await Promise.allSettled(
+        items.map((it) =>
+          api.download({
+            url: it.source_url,
+            format_code: 'mp3-320',
+            as_file: false,
+            own: own ?? true,
+          }),
+        ),
+      )
+      return results.filter((r) => r.status === 'fulfilled').length
+    },
+    onSuccess: (ok) => {
+      setQueued(ok)
+      setFailed(ok < items.length)
+      queryClient.invalidateQueries({ queryKey: ['discover'] })
+      queryClient.invalidateQueries({ queryKey: ['catalog'] })
+      queryClient.invalidateQueries({ queryKey: ['daily-mixes'] })
+      queryClient.invalidateQueries({ queryKey: ['library'] })
+    },
+    onError: () => setFailed(true),
+  })
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!dl.isPending) dl.mutate()
+      }}
+      disabled={dl.isPending || queued > 0}
+      title="download every track below to the catalog"
+      className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)] disabled:opacity-50 transition rounded-xs whitespace-nowrap"
+    >
+      {dl.isPending
+        ? '··· queueing'
+        : queued > 0
+          ? `✓ queued ${queued}${failed ? ' (some failed)' : ''}`
+          : `⬇ download all (${items.length})`}
+    </button>
+  )
+}
+
 /** Full-width list row for a YouTube candidate — used in the search results
  * ("found on youtube") section. */
 function ExternalRow({
@@ -579,6 +690,10 @@ function ExternalRow({
   own?: boolean
 }) {
   const dl = useExternalDownload(item, { own })
+  const player = useAudioPlayer()
+  const isPreviewing =
+    player.current?.video_id === item.video_id &&
+    player.current?.codec === 'preview'
 
   return (
     <li className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 transition opacity-90">
@@ -624,6 +739,21 @@ function ExternalRow({
 
       <button
         type="button"
+        onClick={() =>
+          isPreviewing ? player.togglePlay() : player.play([toPreviewItem(item)])
+        }
+        title="preview without downloading"
+        className={`font-pixel text-sm w-8 h-8 flex items-center justify-center border rounded-xs transition ${
+          isPreviewing
+            ? 'border-hot text-hot bg-hot/10 shadow-[var(--shadow-glow-hot)]'
+            : 'border-border text-ink-mid hover:text-hot hover:border-hot/60'
+        }`}
+      >
+        {isPreviewing && player.isPlaying ? '❚❚' : '▶'}
+      </button>
+
+      <button
+        type="button"
         onClick={dl.start}
         disabled={dl.isPending}
         title="download mp3 · 320 and add to the catalog"
@@ -639,9 +769,13 @@ function ExternalRow({
  * ExternalRow, laid out vertically so a row of them scrolls horizontally. */
 function SuggestionCard({ item }: { item: ExternalCatalogItem }) {
   const dl = useExternalDownload(item)
+  const player = useAudioPlayer()
+  const isPreviewing =
+    player.current?.video_id === item.video_id &&
+    player.current?.codec === 'preview'
 
   return (
-    <div className="w-40 sm:w-44 flex-shrink-0 snap-start card-vapor rounded-sm overflow-hidden border border-border">
+    <div className="group w-40 sm:w-44 flex-shrink-0 snap-start card-vapor rounded-sm overflow-hidden border border-border">
       <div className="relative aspect-video bg-page-mid">
         {item.thumbnail_url ? (
           <img
@@ -658,6 +792,23 @@ function SuggestionCard({ item }: { item: ExternalCatalogItem }) {
           <span className="absolute bottom-0.5 right-0.5 font-pixel text-[10px] leading-none bg-page/80 text-cool px-1 py-0.5 rounded-xs">
             {fmtDuration(item.duration_sec)}
           </span>
+        )}
+        {/* Preview play overlay. */}
+        {!dl.started && (
+          <button
+            type="button"
+            onClick={() =>
+              isPreviewing ? player.togglePlay() : player.play([toPreviewItem(item)])
+            }
+            title="preview without downloading"
+            className={`absolute inset-0 flex items-center justify-center text-2xl text-ink-hi bg-page/40 transition ${
+              isPreviewing ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+            }`}
+          >
+            <span style={{ textShadow: '0 0 10px var(--color-hot)' }}>
+              {isPreviewing && player.isPlaying ? '❚❚' : '▶'}
+            </span>
+          </button>
         )}
         {dl.started && !dl.isDone && (
           <div className="absolute inset-0 bg-page/70 flex items-center justify-center font-pixel text-xs text-cool tabular-nums">
@@ -1118,9 +1269,9 @@ function CategoryView({
       {external.length > 0 && (
         <>
           <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-            <span className="flex-1 border-t border-border" />
             <span>↓ download more {category.title.toLowerCase()}</span>
             <span className="flex-1 border-t border-border" />
+            <DownloadAllButton items={external} />
           </div>
           <ul className="card-vapor rounded-sm divide-y divide-border">
             {external.map((ext, idx) => (
@@ -1203,9 +1354,9 @@ function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) {
       {mix.external.length > 0 && (
         <>
           <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-            <span className="flex-1 border-t border-border" />
             <span>↓ more in this mix · download to play</span>
             <span className="flex-1 border-t border-border" />
+            <DownloadAllButton items={mix.external} own={false} />
           </div>
           <ul className="card-vapor rounded-sm divide-y divide-border">
             {mix.external.map((ext, idx) => (
@@ -1300,9 +1451,9 @@ function RadioView({
       {external.length > 0 && (
         <>
           <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
-            <span className="flex-1 border-t border-border" />
             <span>↓ download more like this</span>
             <span className="flex-1 border-t border-border" />
+            <DownloadAllButton items={external} />
           </div>
           <ul className="card-vapor rounded-sm divide-y divide-border">
             {external.map((ext, idx) => (

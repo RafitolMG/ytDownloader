@@ -71,7 +71,7 @@ export function PlayerBar() {
             disabled={!p.canGoPrev && p.position < 3}
             title="prev"
           >
-            ⏮
+            |◀
           </PlayerButton>
           <PlayerButton onClick={p.togglePlay} primary title={p.isPlaying ? 'pause' : 'play'}>
             {p.isPlaying ? '❚❚' : '▶'}
@@ -81,7 +81,7 @@ export function PlayerBar() {
             disabled={!p.canGoNext}
             title="next"
           >
-            ⏭
+            ▶|
           </PlayerButton>
           <PlayerToggle
             onClick={p.cycleRepeat}
@@ -127,7 +127,7 @@ export function PlayerBar() {
 
           {p.queue.length > 1 && (
             <span className="hidden lg:inline font-pixel text-xs text-ink-lo uppercase tracking-widest tabular-nums">
-              {p.index + 1}/{p.queue.length}
+              {p.orderPos + 1}/{p.queue.length}
             </span>
           )}
           <button
