@@ -151,6 +151,23 @@ CREATE TABLE IF NOT EXISTS track_likes (
 CREATE INDEX IF NOT EXISTS idx_track_likes_track ON track_likes(video_id, codec, bitrate);
 CREATE INDEX IF NOT EXISTS idx_track_likes_user  ON track_likes(user_id, liked_at DESC);
 
+-- `plays`: one row per recorded playback. Append-only listening log that powers
+-- "recently played" and personalized daily mixes. A play is recorded only after
+-- the track has been listened to for a while (the client gates on ~20s) so
+-- skips don't pollute the signal.
+CREATE TABLE IF NOT EXISTS plays (
+    user_id   TEXT NOT NULL,
+    video_id  TEXT NOT NULL,
+    codec     TEXT NOT NULL,
+    bitrate   TEXT NOT NULL,
+    played_at TEXT NOT NULL,
+    FOREIGN KEY (video_id, codec, bitrate)
+        REFERENCES tracks(video_id, codec, bitrate) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_plays_user_time  ON plays(user_id, played_at DESC);
+CREATE INDEX IF NOT EXISTS idx_plays_user_track ON plays(user_id, video_id, codec, bitrate);
+
 -- ── Playlists ────────────────────────────────────────────────────────────────
 -- User-curated lists of tracks pulled from the shared catalog. Visibility is
 -- per playlist: 'public' means any authenticated user can see and play it but
@@ -690,6 +707,133 @@ def list_catalog(
          LIMIT ? OFFSET ?
         """,
         tuple(params),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Play history ───────────────────────────────────────────────────────────────
+
+# Reused SELECT for catalog-item-shaped rows. The single `?` is the viewer for
+# the is_owned flag and must be the first bound param wherever this is spliced in.
+_TRACK_COLS = """
+    t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+    t.thumbnail_url, t.source_url, t.file_size, t.downloaded_at,
+    (SELECT COUNT(*) FROM track_owners o2
+      WHERE o2.video_id = t.video_id
+        AND o2.codec    = t.codec
+        AND o2.bitrate  = t.bitrate) AS owner_count,
+    EXISTS(SELECT 1 FROM track_owners o3
+            WHERE o3.owner_id = ?
+              AND o3.video_id = t.video_id
+              AND o3.codec    = t.codec
+              AND o3.bitrate  = t.bitrate) AS is_owned
+"""
+
+
+def record_play(user_id: str, video_id: str, codec: str, bitrate: str) -> None:
+    """Append a playback to the listening log. No-op safety: the FK to `tracks`
+    means a play for a track that no longer exists raises — callers swallow it."""
+    with _write() as conn:
+        conn.execute(
+            "INSERT INTO plays (user_id, video_id, codec, bitrate, played_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (user_id, video_id, codec, bitrate, _now()),
+        )
+
+
+def list_recent_plays(viewer_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    """Most recently played tracks (distinct), newest first — catalog-item shaped
+    plus `last_played_at` and `play_count`."""
+    conn = _get_conn()
+    rows = conn.execute(
+        f"""
+        SELECT {_TRACK_COLS},
+               MAX(p.played_at) AS last_played_at,
+               COUNT(*)         AS play_count
+          FROM plays p
+          JOIN tracks t
+            ON p.video_id = t.video_id
+           AND p.codec    = t.codec
+           AND p.bitrate  = t.bitrate
+         WHERE p.user_id = ?
+         GROUP BY t.video_id, t.codec, t.bitrate
+         ORDER BY last_played_at DESC
+         LIMIT ?
+        """,
+        (viewer_id, viewer_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def top_played_tracks(
+    viewer_id: str, *, limit: int = 50, since: str | None = None,
+) -> list[dict[str, Any]]:
+    """Most-played tracks for a user, catalog-item shaped plus `play_count`.
+    `since` is an ISO timestamp lower bound on played_at (None = all time)."""
+    conn = _get_conn()
+    where = "WHERE p.user_id = ?"
+    params: list[Any] = [viewer_id, viewer_id]
+    if since:
+        where += " AND p.played_at >= ?"
+        params.append(since)
+    params.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT {_TRACK_COLS},
+               COUNT(*) AS play_count
+          FROM plays p
+          JOIN tracks t
+            ON p.video_id = t.video_id
+           AND p.codec    = t.codec
+           AND p.bitrate  = t.bitrate
+         {where}
+         GROUP BY t.video_id, t.codec, t.bitrate
+         ORDER BY play_count DESC, MAX(p.played_at) DESC
+         LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_tracks_by_artist(
+    viewer_id: str, artist: str, *, limit: int = 40,
+) -> list[dict[str, Any]]:
+    """Catalog tracks by an exact artist match, newest first — catalog-item
+    shaped. Used to anchor daily mixes to an artist."""
+    conn = _get_conn()
+    rows = conn.execute(
+        f"""
+        SELECT {_TRACK_COLS}
+          FROM tracks t
+         WHERE t.artist = ?
+         ORDER BY t.downloaded_at DESC
+         LIMIT ?
+        """,
+        (viewer_id, artist, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def top_played_artists(viewer_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Most-played artists for a user: [{artist, play_count}], busiest first."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT t.artist AS artist, COUNT(*) AS play_count
+          FROM plays p
+          JOIN tracks t
+            ON p.video_id = t.video_id
+           AND p.codec    = t.codec
+           AND p.bitrate  = t.bitrate
+         WHERE p.user_id = ?
+           AND t.artist IS NOT NULL
+           AND TRIM(t.artist) != ''
+         GROUP BY t.artist
+         ORDER BY play_count DESC
+         LIMIT ?
+        """,
+        (viewer_id, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 

@@ -175,6 +175,48 @@ export type SuggestionsResponse = {
   external: ExternalCatalogItem[]
 }
 
+/** Recently played tracks carry the same shape as catalog items (the player
+ * only needs the base fields); extra play stats are ignored at the edge. */
+export type RecentResponse = {
+  items: CatalogItem[]
+}
+
+export type CatalogAccent = 'hot' | 'cool' | 'violet'
+
+/** A curated Browse category card. */
+export type Category = {
+  slug: string
+  title: string
+  emoji: string
+  accent: CatalogAccent
+}
+
+export type CategoriesResponse = {
+  categories: Category[]
+}
+
+/** A category feed: catalog matches you can play + YouTube candidates to grab. */
+export type CategoryFeed = {
+  category: Category
+  db: CatalogItem[]
+  external: ExternalCatalogItem[]
+}
+
+/** A rotating daily mix of playable catalog tracks, anchored to an artist. */
+export type DailyMix = {
+  id: string
+  title: string
+  subtitle: string
+  accent: CatalogAccent
+  tracks: CatalogItem[]
+}
+
+export type DailyMixesResponse = {
+  mixes: DailyMix[]
+  /** True when mixes are built from the user's own listening history. */
+  personalized: boolean
+}
+
 // ── Playlists ────────────────────────────────────────────────────────────────
 
 export type PlaylistVisibility = 'public' | 'private'
