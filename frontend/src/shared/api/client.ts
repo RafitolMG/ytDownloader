@@ -8,10 +8,12 @@ import type {
   PlaylistDetail,
   PlaylistVisibility,
   PlaylistsResponse,
+  ActivityResponse,
   CategoriesResponse,
   CategoryFeed,
   DailyMixesResponse,
   RecentResponse,
+  StatsResponse,
   ResolutionsResponse,
   SearchResponse,
   SuggestionsResponse,
@@ -186,6 +188,12 @@ export const api = {
 
   recentPlays: (limit = 20) =>
     json<RecentResponse>(`/api/me/recent?limit=${limit}`),
+
+  myStats: (windowDays = 30) =>
+    json<StatsResponse>(`/api/me/stats?window_days=${windowDays}`),
+
+  activity: (limit = 30) =>
+    json<ActivityResponse>(`/api/activity?limit=${limit}`),
 
   categories: () => json<CategoriesResponse>('/api/catalog/categories'),
 
