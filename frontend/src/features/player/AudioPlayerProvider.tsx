@@ -36,6 +36,9 @@ type PlayerCtx = {
   duration: number
   shuffle: boolean
   repeat: RepeatMode
+  /** Output volume, 0..1. */
+  volume: number
+  setVolume: (v: number) => void
   /**
    * Replace the queue and start playback at `startAt` (queue index, default 0).
    * If shuffle is on, the surrounding tracks are randomized but `startAt`
@@ -101,6 +104,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const [duration, setDuration] = useState(NaN)
   const [shuffle, setShuffle] = useState(false)
   const [repeat, setRepeat] = useState<RepeatMode>('off')
+  const [volume, setVolumeState] = useState(1)
 
   const index = pos >= 0 && pos < order.length ? order[pos] : -1
   const current = index >= 0 && index < queue.length ? queue[index] : null
@@ -331,6 +335,20 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     setRepeat((r) => (r === 'off' ? 'all' : r === 'all' ? 'one' : 'off'))
   }, [])
 
+  const setVolume = useCallback((v: number) => {
+    const clamped = Math.max(0, Math.min(1, v))
+    const el = audioRef.current
+    if (el) el.volume = clamped
+    setVolumeState(clamped)
+  }, [])
+
+  // Re-apply volume whenever a new src loads (the element resets to 1 on some
+  // browsers) so the user's chosen level sticks across tracks.
+  useEffect(() => {
+    const el = audioRef.current
+    if (el) el.volume = volume
+  }, [current && trackKey(current), volume])
+
   const orderedQueue = useMemo(
     () =>
       order
@@ -391,6 +409,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       duration,
       shuffle,
       repeat,
+      volume,
+      setVolume,
       play,
       togglePlay,
       next,
@@ -407,7 +427,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     }),
     [
       current, queue, index, canGoNext, canGoPrev, isPlaying, position, duration,
-      shuffle, repeat,
+      shuffle, repeat, volume, setVolume,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
       playNext, enqueue, removeFromQueueAt, jumpTo, orderedQueue,
     ],
