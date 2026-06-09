@@ -11,6 +11,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
 import type { LibraryItem } from '@/shared/api/types'
+import { useAuth } from '@/features/auth/AuthProvider'
 
 export type RepeatMode = 'off' | 'one' | 'all'
 
@@ -231,6 +232,14 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     setPosition(0)
     setDuration(NaN)
   }, [])
+
+  // Stop playback the moment there's no session — on logout or when a 401
+  // clears the user. Otherwise the <audio> element keeps streaming (and the
+  // stream endpoint would start 401ing) after the user has signed out.
+  const { user } = useAuth()
+  useEffect(() => {
+    if (!user) stop()
+  }, [user, stop])
 
   const seek = useCallback((seconds: number) => {
     const el = audioRef.current
