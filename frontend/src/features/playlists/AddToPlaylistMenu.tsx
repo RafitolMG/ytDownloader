@@ -21,6 +21,9 @@ type Props = {
 export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) {
   const player = useAudioPlayer()
   const [open, setOpen] = useState(false)
+  // Open upward when the trigger is too close to the bottom of the viewport, so
+  // the menu isn't clipped / hidden behind the player bar on the last rows.
+  const [dropUp, setDropUp] = useState(false)
   const [newName, setNewName] = useState('')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -85,11 +88,21 @@ export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) 
     <div className="relative inline-block" ref={popoverRef}>
       {trigger(() => {
         setError(null)
-        setOpen((v) => !v)
+        setOpen((v) => {
+          const next = !v
+          if (next && popoverRef.current) {
+            const r = popoverRef.current.getBoundingClientRect()
+            // ~340px tall menu + the fixed player bar at the bottom.
+            setDropUp(window.innerHeight - r.bottom < 360)
+          }
+          return next
+        })
       })}
       {open && (
         <div
-          className="absolute right-0 top-full mt-1 z-50 w-72 card-vapor rounded-sm p-3 shadow-[var(--shadow-glow-cool)]"
+          className={`absolute right-0 z-50 w-72 card-vapor rounded-sm p-3 shadow-[var(--shadow-glow-cool)] ${
+            dropUp ? 'bottom-full mb-1' : 'top-full mt-1'
+          }`}
           onClick={(e) => e.stopPropagation()}
         >
           {(track || onRadio) && (
