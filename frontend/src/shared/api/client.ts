@@ -8,10 +8,13 @@ import type {
   PlaylistDetail,
   PlaylistVisibility,
   PlaylistsResponse,
+  ActivityResponse,
   CategoriesResponse,
   CategoryFeed,
   DailyMixesResponse,
+  RadioFeed,
   RecentResponse,
+  StatsResponse,
   ResolutionsResponse,
   SearchResponse,
   SuggestionsResponse,
@@ -68,6 +71,8 @@ export const api = {
     resolution?: string | null
     ext?: string | null
     as_file?: boolean
+    /** false → register in the shared catalog without owning (favouriting) it. */
+    own?: boolean
   }) =>
     json<{ job_id: string }>('/api/download', {
       method: 'POST',
@@ -187,6 +192,12 @@ export const api = {
   recentPlays: (limit = 20) =>
     json<RecentResponse>(`/api/me/recent?limit=${limit}`),
 
+  myStats: (windowDays = 30) =>
+    json<StatsResponse>(`/api/me/stats?window_days=${windowDays}`),
+
+  activity: (limit = 30) =>
+    json<ActivityResponse>(`/api/activity?limit=${limit}`),
+
   categories: () => json<CategoriesResponse>('/api/catalog/categories'),
 
   category: (
@@ -203,14 +214,21 @@ export const api = {
     )
   },
 
+  radio: (videoId: string, opts: { external_limit?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (opts.external_limit != null)
+      qs.set('external_limit', String(opts.external_limit))
+    const tail = qs.toString()
+    return json<RadioFeed>(
+      `/api/catalog/radio/${encodeURIComponent(videoId)}${tail ? `?${tail}` : ''}`,
+    )
+  },
+
   dailyMixes: (opts: { count?: number; size?: number } = {}) => {
     const qs = new URLSearchParams()
-    if (opts.count != null) qs.set('count', String(opts.count))
-    if (opts.size != null) qs.set('size', String(opts.size))
-    const tail = qs.toString()
-    return json<DailyMixesResponse>(
-      `/api/catalog/daily-mixes${tail ? `?${tail}` : ''}`,
-    )
+    qs.set('count', String(opts.count ?? 4))
+    qs.set('size', String(opts.size ?? 40))
+    return json<DailyMixesResponse>(`/api/catalog/daily-mixes?${qs.toString()}`)
   },
 
   catalogAdopt: (videoId: string, codec: string, bitrate: string) =>

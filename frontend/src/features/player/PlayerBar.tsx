@@ -1,7 +1,9 @@
+import { useState } from 'react'
 import { useAudioPlayer } from './AudioPlayerProvider'
 
 export function PlayerBar() {
   const p = useAudioPlayer()
+  const [queueOpen, setQueueOpen] = useState(false)
   if (!p.current) return null
 
   const t = p.current
@@ -10,6 +12,7 @@ export function PlayerBar() {
 
   return (
     <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-page-mid shadow-[0_-8px_32px_rgba(0,0,0,0.6)]">
+      {queueOpen && <PlayQueuePanel onClose={() => setQueueOpen(false)} />}
       {/* Seek bar — clickable strip across the top of the player */}
       <div
         className="relative h-1.5 bg-page cursor-pointer group"
@@ -95,13 +98,52 @@ export function PlayerBar() {
           {fmtTime(p.position)} / {fmtTime(dur)}
         </div>
 
-        {/* Queue position + close */}
+        {/* Volume */}
+        <div className="hidden md:flex items-center gap-1.5 w-28">
+          <button
+            type="button"
+            onClick={() => p.setVolume(p.volume > 0 ? 0 : 1)}
+            title={p.volume > 0 ? 'mute' : 'unmute'}
+            className={`font-pixel text-base transition w-5 text-center ${
+              p.volume === 0
+                ? 'text-crit'
+                : 'text-ink-lo hover:text-cool'
+            }`}
+          >
+            {p.volume === 0 ? '♪̸' : '♪'}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={p.volume}
+            onChange={(e) => p.setVolume(Number(e.target.value))}
+            aria-label="volume"
+            className="flex-1 accent-[var(--color-cool)] cursor-pointer"
+          />
+        </div>
+
+        {/* Queue toggle + position + close */}
         <div className="flex items-center gap-2">
           {p.queue.length > 1 && (
             <span className="hidden md:inline font-pixel text-xs text-ink-lo uppercase tracking-widest">
               {p.index + 1}/{p.queue.length}
             </span>
           )}
+          <button
+            type="button"
+            onClick={() => setQueueOpen((v) => !v)}
+            title="queue"
+            aria-label="play queue"
+            className={`font-pixel text-base w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center transition rounded-xs border ${
+              queueOpen
+                ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
+                : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
+            }`}
+          >
+            ≣
+          </button>
           <button
             type="button"
             onClick={p.stop}
@@ -173,6 +215,82 @@ function PlayerToggle({
     >
       {children}
     </button>
+  )
+}
+
+/** Slide-up panel listing the current play order — jump to any track, drop
+ * upcoming ones. Anchored above the player bar. */
+function PlayQueuePanel({ onClose }: { onClose: () => void }) {
+  const p = useAudioPlayer()
+  return (
+    <div className="absolute bottom-full right-0 mb-px w-full sm:w-[26rem] sm:right-2 max-h-[60vh] flex flex-col card-vapor rounded-t-sm border border-border shadow-[var(--shadow-glow-cool)]">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border/60">
+        <span className="font-pixel text-xs text-cool uppercase tracking-[0.2em]">
+          ░▒▓ play queue ▓▒░
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          title="close"
+          aria-label="close queue"
+          className="font-pixel text-sm text-ink-lo hover:text-crit transition"
+        >
+          ✕
+        </button>
+      </div>
+      <ul className="flex-1 overflow-y-auto divide-y divide-border">
+        {p.orderedQueue.map(({ track, orderPos, isCurrent }) => (
+          <li
+            key={`${orderPos}/${track.video_id}`}
+            className={`group flex items-center gap-2 px-3 py-2 transition ${
+              isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => p.jumpTo(orderPos)}
+              className="flex items-center gap-2 min-w-0 flex-1 text-left"
+              title="play"
+            >
+              <span className="font-pixel text-xs w-4 text-center text-ink-lo">
+                {isCurrent ? <span className="text-hot">▶</span> : orderPos + 1}
+              </span>
+              <div className="relative w-10 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page">
+                {track.thumbnail_url ? (
+                  <img
+                    src={track.thumbnail_url}
+                    alt=""
+                    className="w-full h-full object-cover"
+                    loading="lazy"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="font-sans text-sm text-ink-hi truncate">
+                  {track.title ?? track.video_id}
+                </div>
+                <div className="text-xs text-ink-lo truncate">
+                  {track.artist ?? '—'}
+                </div>
+              </div>
+            </button>
+            {!isCurrent && (
+              <button
+                type="button"
+                onClick={() => p.removeFromQueueAt(orderPos)}
+                title="remove from queue"
+                className="font-pixel text-sm w-6 h-6 flex items-center justify-center text-ink-lo opacity-100 lg:opacity-0 lg:group-hover:opacity-100 hover:text-crit transition"
+              >
+                ✕
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 

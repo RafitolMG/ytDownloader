@@ -187,7 +187,6 @@ export type CatalogAccent = 'hot' | 'cool' | 'violet'
 export type Category = {
   slug: string
   title: string
-  emoji: string
   accent: CatalogAccent
 }
 
@@ -202,19 +201,58 @@ export type CategoryFeed = {
   external: ExternalCatalogItem[]
 }
 
-/** A rotating daily mix of playable catalog tracks, anchored to an artist. */
+/** "More like this" radio for a track: what you already have (playable) plus
+ * new candidates to download. */
+export type RadioFeed = {
+  db: CatalogItem[]
+  external: ExternalCatalogItem[]
+}
+
+/** A rotating daily mix: playable catalog tracks anchored to an artist, plus
+ * related tracks not downloaded yet (playing one fetches it to the catalog). */
 export type DailyMix = {
   id: string
   title: string
   subtitle: string
   accent: CatalogAccent
   tracks: CatalogItem[]
+  external: ExternalCatalogItem[]
 }
 
 export type DailyMixesResponse = {
   mixes: DailyMix[]
   /** True when mixes are built from the user's own listening history. */
   personalized: boolean
+}
+
+/** A library-addition event for the shared activity feed. Carries enough to
+ * render + play the track, plus who added it and when. */
+export type ActivityItem = {
+  username: string | null
+  added_at: string
+  video_id: string
+  codec: string
+  bitrate: string
+  title: string | null
+  artist: string | null
+  duration_sec: number | null
+  thumbnail_url: string | null
+  source_url: string
+  file_size: number | null
+}
+
+export type ActivityResponse = {
+  items: ActivityItem[]
+}
+
+export type ArtistStat = { artist: string; play_count: number }
+
+/** Personal listening stats over a window — a lightweight "wrapped". */
+export type StatsResponse = {
+  window_days: number
+  total_plays: number
+  top_tracks: CatalogItem[]
+  top_artists: ArtistStat[]
 }
 
 // ── Playlists ────────────────────────────────────────────────────────────────

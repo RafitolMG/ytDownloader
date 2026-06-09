@@ -18,7 +18,11 @@ from typing import Any, Iterator
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DATA_DIR = os.path.join(_BACKEND_ROOT, "data")
+# YTDL_DATA_DIR lets the deployment point the database at a mounted volume so it
+# survives container redeploys (sessions + play history). Defaults to the
+# in-repo ./data for local dev. In the Docker image this resolves to /app/data,
+# which Coolify should back with persistent storage.
+_DATA_DIR = os.environ.get("YTDL_DATA_DIR") or os.path.join(_BACKEND_ROOT, "data")
 _DB_PATH = os.path.join(_DATA_DIR, "queue.db")
 
 # Thread-local connection so each worker thread gets its own handle.
@@ -815,25 +819,73 @@ def list_tracks_by_artist(
     return [dict(r) for r in rows]
 
 
-def top_played_artists(viewer_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
-    """Most-played artists for a user: [{artist, play_count}], busiest first."""
+def top_played_artists(
+    viewer_id: str, *, limit: int = 10, since: str | None = None,
+) -> list[dict[str, Any]]:
+    """Most-played artists for a user: [{artist, play_count}], busiest first.
+    `since` is an ISO timestamp lower bound on played_at (None = all time)."""
     conn = _get_conn()
+    where = "WHERE p.user_id = ? AND t.artist IS NOT NULL AND TRIM(t.artist) != ''"
+    params: list[Any] = [viewer_id]
+    if since:
+        where += " AND p.played_at >= ?"
+        params.append(since)
+    params.append(limit)
     rows = conn.execute(
-        """
+        f"""
         SELECT t.artist AS artist, COUNT(*) AS play_count
           FROM plays p
           JOIN tracks t
             ON p.video_id = t.video_id
            AND p.codec    = t.codec
            AND p.bitrate  = t.bitrate
-         WHERE p.user_id = ?
-           AND t.artist IS NOT NULL
-           AND TRIM(t.artist) != ''
+         {where}
          GROUP BY t.artist
          ORDER BY play_count DESC
          LIMIT ?
         """,
-        (viewer_id, limit),
+        tuple(params),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_plays(viewer_id: str, *, since: str | None = None) -> int:
+    """Total recorded plays for a user (optionally since an ISO timestamp)."""
+    conn = _get_conn()
+    if since:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM plays WHERE user_id = ? AND played_at >= ?",
+            (viewer_id, since),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM plays WHERE user_id = ?", (viewer_id,),
+        ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def list_recent_additions(*, limit: int = 30) -> list[dict[str, Any]]:
+    """Recent library adds across all users — the activity feed. Each row is a
+    catalog track plus who added it (display name resolved from their most
+    recent session) and when."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT o.owner_id, o.added_at,
+               (SELECT s.username FROM sessions s
+                 WHERE s.user_id = o.owner_id
+                 ORDER BY s.last_seen_at DESC LIMIT 1) AS username,
+               t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+               t.thumbnail_url, t.source_url, t.file_size, t.downloaded_at
+          FROM track_owners o
+          JOIN tracks t
+            ON o.video_id = t.video_id
+           AND o.codec    = t.codec
+           AND o.bitrate  = t.bitrate
+         ORDER BY o.added_at DESC
+         LIMIT ?
+        """,
+        (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
 
