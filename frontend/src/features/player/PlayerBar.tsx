@@ -98,6 +98,32 @@ export function PlayerBar() {
           {fmtTime(p.position)} / {fmtTime(dur)}
         </div>
 
+        {/* Volume */}
+        <div className="hidden md:flex items-center gap-1.5 w-28">
+          <button
+            type="button"
+            onClick={() => p.setVolume(p.volume > 0 ? 0 : 1)}
+            title={p.volume > 0 ? 'mute' : 'unmute'}
+            className={`font-pixel text-base transition w-5 text-center ${
+              p.volume === 0
+                ? 'text-crit'
+                : 'text-ink-lo hover:text-cool'
+            }`}
+          >
+            {p.volume === 0 ? '♪̸' : '♪'}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={p.volume}
+            onChange={(e) => p.setVolume(Number(e.target.value))}
+            aria-label="volume"
+            className="flex-1 accent-[var(--color-cool)] cursor-pointer"
+          />
+        </div>
+
         {/* Queue toggle + position + close */}
         <div className="flex items-center gap-2">
           {p.queue.length > 1 && (
