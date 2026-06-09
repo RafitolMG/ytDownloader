@@ -10,13 +10,15 @@ type Props = {
   trackKey: TrackKey
   /** Full track — when provided, the menu also offers play-next / add-to-queue. */
   track?: LibraryItem
+  /** When provided, the menu offers "more like this" (start a radio). */
+  onRadio?: () => void
   /** Render-prop trigger so the host can style the button however it wants. */
   trigger: (open: () => void) => React.ReactNode
 }
 
-/** Inline per-track actions menu: queue the track (play next / add to queue)
- * and add it to one of the user's playlists. Opens beneath the trigger. */
-export function AddToPlaylistMenu({ trackKey, track, trigger }: Props) {
+/** Inline per-track actions menu: queue the track (play next / add to queue),
+ * start a radio, and add it to a playlist. Opens beneath the trigger. */
+export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) {
   const player = useAudioPlayer()
   const [open, setOpen] = useState(false)
   const [newName, setNewName] = useState('')
@@ -90,28 +92,44 @@ export function AddToPlaylistMenu({ trackKey, track, trigger }: Props) {
           className="absolute right-0 top-full mt-1 z-50 w-72 card-vapor rounded-sm p-3 shadow-[var(--shadow-glow-cool)]"
           onClick={(e) => e.stopPropagation()}
         >
-          {track && (
+          {(track || onRadio) && (
             <div className="mb-2 pb-2 border-b border-border/60 flex flex-col gap-1">
-              <button
-                type="button"
-                onClick={() => {
-                  player.playNext(track)
-                  setOpen(false)
-                }}
-                className="w-full text-left px-2 py-1.5 hover:bg-violet/10 transition rounded-xs font-sans text-sm text-ink-hi flex items-center gap-2"
-              >
-                <span className="text-cool">▶</span> play next
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  player.enqueue(track)
-                  setOpen(false)
-                }}
-                className="w-full text-left px-2 py-1.5 hover:bg-violet/10 transition rounded-xs font-sans text-sm text-ink-hi flex items-center gap-2"
-              >
-                <span className="text-cool">≣</span> add to queue
-              </button>
+              {track && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      player.playNext(track)
+                      setOpen(false)
+                    }}
+                    className="w-full text-left px-2 py-1.5 hover:bg-violet/10 transition rounded-xs font-sans text-sm text-ink-hi flex items-center gap-2"
+                  >
+                    <span className="text-cool">▶</span> play next
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      player.enqueue(track)
+                      setOpen(false)
+                    }}
+                    className="w-full text-left px-2 py-1.5 hover:bg-violet/10 transition rounded-xs font-sans text-sm text-ink-hi flex items-center gap-2"
+                  >
+                    <span className="text-cool">≣</span> add to queue
+                  </button>
+                </>
+              )}
+              {onRadio && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onRadio()
+                    setOpen(false)
+                  }}
+                  className="w-full text-left px-2 py-1.5 hover:bg-violet/10 transition rounded-xs font-sans text-sm text-ink-hi flex items-center gap-2"
+                >
+                  <span className="text-cool">≈</span> more like this
+                </button>
+              )}
             </div>
           )}
 

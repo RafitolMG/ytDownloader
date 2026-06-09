@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { api } from '@/shared/api/client'
 import type {
@@ -38,6 +38,10 @@ function toLibraryItem(c: CatalogItem): LibraryItem {
 }
 
 type CatalogScope = 'all' | 'mine'
+
+/** Lets any catalog row open a "more like this" radio without prop-drilling
+ * the setter through every row/section. Provided by CatalogPage. */
+const RadioCtx = createContext<((item: CatalogItem) => void) | null>(null)
 
 const SORT_LABELS: Record<CatalogSort, string> = {
   newest: 'newest',
@@ -105,8 +109,20 @@ export default function CatalogPage() {
   // into (no category or mix preview open).
   const [activeCategory, setActiveCategory] = useState<Category | null>(null)
   const [activeMix, setActiveMix] = useState<DailyMix | null>(null)
+  const [activeRadio, setActiveRadio] = useState<CatalogItem | null>(null)
   const browseHome =
-    !isSearching && !isMine && activeCategory === null && activeMix === null
+    !isSearching &&
+    !isMine &&
+    activeCategory === null &&
+    activeMix === null &&
+    activeRadio === null
+
+  // Opening a radio is exclusive with the other drill-downs.
+  const openRadio = (item: CatalogItem) => {
+    setActiveCategory(null)
+    setActiveMix(null)
+    setActiveRadio(item)
+  }
 
   const recentQuery = useQuery({
     queryKey: ['recent'],
@@ -130,6 +146,12 @@ export default function CatalogPage() {
     queryKey: ['category', activeCategory?.slug],
     queryFn: () => api.category(activeCategory!.slug, { external_limit: 18 }),
     enabled: activeCategory !== null,
+    staleTime: 60_000,
+  })
+  const radioQuery = useQuery({
+    queryKey: ['radio', activeRadio?.video_id],
+    queryFn: () => api.radio(activeRadio!.video_id, { external_limit: 18 }),
+    enabled: activeRadio !== null,
     staleTime: 60_000,
   })
   const statsQuery = useQuery({
@@ -168,6 +190,7 @@ export default function CatalogPage() {
     externals.length === 0
 
   return (
+    <RadioCtx.Provider value={openRadio}>
     <div className="relative z-10 min-h-full">
       <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
         <AppHeader queueCount={activeCount} />
@@ -252,7 +275,14 @@ export default function CatalogPage() {
           )}
         </div>
 
-        {activeCategory ? (
+        {activeRadio ? (
+          <RadioView
+            seed={activeRadio}
+            feed={radioQuery.data}
+            isLoading={radioQuery.isLoading}
+            onBack={() => setActiveRadio(null)}
+          />
+        ) : activeCategory ? (
           <CategoryView
             category={activeCategory}
             feed={categoryFeedQuery.data}
@@ -360,6 +390,7 @@ export default function CatalogPage() {
 
       </main>
     </div>
+    </RadioCtx.Provider>
   )
 }
 
@@ -374,6 +405,7 @@ function CatalogRow({
 }) {
   const player = useAudioPlayer()
   const queryClient = useQueryClient()
+  const openRadio = useContext(RadioCtx)
 
   const toggleLibrary = useMutation({
     // The two branches return different literal `owned` types; widen to a
@@ -480,6 +512,7 @@ function CatalogRow({
           bitrate: item.bitrate,
         }}
         track={toLibraryItem(item)}
+        onRadio={openRadio ? () => openRadio(item) : undefined}
         trigger={(open) => (
           <button
             type="button"
@@ -1183,6 +1216,108 @@ function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) {
           />
         ))}
       </ul>
+    </section>
+  )
+}
+
+/** "More like this" radio from a seed track: what you already have (playable)
+ * + new candidates to download. */
+function RadioView({
+  seed,
+  feed,
+  isLoading,
+  onBack,
+}: {
+  seed: CatalogItem
+  feed: { db: CatalogItem[]; external: ExternalCatalogItem[] } | undefined
+  isLoading: boolean
+  onBack: () => void
+}) {
+  const player = useAudioPlayer()
+  const db = feed?.db ?? []
+  const external = feed?.external ?? []
+  return (
+    <section>
+      <div className="flex items-center gap-3 mb-5 flex-wrap">
+        <button
+          type="button"
+          onClick={onBack}
+          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool hover:border-cool/70 transition rounded-xs"
+        >
+          ← back
+        </button>
+        <div className="relative w-14 h-14 rounded-sm overflow-hidden border border-cool/50 bg-page-mid flex-shrink-0">
+          {seed.thumbnail_url ? (
+            <img
+              src={seed.thumbnail_url}
+              alt=""
+              className="w-full h-full object-cover"
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
+          )}
+        </div>
+        <div className="min-w-0">
+          <div className="font-pixel text-lg uppercase tracking-widest text-cool">
+            ≈ radio
+          </div>
+          <div className="font-sans text-sm text-ink-mid truncate">
+            like {seed.title ?? seed.video_id}
+          </div>
+        </div>
+        {db.length > 0 && (
+          <button
+            type="button"
+            onClick={() => player.play(db.map(toLibraryItem), 0)}
+            className="font-pixel text-xs uppercase tracking-widest px-4 py-2 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+          >
+            ▶ play all
+          </button>
+        )}
+      </div>
+
+      {isLoading && (
+        <div className="font-pixel text-ink-mid">··· tuning the radio ···</div>
+      )}
+
+      {db.length > 0 && (
+        <ul className="card-vapor rounded-sm divide-y divide-border mb-2">
+          {db.map((it, idx) => (
+            <CatalogRow
+              key={`${it.video_id}/${it.codec}/${it.bitrate}`}
+              item={it}
+              position={idx + 1}
+              allItems={db}
+            />
+          ))}
+        </ul>
+      )}
+
+      {external.length > 0 && (
+        <>
+          <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+            <span className="flex-1 border-t border-border" />
+            <span>↓ download more like this</span>
+            <span className="flex-1 border-t border-border" />
+          </div>
+          <ul className="card-vapor rounded-sm divide-y divide-border">
+            {external.map((ext, idx) => (
+              <ExternalRow
+                key={ext.video_id}
+                item={ext}
+                position={db.length + idx + 1}
+              />
+            ))}
+          </ul>
+        </>
+      )}
+
+      {!isLoading && db.length === 0 && external.length === 0 && (
+        <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
+          couldn't tune a radio for this track right now.
+        </div>
+      )}
     </section>
   )
 }

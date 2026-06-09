@@ -12,6 +12,7 @@ import type {
   CategoriesResponse,
   CategoryFeed,
   DailyMixesResponse,
+  RadioFeed,
   RecentResponse,
   StatsResponse,
   ResolutionsResponse,
@@ -208,6 +209,16 @@ export const api = {
     const tail = qs.toString()
     return json<CategoryFeed>(
       `/api/catalog/category/${encodeURIComponent(slug)}${tail ? `?${tail}` : ''}`,
+    )
+  },
+
+  radio: (videoId: string, opts: { external_limit?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (opts.external_limit != null)
+      qs.set('external_limit', String(opts.external_limit))
+    const tail = qs.toString()
+    return json<RadioFeed>(
+      `/api/catalog/radio/${encodeURIComponent(videoId)}${tail ? `?${tail}` : ''}`,
     )
   },
 
