@@ -34,6 +34,7 @@ from src import (
 from src.api.admin_routes import router as admin_router
 from src.api.auth_routes import router as auth_router
 from src.auth import CurrentUser, current_user
+from src.extraction_pool import run_extraction
 
 
 def _ensure_owner(job: dict, user: CurrentUser) -> None:
@@ -130,6 +131,80 @@ class _Cancelled(Exception):
     """Raised from inside the yt-dlp progress hook to abort a job."""
 
 
+# ── Background GC: leaked tmp_dirs + abandoned job runtime ─────────────────────
+# Job runtime (`_jobs` entries + their tmp_dir) is normally freed when /api/file
+# serves the result. Errored / cancelled / never-fetched jobs would otherwise
+# leak a Queue + tmp_dir forever, and a crash leaves `ytdl_*` dirs in the system
+# temp. A periodic reaper (and a startup sweep) clean both.
+_REAP_INTERVAL_SEC = 600
+_REAP_GRACE_SEC = 3600
+
+
+def _iso_older_than(ts: str | None, secs: float) -> bool:
+    if not ts:
+        return True
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds() > secs
+
+
+def _reap_jobs_once() -> None:
+    """Drop in-memory runtime for terminal jobs older than the grace window (and
+    any whose DB row vanished), removing their tmp_dir."""
+    for job_id in list(_jobs.keys()):
+        runtime = _jobs.get(job_id)
+        if runtime is None:
+            continue
+        row = db.get(job_id)
+        terminal = row is None or row["status"] in (
+            db.DONE, db.ERROR, db.CANCELLED, db.INTERRUPTED,
+        )
+        if not terminal:
+            continue
+        if row is not None and not _iso_older_than(row.get("completed_at"), _REAP_GRACE_SEC):
+            continue
+        tmp_dir = runtime.get("tmp_dir")
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        _jobs.pop(job_id, None)
+        _cancelled.discard(job_id)
+
+
+def _reap_startup_tmpdirs() -> None:
+    """On boot `_jobs` is empty (in-flight jobs were marked interrupted), so any
+    `ytdl_*` dir left in the system temp is orphaned from a previous run."""
+    base = tempfile.gettempdir()
+    active = {(_jobs.get(j) or {}).get("tmp_dir") for j in _jobs}
+    try:
+        for name in os.listdir(base):
+            if not name.startswith("ytdl_"):
+                continue
+            path = os.path.join(base, name)
+            if path not in active and os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
+
+
+async def _reaper_loop() -> None:
+    while True:
+        await asyncio.sleep(_REAP_INTERVAL_SEC)
+        try:
+            await asyncio.to_thread(_reap_jobs_once)
+        except Exception:
+            traceback.print_exc()
+
+
+@app.on_event("startup")
+async def _start_reaper():
+    await asyncio.to_thread(_reap_startup_tmpdirs)
+    asyncio.create_task(_reaper_loop())
+
+
 # ── Request models ────────────────────────────────────────────────────────────
 
 class ResolutionsRequest(BaseModel):
@@ -206,18 +281,25 @@ def rate_limit_extraction(user: CurrentUser = Depends(current_user)) -> CurrentU
 
 
 @app.post("/api/resolutions")
-def get_resolutions(
+async def get_resolutions(
     body: ResolutionsRequest,
     user: CurrentUser = Depends(current_user),
     _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """Fetch available MP4 formats for a single video, or detect a playlist URL."""
     _validate_youtube_url(body.url)
-    try:
+
+    def work():
         if ytDownloaderFunctions.is_playlist(body.url):
-            info = ytDownloaderFunctions.get_playlist_tracks(body.url)
-            return {"is_playlist": True, **info}
+            return {"is_playlist": True, **ytDownloaderFunctions.get_playlist_tracks(body.url)}
         return ytDownloaderFunctions.get_available_resolutions(body.url)
+
+    try:
+        return await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="extraction timed out")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1095,7 +1177,7 @@ def _discover_feed(
 
 
 @app.get("/api/catalog/discover")
-def catalog_discover(
+async def catalog_discover(
     q: str = "",
     limit: int = 20,
     external_limit: int = 10,
@@ -1117,7 +1199,13 @@ def catalog_discover(
     q_norm = (q or "").strip()
     limit = max(1, min(limit, 100))
     external_limit = max(0, min(external_limit, 25))
-    return _discover_feed(user.user_id, q_norm, limit, external_limit)
+    try:
+        return await run_extraction(
+            lambda: _discover_feed(user.user_id, q_norm, limit, external_limit),
+            timeout=config.EXTRACTION_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="search timed out")
 
 
 @app.get("/api/catalog/suggestions")
@@ -1247,7 +1335,7 @@ def catalog_categories():
 
 
 @app.get("/api/catalog/category/{slug}")
-def catalog_category(
+async def catalog_category(
     slug: str,
     limit: int = 12,
     external_limit: int = 18,
@@ -1261,9 +1349,15 @@ def catalog_category(
         raise HTTPException(status_code=404, detail="unknown category")
     limit = max(1, min(limit, 50))
     external_limit = max(0, min(external_limit, 30))
-    feed = _discover_feed(
-        user.user_id, cat["query"], limit, external_limit, music_only=True,
-    )
+    try:
+        feed = await run_extraction(
+            lambda: _discover_feed(
+                user.user_id, cat["query"], limit, external_limit, music_only=True,
+            ),
+            timeout=config.EXTRACTION_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="category timed out")
     return {
         "category": {k: cat[k] for k in ("slug", "title", "accent")},
         **feed,
@@ -1271,7 +1365,7 @@ def catalog_category(
 
 
 @app.get("/api/catalog/radio/{video_id}")
-def catalog_radio(
+async def catalog_radio(
     video_id: str,
     external_limit: int = 18,
     user: CurrentUser = Depends(current_user),
@@ -1281,36 +1375,43 @@ def catalog_radio(
     into what's already in the catalog (playable now) and new candidates to
     download. Music-filtered (lenient — the Mix is music-seeded)."""
     external_limit = max(0, min(external_limit, 30))
+
+    def work():
+        try:
+            rel = search_mod.related(video_id, limit=external_limit + 20)
+        except Exception:
+            traceback.print_exc()
+            rel = []
+
+        by_id = {
+            c["video_id"]: c
+            for c in db.list_catalog(user.user_id, sort="popular", limit=500)
+        }
+
+        db_items: list[dict] = []
+        externals: list[dict] = []
+        seen: set[str] = set()
+        for entry in rel:
+            vid = entry.get("id")
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            if vid in by_id:
+                db_items.append(by_id[vid])
+                continue
+            if len(externals) >= external_limit:
+                continue
+            item = _external_item(entry)
+            if not _is_music_candidate(item, strict=False):
+                continue
+            externals.append(item)
+
+        return {"db": db_items, "external": externals}
+
     try:
-        rel = search_mod.related(video_id, limit=external_limit + 20)
-    except Exception:
-        traceback.print_exc()
-        rel = []
-
-    by_id = {
-        c["video_id"]: c
-        for c in db.list_catalog(user.user_id, sort="popular", limit=500)
-    }
-
-    db_items: list[dict] = []
-    externals: list[dict] = []
-    seen: set[str] = set()
-    for entry in rel:
-        vid = entry.get("id")
-        if not vid or vid in seen:
-            continue
-        seen.add(vid)
-        if vid in by_id:
-            db_items.append(by_id[vid])
-            continue
-        if len(externals) >= external_limit:
-            continue
-        item = _external_item(entry)
-        if not _is_music_candidate(item, strict=False):
-            continue
-        externals.append(item)
-
-    return {"db": db_items, "external": externals}
+        return await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="radio timed out")
 
 
 # ── Albums (YouTube Music) ────────────────────────────────────────────────────
@@ -1322,7 +1423,7 @@ _ALBUM_ID_RE = re.compile(r"^(MPREb[A-Za-z0-9_-]+|OLAK5uy_[A-Za-z0-9_-]+)$")
 
 
 @app.get("/api/albums/search")
-def albums_search(
+async def albums_search(
     q: str = "",
     limit: int = 12,
     user: CurrentUser = Depends(current_user),
@@ -1336,14 +1437,19 @@ def albums_search(
         return {"albums": []}
     limit = max(1, min(limit, 16))
     try:
-        albums = search_mod.search_albums(q_norm, limit=limit)
+        albums = await run_extraction(
+            lambda: search_mod.search_albums(q_norm, limit=limit),
+            timeout=config.EXTRACTION_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="album search timed out")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"album search failed: {e}")
     return {"albums": albums}
 
 
 @app.get("/api/albums/{album_id}")
-def album_detail(
+async def album_detail(
     album_id: str,
     user: CurrentUser = Depends(current_user),
 ):
@@ -1353,33 +1459,36 @@ def album_detail(
     playable or downloadable row per track."""
     if not _ALBUM_ID_RE.match(album_id):
         raise HTTPException(status_code=400, detail="invalid album id")
-    album = search_mod.get_album(album_id)
-    if album is None:
+
+    def work():
+        album = search_mod.get_album(album_id)
+        if album is None:
+            return None
+        tracks = album.pop("tracks", [])
+        by_id = {
+            c["video_id"]: c
+            for c in db.list_catalog(user.user_id, sort="popular", limit=500)
+        }
+        ordered: list[dict] = []
+        db_items: list[dict] = []
+        seen: set[str] = set()
+        for entry in tracks:
+            vid = entry.get("id")
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            ordered.append(_external_item(entry))
+            if vid in by_id:
+                db_items.append(by_id[vid])
+        return {"album": album, "tracks": ordered, "db": db_items}
+
+    try:
+        result = await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="album load timed out")
+    if result is None:
         raise HTTPException(status_code=404, detail="album not found")
-
-    tracks = album.pop("tracks", [])
-    by_id = {
-        c["video_id"]: c
-        for c in db.list_catalog(user.user_id, sort="popular", limit=500)
-    }
-
-    ordered: list[dict] = []
-    db_items: list[dict] = []
-    seen: set[str] = set()
-    for entry in tracks:
-        vid = entry.get("id")
-        if not vid or vid in seen:
-            continue
-        seen.add(vid)
-        ordered.append(_external_item(entry))
-        if vid in by_id:
-            db_items.append(by_id[vid])
-
-    return {
-        "album": album,
-        "tracks": ordered,
-        "db": db_items,
-    }
+    return result
 
 
 @app.get("/api/catalog/daily-mixes")
@@ -1989,7 +2098,7 @@ def search_suggest(
 
 
 @app.get("/api/search")
-def search_videos(
+async def search_videos(
     q: str = "",
     limit: int = 20,
     user: CurrentUser = Depends(current_user),
@@ -1997,7 +2106,13 @@ def search_videos(
 ):
     """yt-dlp ytsearch:<q> — listing-level metadata only. Cached 5min."""
     try:
-        return {"results": search_mod.search(q, limit=limit)}
+        results = await run_extraction(
+            lambda: search_mod.search(q, limit=limit),
+            timeout=config.EXTRACTION_TIMEOUT_SEC,
+        )
+        return {"results": results}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="search timed out")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"search failed: {e}")
 
