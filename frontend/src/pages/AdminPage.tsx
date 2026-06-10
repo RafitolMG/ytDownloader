@@ -5,6 +5,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { AppHeader } from '@/shared/ui/AppHeader'
+import { ConfirmButton } from '@/shared/ui/ConfirmButton'
 import { api } from '@/shared/api/client'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { fmtDuration } from '@/pages/CatalogPage'
@@ -734,6 +735,9 @@ function SystemView() {
           }
         />
         <SystemRow label="source" value={s.cookies.source} />
+        {s.cookies.expiry && (
+          <SystemRow label="expiry" valueNode={<CookieExpiry expiry={s.cookies.expiry} />} />
+        )}
         {s.cookies.error && (
           <div className="mt-1 font-sans text-xs text-crit break-words">
             {s.cookies.error}
@@ -770,6 +774,32 @@ function SystemView() {
   )
 }
 
+/** Cookie expiry status: crit if any expired / already negative, sun under 14
+ * days (advance warning), cool otherwise. Turns the worst silent prod failure
+ * (lapsed YouTube cookies → extraction starts 503ing) into an early signal. */
+function CookieExpiry({
+  expiry,
+}: {
+  expiry: NonNullable<AdminSystem['cookies']['expiry']>
+}) {
+  const days = expiry.days_remaining
+  if (expiry.expired_count > 0 || (days != null && days < 0)) {
+    return (
+      <span className="text-crit">
+        ⚠ {expiry.expired_count > 0 ? `${expiry.expired_count} expired` : 'expired'}
+      </span>
+    )
+  }
+  if (days == null) return <span className="text-ink-lo">— session only</span>
+  const cls = days < 14 ? 'text-sun' : 'text-cool'
+  return (
+    <span className={cls}>
+      {days < 14 ? '⚠ ' : ''}
+      {days}d left
+    </span>
+  )
+}
+
 function SystemHeading({ glyph, label }: { glyph: string; label: string }) {
   return (
     <div className="flex items-center gap-2 font-pixel text-xs uppercase tracking-widest text-cool mb-3">
@@ -801,59 +831,3 @@ function SystemRow({
   )
 }
 
-// ── confirm button ───────────────────────────────────────────────────────────
-
-/** A two-step destructive button: first click arms it (flips to ⚠ confirm /
- * ✕ cancel), second click fires onConfirm. No native window.confirm. */
-function ConfirmButton({
-  onConfirm,
-  disabled,
-  idle,
-  title,
-}: {
-  onConfirm: () => void
-  disabled?: boolean
-  idle: string
-  title?: string
-}) {
-  const [armed, setArmed] = useState(false)
-
-  if (armed) {
-    return (
-      <span className="flex items-center gap-1">
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => {
-            onConfirm()
-            setArmed(false)
-          }}
-          title="confirm"
-          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-crit/60 text-crit bg-crit/10 hover:bg-crit/20 transition rounded-xs disabled:opacity-40"
-        >
-          ⚠
-        </button>
-        <button
-          type="button"
-          onClick={() => setArmed(false)}
-          title="cancel"
-          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool transition rounded-xs"
-        >
-          ✕
-        </button>
-      </span>
-    )
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={() => setArmed(true)}
-      disabled={disabled}
-      title={title}
-      className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-crit/60 text-crit hover:bg-crit/10 transition rounded-xs disabled:opacity-40"
-    >
-      {idle}
-    </button>
-  )
-}

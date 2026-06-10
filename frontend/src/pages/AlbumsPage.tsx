@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
+import { EmptyState } from '@/shared/ui/EmptyState'
 import { api } from '@/shared/api/client'
 import type { AlbumCard, CatalogItem, LibraryItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
@@ -171,13 +172,11 @@ export default function AlbumsPage() {
             <div className="font-pixel text-ink-mid">··· loading your albums ···</div>
           )}
           {!libraryQuery.isLoading && libraryAlbums.length === 0 && (
-            <div className="card-vapor rounded-sm p-8 text-center">
-              <div className="font-pixel text-lg text-ink-mid mb-2">⊹ no albums yet ⊹</div>
-              <div className="font-pixel text-sm text-ink-lo">
-                search an album above and download it, or import a YouTube Music
-                album — its tracks will group here automatically.
-              </div>
-            </div>
+            <EmptyState
+              glyph="◉"
+              title="no albums yet"
+              hint="search an album above and download it — its tracks group here automatically."
+            />
           )}
           <AlbumGrid>
             {libraryAlbums.map((a) => (
