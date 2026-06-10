@@ -126,6 +126,51 @@ def delete_track(
     }
 
 
+@router.post("/tracks/backfill-metadata")
+def backfill_metadata(
+    only_missing: bool = True,
+    overwrite_artist: bool = True,
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Recover album / multi-artist / year for existing tracks by reading the
+    metadata yt-dlp already embedded in each file (ffprobe, fully offline — no
+    YouTube call). `only_missing` scans just tracks with no album (the ones
+    downloaded before the album columns existed); `overwrite_artist` upgrades a
+    single-name artist to the file's joined multi-artist string. Idempotent and
+    re-runnable."""
+    scanned = updated = no_file = no_new = 0
+    for t in db.list_tracks_for_backfill(only_missing_album=only_missing):
+        scanned += 1
+        tags = ytDownloaderFunctions.read_file_tags(t["file_path"])
+        if tags is None:
+            no_file += 1
+            continue
+        fields: dict = {
+            "album": tags["album"],
+            "album_artist": tags["album_artist"],
+            "release_year": tags["release_year"],
+        }
+        if tags["title"]:
+            fields["title"] = tags["title"]
+        # Artist: fill when missing, or upgrade to the file's (joined, multi-
+        # artist) value when overwrite is on — the embedded tag is yt-dlp's.
+        cur_artist = (t.get("artist") or "").strip()
+        if tags["artist"] and (overwrite_artist or not cur_artist):
+            fields["artist"] = tags["artist"]
+        fields = {k: v for k, v in fields.items() if v is not None}
+        if not fields:
+            no_new += 1
+            continue
+        if db.update_track_metadata(t["video_id"], t["codec"], t["bitrate"], **fields):
+            updated += 1
+    return {
+        "scanned": scanned,
+        "updated": updated,
+        "no_file": no_file,
+        "no_new_tags": no_new,
+    }
+
+
 @router.post("/tracks/cleanup-orphans")
 def cleanup_orphans(user: CurrentUser = Depends(require_admin)) -> dict:
     """Delete every orphan master (owner_count==0) plus its file. Orphans never

@@ -598,6 +598,57 @@ def register_track(
         )
 
 
+def update_track_metadata(
+    video_id: str,
+    codec: str,
+    bitrate: str,
+    *,
+    title: str | None = None,
+    artist: str | None = None,
+    album: str | None = None,
+    album_artist: str | None = None,
+    release_year: int | None = None,
+) -> bool:
+    """Partial metadata update for one master track — only the provided (non-
+    None) fields are written; the file/sha/owners are untouched. Used by the
+    admin metadata-backfill (and any future metadata-correction). Returns True
+    iff a row was updated."""
+    updates: list[str] = []
+    params: list[Any] = []
+    for col, val in (
+        ("title", title),
+        ("artist", artist),
+        ("album", album),
+        ("album_artist", album_artist),
+        ("release_year", release_year),
+    ):
+        if val is not None:
+            updates.append(f"{col} = ?")
+            params.append(val)
+    if not updates:
+        return False
+    params.extend([video_id, codec, bitrate])
+    with _write() as conn:
+        cur = conn.execute(
+            f"UPDATE tracks SET {', '.join(updates)} "
+            "WHERE video_id = ? AND codec = ? AND bitrate = ?",
+            params,
+        )
+        return cur.rowcount > 0
+
+
+def list_tracks_for_backfill(only_missing_album: bool = False) -> list[dict[str, Any]]:
+    """Tracks (key + file_path + current artist/album) for the metadata backfill.
+    `only_missing_album` restricts to rows that never captured an album — i.e.
+    the tracks downloaded before the album columns existed."""
+    conn = _get_conn()
+    where = "WHERE album IS NULL OR album = ''" if only_missing_album else ""
+    rows = conn.execute(
+        f"SELECT video_id, codec, bitrate, file_path, artist, album FROM tracks {where}"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def link_owner(
     *,
     owner_id: str,
