@@ -17,6 +17,7 @@ import { countActive, useJobs } from '@/shared/api/useJobs'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { useLiveJobProgress } from '@/features/queue/useLiveJobProgress'
 import { AddToPlaylistMenu } from '@/features/playlists/AddToPlaylistMenu'
+import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
 
 /** Map a catalog row to the shape the audio player expects. The two types
  * differ in metadata (catalog has like/owner counts, library has added_at)
@@ -479,8 +480,8 @@ export function CatalogRow({
       }`}
     >
       <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
-        {isCurrent && player.isPlaying ? (
-          <span className="text-hot">▶</span>
+        {isCurrent ? (
+          <NowPlayingTick playing={player.isPlaying} />
         ) : (
           String(position).padStart(2, '0')
         )}

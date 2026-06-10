@@ -273,3 +273,34 @@ body::after {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* Now-playing equalizer tick (NowPlayingTick) — marks the active row. */
+.nptick {
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  width: 1em;
+  height: 0.95em;
+  vertical-align: middle;
+}
+.nptick > span {
+  width: 3px;
+  height: 35%;
+  border-radius: 1px;
+  background: var(--color-cool);
+  box-shadow: 0 0 4px var(--color-cool);
+}
+.nptick[data-playing='true'] > span {
+  animation: nptick 0.9s ease-in-out infinite;
+}
+.nptick > span:nth-child(1) { animation-delay: -0.20s; }
+.nptick > span:nth-child(2) { animation-delay: -0.55s; }
+.nptick > span:nth-child(3) { animation-delay: -0.35s; }
+@keyframes nptick {
+  0%, 100% { height: 30%; }
+  50% { height: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nptick > span { animation: none !important; height: 70%; }
+}

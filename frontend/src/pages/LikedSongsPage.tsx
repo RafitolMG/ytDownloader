@@ -3,11 +3,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { EmptyState } from '@/shared/ui/EmptyState'
+import { useToast } from '@/shared/ui/ToastProvider'
 import { api } from '@/shared/api/client'
 import type { LibraryItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { AddToPlaylistMenu } from '@/features/playlists/AddToPlaylistMenu'
+import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
 
 type LikedSort = 'recent' | 'title' | 'artist'
 const SORTS: { id: LikedSort; label: string }[] = [
@@ -181,12 +183,28 @@ function LikedRow({
 }) {
   const player = useAudioPlayer()
   const queryClient = useQueryClient()
+  const showToast = useToast()
   const remove = useMutation({
     mutationFn: () =>
       api.removeFromLibrary(track.video_id, track.codec, track.bitrate),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['library'] })
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
+      showToast({
+        message: `removed "${track.title ?? track.video_id}" from liked`,
+        variant: 'success',
+        action: {
+          label: 'undo',
+          onClick: () => {
+            void api
+              .catalogAdopt(track.video_id, track.codec, track.bitrate)
+              .then(() => {
+                queryClient.invalidateQueries({ queryKey: ['library'] })
+                queryClient.invalidateQueries({ queryKey: ['catalog'] })
+              })
+          },
+        },
+      })
     },
   })
   const isCurrent =
@@ -202,8 +220,8 @@ function LikedRow({
       }`}
     >
       <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
-        {isCurrent && player.isPlaying ? (
-          <span className="text-hot">▶</span>
+        {isCurrent ? (
+          <NowPlayingTick playing={player.isPlaying} />
         ) : (
           String(position).padStart(2, '0')
         )}
