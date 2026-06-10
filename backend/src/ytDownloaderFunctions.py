@@ -64,6 +64,57 @@ def _resolve_cookies_file() -> str | None:
     return None
 
 
+def get_cookies_expiry() -> dict | None:
+    """Parse the resolved Netscape cookies.txt for expiry info so the admin panel
+    can warn BEFORE YouTube auth lapses (the worst silent prod failure — a stale
+    cookie just starts 503ing extraction). Pure file parse, no yt-dlp call.
+
+    Returns {total, expired_count, min_expiry (unix|None), days_remaining (int|
+    None)} or None when no cookies file is configured. NEVER returns cookie
+    names/values. Fails soft to None on any read/parse error.
+    """
+    import time as _time
+
+    path = _resolve_cookies_file()
+    if not path:
+        return None
+    now = _time.time()
+    expiries: list[float] = []
+    expired = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                line = raw.rstrip("\n")
+                # Comments start with '#', EXCEPT the '#HttpOnly_' prefix which
+                # marks a real cookie line in many exports.
+                if line.startswith("#") and not line.startswith("#HttpOnly_"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                try:
+                    exp = float(parts[4])  # Netscape field 5 (0-indexed 4)
+                except ValueError:
+                    continue
+                if exp <= 0:
+                    continue  # session cookie — no expiry
+                expiries.append(exp)
+                if exp < now:
+                    expired += 1
+    except OSError:
+        return None
+
+    if not expiries:
+        return {"total": 0, "expired_count": expired, "min_expiry": None, "days_remaining": None}
+    min_exp = min(expiries)
+    return {
+        "total": len(expiries),
+        "expired_count": expired,
+        "min_expiry": int(min_exp),
+        "days_remaining": int((min_exp - now) // 86400),
+    }
+
+
 def _get_cookie_opts() -> dict:
     """
     Return the yt-dlp options common to every YouTube call: cookies (to avoid

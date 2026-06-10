@@ -410,6 +410,13 @@ export type AdminSystem = {
     configured: boolean
     source: 'data' | 'file' | 'repo' | 'none'
     error: string | null
+    /** Expiry summary parsed from cookies.txt; null when no cookies file is set. */
+    expiry: {
+      total: number
+      expired_count: number
+      min_expiry: number | null
+      days_remaining: number | null
+    } | null
   }
   extraction: {
     ok: boolean | null

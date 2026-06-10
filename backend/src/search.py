@@ -29,8 +29,14 @@ log = logging.getLogger(__name__)
 # ── TTL cache ─────────────────────────────────────────────────────────────────
 
 class _TTLCache:
-    def __init__(self, ttl_seconds: int) -> None:
+    """Tiny TTL cache with a hard size cap. Keys are user-controlled (search
+    queries, video ids), so without `max_entries` the store grows unbounded over
+    a long-running process — a real OOM risk on the small Oracle ARM box. The cap
+    evicts oldest-first (dicts preserve insertion order)."""
+
+    def __init__(self, ttl_seconds: int, max_entries: int = 512) -> None:
         self.ttl = ttl_seconds
+        self.max_entries = max_entries
         self._store: dict[str, tuple[Any, float]] = {}
 
     def get(self, key: str) -> Any | None:
@@ -44,7 +50,11 @@ class _TTLCache:
         return value
 
     def set(self, key: str, value: Any) -> None:
+        # Refresh recency on re-set, then drop the oldest entries over the cap.
+        self._store.pop(key, None)
         self._store[key] = (value, time.time())
+        while len(self._store) > self.max_entries:
+            self._store.pop(next(iter(self._store)), None)
 
 
 _SUGGEST_CACHE = _TTLCache(ttl_seconds=60)
@@ -54,8 +64,8 @@ _SEARCH_CACHE = _TTLCache(ttl_seconds=300)
 _RELATED_CACHE = _TTLCache(ttl_seconds=900)
 # Album search fans out one yt-dlp call per album just to fetch its title/cover,
 # so it's the slowest endpoint — cache results (and individual albums) for long.
-_ALBUM_SEARCH_CACHE = _TTLCache(ttl_seconds=1800)
-_ALBUM_CACHE = _TTLCache(ttl_seconds=1800)
+_ALBUM_SEARCH_CACHE = _TTLCache(ttl_seconds=1800, max_entries=200)
+_ALBUM_CACHE = _TTLCache(ttl_seconds=1800, max_entries=200)
 
 
 # ── Suggest (autocomplete strings) ────────────────────────────────────────────
