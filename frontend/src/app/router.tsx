@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import CapturePage from '@/pages/CapturePage'
 import QueuePage from '@/pages/QueuePage'
 import CatalogPage from '@/pages/CatalogPage'
+import AlbumsPage from '@/pages/AlbumsPage'
 import PlaylistsPage from '@/pages/PlaylistsPage'
 import PlaylistDetailPage from '@/pages/PlaylistDetailPage'
 import LikedSongsPage from '@/pages/LikedSongsPage'
@@ -36,6 +37,14 @@ export function AppRouter() {
         element={
           <RequireAuth>
             <CatalogPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/albums"
+        element={
+          <RequireAuth>
+            <AlbumsPage />
           </RequireAuth>
         }
       />

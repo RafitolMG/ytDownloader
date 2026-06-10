@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import yt_dlp
@@ -50,6 +52,10 @@ _SEARCH_CACHE = _TTLCache(ttl_seconds=300)
 # Mixes barely shift over a session and each call is a 1-3s yt-dlp round-trip,
 # so cache them longer than plain searches.
 _RELATED_CACHE = _TTLCache(ttl_seconds=900)
+# Album search fans out one yt-dlp call per album just to fetch its title/cover,
+# so it's the slowest endpoint — cache results (and individual albums) for long.
+_ALBUM_SEARCH_CACHE = _TTLCache(ttl_seconds=1800)
+_ALBUM_CACHE = _TTLCache(ttl_seconds=1800)
 
 
 # ── Suggest (autocomplete strings) ────────────────────────────────────────────
@@ -205,3 +211,170 @@ def related(video_id: str, limit: int = 20) -> list[dict]:
     ]
     _RELATED_CACHE.set(video_id, results)
     return results
+
+
+# ── Albums (YouTube Music) ────────────────────────────────────────────────────
+# YouTube Music models an album as a browse page (id `MPREb…`) or a playlist
+# (id `OLAK5uy_…`), both of which yt-dlp extracts as a normal playlist of the
+# album's tracks. Album *search* is the `#albums` filter on the YTM search URL —
+# it returns album browse ids with no titles, so we fetch each album's metadata
+# (title/cover/artist) with a second flat extraction, fanned out across threads.
+
+_ALBUM_TITLE_PREFIXES = ("Album - ", "Single - ", "EP - ", "Playlist - ")
+
+
+def _is_album_id(vid: str) -> bool:
+    return vid.startswith("MPREb") or vid.startswith("OLAK5uy_")
+
+
+def album_browse_url(album_id: str) -> str:
+    """Canonical URL yt-dlp resolves into the album's track playlist. Also what
+    the frontend hands to the playlist-download flow to grab the whole album."""
+    if album_id.startswith("OLAK5uy_"):
+        return f"https://music.youtube.com/playlist?list={album_id}"
+    return f"https://music.youtube.com/browse/{album_id}"
+
+
+def _strip_album_prefix(title: str | None) -> str | None:
+    if not title:
+        return title
+    for p in _ALBUM_TITLE_PREFIXES:
+        if title.startswith(p):
+            return title[len(p):].strip() or title
+    return title
+
+
+def _entry_thumb(entry: dict) -> str | None:
+    thumb = entry.get("thumbnail")
+    if not thumb:
+        thumbs = entry.get("thumbnails") or []
+        if thumbs:
+            thumb = thumbs[-1].get("url")
+    vid = entry.get("id")
+    if not thumb and vid:
+        # i.ytimg always has a thumbnail for a real video id — reliable fallback.
+        thumb = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+    return thumb
+
+
+def _extract_album_raw(album_id: str) -> dict | None:
+    """Flat-extract an album's track playlist. Returns the raw yt-dlp info."""
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",
+        "skip_download": True,
+        "ignore_no_formats_error": True,
+        **_get_cookie_opts(),
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(album_browse_url(album_id), download=False)
+    except Exception as e:
+        log.warning("album extract failed for %r: %s", album_id, e)
+        return None
+
+
+def _album_header(album_id: str, info: dict, entries: list[dict]) -> dict:
+    first = entries[0] if entries else {}
+    return {
+        "album_id": album_id,
+        "title": _strip_album_prefix(info.get("title")),
+        "artist": first.get("channel") or first.get("uploader") or first.get("artist"),
+        "thumbnail": _entry_thumb(first) if entries else info.get("thumbnail"),
+        "track_count": info.get("playlist_count") or len(entries),
+        "url": album_browse_url(album_id),
+    }
+
+
+def _album_card(album_id: str) -> dict | None:
+    """Lightweight album summary (header only) for the search grid."""
+    info = _extract_album_raw(album_id)
+    if not info:
+        return None
+    entries = [e for e in (info.get("entries") or []) if e and e.get("id")]
+    if not entries:
+        return None
+    return _album_header(album_id, info, entries)
+
+
+def search_albums(q: str, limit: int = 12) -> list[dict]:
+    """Search YouTube Music for albums matching `q`.
+
+    Two-stage: the `#albums` search filter yields album browse ids (no titles in
+    flat mode), then each album's title/cover/artist is fetched concurrently.
+    Best-effort and heavily cached — returns [] on any upstream failure.
+    """
+    q = q.strip()
+    if not q:
+        return []
+    limit = max(1, min(limit, 16))
+
+    cache_key = f"{limit}:{q.lower()}"
+    cached = _ALBUM_SEARCH_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",
+        "skip_download": True,
+        "ignore_no_formats_error": True,
+        **_get_cookie_opts(),
+    }
+    url = f"https://music.youtube.com/search?q={quote(q)}#albums"
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        log.warning("album search failed for q=%r: %s", q, e)
+        return []
+
+    album_ids: list[str] = []
+    for e in (info or {}).get("entries") or []:
+        if not e:
+            continue
+        vid = e.get("id") or ""
+        if _is_album_id(vid) and vid not in album_ids:
+            album_ids.append(vid)
+        if len(album_ids) >= limit:
+            break
+
+    if not album_ids:
+        _ALBUM_SEARCH_CACHE.set(cache_key, [])
+        return []
+
+    def _safe(aid: str) -> dict | None:
+        try:
+            return _album_card(aid)
+        except Exception:
+            log.warning("album card failed for %r", aid, exc_info=True)
+            return None
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        cards = [c for c in ex.map(_safe, album_ids) if c]
+
+    _ALBUM_SEARCH_CACHE.set(cache_key, cards)
+    return cards
+
+
+def get_album(album_id: str) -> dict | None:
+    """Full album: header + the ordered tracklist (shaped like search results)."""
+    album_id = (album_id or "").strip()
+    if not album_id:
+        return None
+
+    cached = _ALBUM_CACHE.get(album_id)
+    if cached is not None:
+        return cached
+
+    info = _extract_album_raw(album_id)
+    if not info:
+        return None
+    entries = [e for e in (info.get("entries") or []) if e and e.get("id")]
+    tracks = [shaped for e in entries if (shaped := _shape_entry(e)) is not None]
+
+    result = {**_album_header(album_id, info, entries), "tracks": tracks}
+    _ALBUM_CACHE.set(album_id, result)
+    return result

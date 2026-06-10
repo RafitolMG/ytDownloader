@@ -9,6 +9,7 @@ import { NavLink } from 'react-router-dom'
 const TABS: { to: string; icon: string; label: string }[] = [
   { to: '/', icon: '▶', label: 'capture' },
   { to: '/catalog', icon: '⊕', label: 'catalog' },
+  { to: '/albums', icon: '◉', label: 'albums' },
   { to: '/playlists', icon: '≣', label: 'playlists' },
 ]
 
