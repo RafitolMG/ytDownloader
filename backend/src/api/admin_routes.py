@@ -1,0 +1,204 @@
+"""
+Admin panel backend API. Every route here is gated by `require_admin`
+(401 unauth → 403 non-admin → pass admin) and returns the exact JSON shapes
+the admin SPA expects.
+
+Filesystem work (file_exists checks, on-disk byte sums, os.remove) lives HERE,
+not in db.py — the db layer only knows rows. The extraction-health probe is
+reused from the public routes module via a lazy import to avoid an import-time
+cycle (routes imports this module's router).
+"""
+from __future__ import annotations
+
+import os
+import re
+import shutil
+
+import yt_dlp
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from src import config, db, ytDownloaderFunctions
+from src.auth import CurrentUser, require_admin
+
+router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+# Mirrors routes.py:1759 — a YouTube video id is 11 url-safe base64 chars.
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+@router.get("/overview")
+def overview(user: CurrentUser = Depends(require_admin)) -> dict:
+    """Platform totals for the Overview stat cards."""
+    data = db.admin_overview()
+    data["yt_dlp_version"] = yt_dlp.version.__version__
+    return data
+
+
+@router.get("/users")
+def users(user: CurrentUser = Depends(require_admin)) -> dict:
+    """Per-user roster table."""
+    return {"users": db.admin_list_users()}
+
+
+@router.get("/jobs")
+def jobs(
+    status: str | None = None,
+    limit: int = 200,
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """All jobs across every owner (admin queue view). Reuses the existing
+    list_jobs (owner_id=None → every owner), then filters by status in Python
+    when the query param is supplied."""
+    rows = db.list_jobs(owner_id=None, limit=limit)
+    if status:
+        rows = [r for r in rows if r.get("status") == status]
+    return {"jobs": rows}
+
+
+@router.get("/tracks")
+def tracks(
+    orphans_only: bool = False,
+    sort: str = "largest",
+    limit: int = 200,
+    offset: int = 0,
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Storage management table. Adds file_exists per row (filesystem check
+    lives here, not in db)."""
+    rows = db.admin_list_tracks(
+        orphans_only=orphans_only, sort=sort, limit=limit, offset=offset,
+    )
+    for row in rows:
+        row["file_exists"] = os.path.isfile(row["file_path"])
+    return {"tracks": rows}
+
+
+@router.delete("/tracks/{video_id}/{codec}/{bitrate}")
+def delete_track(
+    video_id: str,
+    codec: str,
+    bitrate: str,
+    force: bool = False,
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Hard-delete one master track row + its file on disk.
+
+    Refuses (409) while the track is still owned unless force=true. The
+    file_path comes from the trusted DB; os.remove is still wrapped so a
+    missing file (already gone) doesn't error the request."""
+    if not VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=422, detail="invalid video id")
+
+    owner_count = db.count_owners(video_id, codec, bitrate)
+    if owner_count > 0 and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=f"track still owned by {owner_count} user(s); pass force=true to delete anyway",
+        )
+
+    # Capture the file size before deleting the row so we can report bytes freed.
+    existing = db.get_track(video_id, codec, bitrate)
+    file_size = (existing or {}).get("file_size") or 0
+
+    path = db.delete_track_master(video_id, codec, bitrate)
+    if path is None:
+        raise HTTPException(status_code=404, detail="track not found")
+
+    # The master row is already gone; never let a stubborn file on disk turn
+    # that into a 500 (which would orphan the file with no row to reclaim it).
+    bytes_reclaimed = 0
+    try:
+        os.remove(path)
+        bytes_reclaimed = file_size
+    except FileNotFoundError:
+        bytes_reclaimed = 0
+    except OSError:
+        # PermissionError / IsADirectoryError / network-mount errors: the row
+        # is deleted, so swallow and report 0 reclaimed rather than erroring.
+        bytes_reclaimed = 0
+
+    return {
+        "ok": True,
+        "deleted": True,
+        "bytes_reclaimed": bytes_reclaimed,
+        "owner_count": owner_count,
+    }
+
+
+@router.post("/tracks/cleanup-orphans")
+def cleanup_orphans(user: CurrentUser = Depends(require_admin)) -> dict:
+    """Delete every orphan master (owner_count==0) plus its file. Orphans never
+    need force — they have no owners by definition."""
+    deleted = 0
+    bytes_reclaimed = 0
+    for orphan in db.admin_orphan_tracks():
+        path = orphan["file_path"]
+        file_size = orphan.get("file_size") or 0
+        existed = False
+        try:
+            os.remove(path)
+            existed = True
+        except OSError:
+            # FileNotFoundError or any other OS error (permission, network
+            # mount): treat as not-existed and keep cleaning the rest of the
+            # batch instead of aborting the loop mid-way.
+            existed = False
+        db.delete_track_master(orphan["video_id"], orphan["codec"], orphan["bitrate"])
+        deleted += 1
+        if existed:
+            bytes_reclaimed += file_size
+    return {"deleted": deleted, "bytes_reclaimed": bytes_reclaimed}
+
+
+@router.get("/system")
+def system(user: CurrentUser = Depends(require_admin)) -> dict:
+    """System health panel: yt-dlp version, cookies config status, cached
+    extraction probe, DB path+size, LIBRARY_DIR disk usage."""
+    # Cookies status.
+    resolved = ytDownloaderFunctions._resolve_cookies_file()
+    if config.YT_COOKIES_DATA and ytDownloaderFunctions._COOKIES_DATA_PATH:
+        source = "data"
+    elif config.YT_COOKIES_FILE and resolved:
+        source = "file"
+    elif resolved:
+        source = "repo"
+    else:
+        source = "none"
+    cookies = {
+        "configured": resolved is not None,
+        "source": source,
+        "error": ytDownloaderFunctions._COOKIES_DATA_ERROR,
+    }
+
+    # Extraction probe — lazy import to avoid an import-time cycle (routes
+    # imports admin_router from this module).
+    from src.api import routes as _routes
+    probe = _routes._run_extraction_probe()
+    extraction = {
+        "ok": probe["ok"],
+        "error": probe["error"],
+        "checked_at": probe["checked_at"],
+    }
+
+    # DB file.
+    db_path = db._DB_PATH
+    db_size = os.path.getsize(db_path) if os.path.isfile(db_path) else 0
+
+    # Library disk usage. Ensure the dir exists so disk_usage doesn't raise on
+    # a fresh deploy.
+    os.makedirs(config.LIBRARY_DIR, exist_ok=True)
+    usage = shutil.disk_usage(config.LIBRARY_DIR)
+
+    return {
+        "yt_dlp_version": yt_dlp.version.__version__,
+        "cookies": cookies,
+        "extraction": extraction,
+        "db": {"path": db_path, "size_bytes": db_size},
+        "library": {
+            "path": config.LIBRARY_DIR,
+            "used_bytes": usage.used,
+            "total_bytes": usage.total,
+            "free_bytes": usage.free,
+        },
+    }
