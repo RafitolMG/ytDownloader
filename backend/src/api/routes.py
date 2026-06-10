@@ -15,9 +15,11 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
+import yt_dlp
+
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -80,6 +82,7 @@ def _init_db():
     import logging
     log = logging.getLogger("uvicorn.error")
     db.init()
+    log.info("yt-dlp version: %s", yt_dlp.version.__version__)
     if config.DEV_AUTH_BYPASS:
         banner = "█" * 60
         log.warning("\n%s\n  DEV_AUTH_BYPASS=1 — every request is treated as ADMIN.\n  DO NOT run this build in production.\n%s", banner, banner)
@@ -1120,14 +1123,12 @@ def catalog_suggestions(
     known_ids = {it["video_id"] for it in catalog}
 
     # A few seeds is plenty — each Mix returns ~12 related videos and fetching
-    # them is the slow part (one yt-dlp call each, cached 15min after).
-    mixes: list[list[dict]] = []
-    for seed in catalog[:4]:
-        try:
-            mixes.append(search_mod.related(seed["video_id"], limit=12))
-        except Exception:
-            traceback.print_exc()
-            mixes.append([])
+    # them is the slow part (one yt-dlp call each, cached 15min after). Fetched
+    # concurrently so a cold request overlaps the round-trips instead of paying
+    # them serially.
+    seed_ids = [seed["video_id"] for seed in catalog[:4]]
+    rel_map = search_mod.related_many(seed_ids, limit=12)
+    mixes: list[list[dict]] = [rel_map.get(vid, []) for vid in seed_ids]
 
     seen: set[str] = set()
     suggestions: list[dict] = []
@@ -1401,7 +1402,10 @@ def daily_mixes(
 
     catalog_ids = {t["video_id"] for t in pool}
 
-    mixes: list[dict] = []
+    # Pass 1: build each mix's playable tracklist. Defer the related() fetch so
+    # all seeds can be fetched concurrently in one batch (below) rather than one
+    # blocking round-trip per mix.
+    built: list[dict] = []
     for i, anchor in enumerate(todays):
         lead = db.list_tracks_by_artist(user.user_id, anchor, limit=size)
         random.Random(day_seed * 7 + i).shuffle(lead)
@@ -1413,39 +1417,40 @@ def daily_mixes(
         tracks = (lead + rest)[:size]
         if len(tracks) < 4:
             continue  # too thin to be a "mix"
-
-        # Sprinkle in not-yet-downloaded tracks related to the mix's lead so the
-        # mix keeps growing beyond the catalog — playing one downloads it (to the
-        # shared catalog, without favouriting). Cached per seed; best-effort.
-        externals: list[dict] = []
-        seed_vid = tracks[0]["video_id"] if tracks else None
-        if seed_vid:
-            try:
-                rel = search_mod.related(seed_vid, limit=18)
-            except Exception:
-                traceback.print_exc()
-                rel = []
-            seen_e: set[str] = set()
-            for entry in rel:
-                if len(externals) >= 8:
-                    break
-                vid = entry.get("id")
-                if not vid or vid in catalog_ids or vid in seen_e:
-                    continue
-                seen_e.add(vid)
-                item = _external_item(entry)
-                if not _is_music_candidate(item, strict=False):
-                    continue
-                externals.append(item)
-
         # "<Artist> - Topic" is YouTube's auto-channel naming — show just the artist.
         subtitle = anchor[: -len(" - Topic")] if anchor.endswith(" - Topic") else anchor
+        built.append({"i": i, "tracks": tracks, "subtitle": subtitle})
+
+    # Sprinkle in not-yet-downloaded tracks related to each mix's lead so the mix
+    # keeps growing beyond the catalog — playing one downloads it (to the shared
+    # catalog, without favouriting). All seeds fetched concurrently; best-effort.
+    rel_map = search_mod.related_many(
+        [b["tracks"][0]["video_id"] for b in built], limit=18,
+    )
+
+    mixes: list[dict] = []
+    for b in built:
+        i = b["i"]
+        externals: list[dict] = []
+        seen_e: set[str] = set()
+        for entry in rel_map.get(b["tracks"][0]["video_id"], []):
+            if len(externals) >= 8:
+                break
+            vid = entry.get("id")
+            if not vid or vid in catalog_ids or vid in seen_e:
+                continue
+            seen_e.add(vid)
+            item = _external_item(entry)
+            if not _is_music_candidate(item, strict=False):
+                continue
+            externals.append(item)
+
         mixes.append({
             "id": f"daily-{day_seed}-{i}",
             "title": f"Daily Mix {i + 1}",
-            "subtitle": subtitle,
+            "subtitle": b["subtitle"],
             "accent": ("hot", "cool", "violet")[i % 3],
-            "tracks": tracks,
+            "tracks": b["tracks"],
             "external": externals,
         })
 
@@ -1992,6 +1997,63 @@ def search_history(
         if len(items) >= limit:
             break
     return {"items": items}
+
+
+# ── Health ─────────────────────────────────────────────────────────────────────
+# yt-dlp is pinned for reproducibility, which means a YouTube-side change can
+# silently break extraction with no version bump to notice. These endpoints make
+# that observable: /api/health is a cheap liveness + version probe; the
+# extraction check actually exercises yt-dlp against a known-stable video and
+# returns 503 when it can't, so an uptime monitor can alert before users notice.
+
+_HEALTH_PROBE_TTL = 300.0
+# yt-dlp's own canonical test video — tiny, public, and effectively permanent.
+_HEALTH_PROBE_URL = "https://www.youtube.com/watch?v=BaW_jenozKc"
+_health_probe: dict = {"checked_at": 0.0, "ok": None, "error": None}
+_health_probe_lock = threading.Lock()
+
+
+def _run_extraction_probe() -> dict:
+    """Cached real-extraction check. The 5-min TTL (and lock) means a flood of
+    health hits can't turn into a yt-dlp request flood."""
+    now = time.time()
+    with _health_probe_lock:
+        if _health_probe["ok"] is not None and now - _health_probe["checked_at"] < _HEALTH_PROBE_TTL:
+            return dict(_health_probe)
+        ok = False
+        error = None
+        try:
+            info = ytDownloaderFunctions.get_basic_info(_HEALTH_PROBE_URL)
+            ok = bool(info.get("title"))
+            if not ok:
+                error = "extraction returned no title"
+        except Exception as e:
+            error = str(e)
+        _health_probe.update(checked_at=now, ok=ok, error=error)
+        return dict(_health_probe)
+
+
+@app.get("/api/health")
+def health():
+    """Liveness + pinned yt-dlp version. Cheap and unauthenticated so the
+    platform health check / uptime monitor can hit it freely."""
+    return {"status": "ok", "yt_dlp_version": yt_dlp.version.__version__}
+
+
+@app.get("/api/health/extraction")
+def health_extraction():
+    """Can yt-dlp still pull metadata from YouTube? Cached 5min. Returns 503 when
+    extraction is broken (bad cookies, YouTube change, stale yt-dlp) so it can be
+    alerted on."""
+    probe = _run_extraction_probe()
+    body = {
+        "status": "ok" if probe["ok"] else "degraded",
+        "extraction_ok": bool(probe["ok"]),
+        "error": probe["error"],
+        "yt_dlp_version": yt_dlp.version.__version__,
+        "checked_at": probe["checked_at"],
+    }
+    return body if probe["ok"] else JSONResponse(status_code=503, content=body)
 
 
 # ── SPA fallback ──────────────────────────────────────────────────────────────
