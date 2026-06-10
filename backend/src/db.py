@@ -1243,3 +1243,135 @@ def reorder_playlist(
             (_now(), playlist_id),
         )
         return len(final)
+
+
+# ── Admin ──────────────────────────────────────────────────────────────────────
+# Platform-wide aggregates and management worklists. Reads only — destructive
+# actions reuse the existing `count_owners` / `delete_track_master`. The HTTP
+# route layer adds filesystem-derived fields (file_exists, on-disk byte sums)
+# and the yt-dlp version; nothing here touches the disk.
+
+_ADMIN_TRACK_SORTS = {
+    'largest':  't.file_size DESC',
+    'smallest': 't.file_size ASC',
+    'newest':   't.downloaded_at DESC',
+    'oldest':   't.downloaded_at ASC',
+    'popular':  'owner_count DESC, t.downloaded_at DESC',
+}
+
+
+def admin_overview() -> dict[str, Any]:
+    """Single-pass aggregate of platform totals for the admin Overview cards.
+
+    Distinct users come from `sessions` (one identity may hold several sessions).
+    `active_jobs` counts jobs in any in-flight status. The yt-dlp version is
+    appended by the route, not here."""
+    conn = _get_conn()
+    active_q = ",".join("?" * len(ACTIVE_STATUSES))
+    users = conn.execute(
+        "SELECT COUNT(DISTINCT user_id) AS n FROM sessions"
+    ).fetchone()
+    tracks = conn.execute(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(file_size), 0) AS storage FROM tracks"
+    ).fetchone()
+    plays = conn.execute("SELECT COUNT(*) AS n FROM plays").fetchone()
+    active_jobs = conn.execute(
+        f"SELECT COUNT(*) AS n FROM jobs WHERE status IN ({active_q})",
+        ACTIVE_STATUSES,
+    ).fetchone()
+    playlists = conn.execute("SELECT COUNT(*) AS n FROM playlists").fetchone()
+    schema = conn.execute(
+        "SELECT version FROM schema_meta LIMIT 1"
+    ).fetchone()
+    return {
+        "users": int(users["n"]),
+        "tracks": int(tracks["n"]),
+        "storage_bytes": int(tracks["storage"]),
+        "plays": int(plays["n"]),
+        "active_jobs": int(active_jobs["n"]),
+        "playlists": int(playlists["n"]),
+        "schema_version": int(schema["version"]) if schema else 0,
+    }
+
+
+def admin_list_users() -> list[dict[str, Any]]:
+    """Per-user roster: one row per distinct `sessions.user_id`. Username/role
+    reflect the most recent session (by last_seen_at); `last_seen_at` is the max
+    across sessions. Library/play counts are LEFT-JOINed from `track_owners`
+    (owner_id) and `plays` (user_id), so a user with neither still appears."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT
+            s.user_id AS user_id,
+            (SELECT s2.username FROM sessions s2
+              WHERE s2.user_id = s.user_id
+              ORDER BY s2.last_seen_at DESC LIMIT 1) AS username,
+            (SELECT s3.role FROM sessions s3
+              WHERE s3.user_id = s.user_id
+              ORDER BY s3.last_seen_at DESC LIMIT 1) AS role,
+            MAX(s.last_seen_at) AS last_seen_at,
+            (SELECT COUNT(*) FROM track_owners o
+              WHERE o.owner_id = s.user_id) AS library_count,
+            (SELECT COUNT(*) FROM plays p
+              WHERE p.user_id = s.user_id) AS play_count
+          FROM sessions s
+         GROUP BY s.user_id
+         ORDER BY last_seen_at DESC
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def admin_list_tracks(
+    *,
+    orphans_only: bool = False,
+    sort: str = 'largest',
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Catalog tracks for the storage-management table. Each row carries
+    `owner_count` (number of users who have it in their library); `orphans_only`
+    restricts to owner_count == 0. `sort` is one of `_ADMIN_TRACK_SORTS`
+    (unknown → 'largest'). The route adds `file_exists` per row — no fs access
+    here."""
+    order_by = _ADMIN_TRACK_SORTS.get(sort, _ADMIN_TRACK_SORTS['largest'])
+    having = "HAVING owner_count = 0" if orphans_only else ""
+    conn = _get_conn()
+    rows = conn.execute(
+        f"""
+        SELECT
+            t.video_id, t.codec, t.bitrate, t.title, t.artist, t.album,
+            t.duration_sec, t.file_path, t.file_size, t.downloaded_at,
+            (SELECT COUNT(*) FROM track_owners o
+              WHERE o.video_id = t.video_id
+                AND o.codec    = t.codec
+                AND o.bitrate  = t.bitrate) AS owner_count
+          FROM tracks t
+         GROUP BY t.video_id, t.codec, t.bitrate
+         {having}
+         ORDER BY {order_by}
+         LIMIT ? OFFSET ?
+        """,
+        (limit, offset),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def admin_orphan_tracks() -> list[dict[str, Any]]:
+    """Every master track with no owners (owner_count == 0) — the worklist the
+    cleanup-orphans route iterates to rm files + call `delete_track_master`.
+    Minimal projection (no metadata); no fs access here."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT t.video_id, t.codec, t.bitrate, t.file_path, t.file_size
+          FROM tracks t
+         WHERE NOT EXISTS(
+                SELECT 1 FROM track_owners o
+                 WHERE o.video_id = t.video_id
+                   AND o.codec    = t.codec
+                   AND o.bitrate  = t.bitrate)
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]

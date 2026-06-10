@@ -30,6 +30,7 @@ from src import (
     search as search_mod,
     ytDownloaderFunctions,
 )
+from src.api.admin_routes import router as admin_router
 from src.api.auth_routes import router as auth_router
 from src.auth import CurrentUser, current_user
 
@@ -53,6 +54,7 @@ if config.FRONTEND_ORIGIN:
     )
 
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 # SPA assets (compiled by Vite). In dev the SPA runs on its own port and this
 # mount stays empty; in the Docker image the multi-stage build drops dist/ at

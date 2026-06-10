@@ -35,6 +35,8 @@ export type JobRow = {
   created_at: string
   started_at: string | null
   completed_at: string | null
+  /** Owning user — only populated on the admin jobs view (all owners). */
+  owner_id?: string | null
 }
 
 export type FormatInfo = {
@@ -342,6 +344,85 @@ export type PlaylistDetail = {
 
 export type PlaylistsResponse = {
   items: PlaylistSummary[]
+}
+
+// ── Admin ──────────────────────────────────────────────────────────────────
+
+export type AdminOverview = {
+  users: number
+  tracks: number
+  storage_bytes: number
+  plays: number
+  active_jobs: number
+  playlists: number
+  schema_version: number
+  yt_dlp_version: string
+}
+
+export type AdminUser = {
+  user_id: string
+  username: string
+  role: string
+  last_seen_at: string
+  library_count: number
+  play_count: number
+}
+
+export type AdminUsersResponse = { users: AdminUser[] }
+
+// Reuses the existing JobRow type (admin sees the same rows across all owners).
+export type AdminJobsResponse = { jobs: JobRow[] }
+
+export type AdminTrackSort = 'largest' | 'smallest' | 'newest' | 'oldest' | 'popular'
+
+export type AdminTrack = {
+  video_id: string
+  codec: string
+  bitrate: string
+  title: string | null
+  artist: string | null
+  album: string | null
+  duration_sec: number | null
+  file_path: string
+  file_size: number | null
+  downloaded_at: string
+  owner_count: number
+  file_exists: boolean
+}
+
+export type AdminTracksResponse = { tracks: AdminTrack[] }
+
+export type AdminDeleteTrackResponse = {
+  ok: true
+  deleted: true
+  bytes_reclaimed: number
+  owner_count: number
+}
+
+export type AdminCleanupResponse = {
+  deleted: number
+  bytes_reclaimed: number
+}
+
+export type AdminSystem = {
+  yt_dlp_version: string
+  cookies: {
+    configured: boolean
+    source: 'data' | 'file' | 'repo' | 'none'
+    error: string | null
+  }
+  extraction: {
+    ok: boolean | null
+    error: string | null
+    checked_at: number
+  }
+  db: { path: string; size_bytes: number }
+  library: {
+    path: string
+    used_bytes: number
+    total_bytes: number
+    free_bytes: number
+  }
 }
 
 export type WsEvent =
