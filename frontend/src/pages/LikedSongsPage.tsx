@@ -1,12 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
+import { EmptyState } from '@/shared/ui/EmptyState'
 import { api } from '@/shared/api/client'
 import type { LibraryItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { AddToPlaylistMenu } from '@/features/playlists/AddToPlaylistMenu'
+
+type LikedSort = 'recent' | 'title' | 'artist'
+const SORTS: { id: LikedSort; label: string }[] = [
+  { id: 'recent', label: 'recent' },
+  { id: 'title', label: 'title a→z' },
+  { id: 'artist', label: 'artist a→z' },
+]
 
 /** "Liked Songs" — the user's saved/owned tracks, surfaced as a pinned playlist
  * in the Playlists section (Spotify-style) rather than in the catalog. */
@@ -14,6 +22,13 @@ export default function LikedSongsPage() {
   const jobsQuery = useJobs()
   const activeCount = countActive(jobsQuery.data)
   const [query, setQuery] = useState('')
+  const [sort, setSort] = useState<LikedSort>(() => {
+    const s = localStorage.getItem('ytdl.liked.sort')
+    return s === 'title' || s === 'artist' || s === 'recent' ? s : 'recent'
+  })
+  useEffect(() => {
+    localStorage.setItem('ytdl.liked.sort', sort)
+  }, [sort])
   const player = useAudioPlayer()
 
   const libraryQuery = useQuery({
@@ -25,11 +40,26 @@ export default function LikedSongsPage() {
   const items = libraryQuery.data?.items ?? []
   const trimmed = query.trim().toLowerCase()
   const filtered = useMemo<LibraryItem[]>(() => {
-    if (!trimmed) return items
-    return items.filter((t) =>
-      `${t.title ?? ''} ${t.artist ?? ''}`.toLowerCase().includes(trimmed),
-    )
-  }, [trimmed, items])
+    const matched = trimmed
+      ? items.filter((t) =>
+          `${t.title ?? ''} ${t.artist ?? ''}`.toLowerCase().includes(trimmed),
+        )
+      : items
+    const out = [...matched]
+    if (sort === 'title') {
+      out.sort((a, b) =>
+        (a.title ?? '').localeCompare(b.title ?? '', undefined, { sensitivity: 'base' }),
+      )
+    } else if (sort === 'artist') {
+      out.sort((a, b) =>
+        (a.artist ?? '').localeCompare(b.artist ?? '', undefined, { sensitivity: 'base' }),
+      )
+    } else {
+      // recent: newest added first (added_at is an ISO string → lexicographic = chronological)
+      out.sort((a, b) => (b.added_at ?? '').localeCompare(a.added_at ?? ''))
+    }
+    return out
+  }, [trimmed, items, sort])
 
   return (
     <div className="relative z-10 min-h-full">
@@ -88,19 +118,36 @@ export default function LikedSongsPage() {
           )}
         </div>
 
+        {items.length > 0 && (
+          <div className="mb-4 flex items-center gap-2 flex-wrap">
+            {SORTS.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => setSort(s.id)}
+                className={`font-pixel text-xs uppercase tracking-widest px-2 py-1 border rounded-xs transition ${
+                  sort === s.id
+                    ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
+                    : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {libraryQuery.isLoading && (
           <div className="font-pixel text-ink-mid">··· loading ···</div>
         )}
 
         {libraryQuery.data && items.length === 0 && (
-          <div className="card-vapor rounded-sm p-8 text-center">
-            <div className="font-pixel text-lg text-ink-mid mb-2">
-              ⊹ no liked songs yet ⊹
-            </div>
-            <div className="font-pixel text-sm text-ink-lo">
-              tap ♡ on any track in the catalog to save it here.
-            </div>
-          </div>
+          <EmptyState
+            glyph="⊹"
+            title="no liked songs yet"
+            hint="tap ♡ on any track in the catalog to save it here."
+            cta={{ to: '/catalog', label: '⊕ browse the catalog' }}
+          />
         )}
 
         {filtered.length > 0 && (

@@ -12,6 +12,7 @@ const TABS: { to: string; icon: string; label: string }[] = [
   { to: '/catalog', icon: '⊕', label: 'catalog' },
   { to: '/albums', icon: '◉', label: 'albums' },
   { to: '/playlists', icon: '≣', label: 'playlists' },
+  { to: '/stats', icon: '★', label: 'stats' },
 ]
 
 const baseCls =
