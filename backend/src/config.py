@@ -85,3 +85,10 @@ LIBRARY_DIR: str = _env("LIBRARY_DIR", _DEFAULT_LIBRARY_DIR)
 # Empty strings = no cookies (fine for local dev on a residential IP).
 YT_COOKIES_DATA: str = _env("YT_COOKIES_DATA", "")
 YT_COOKIES_FILE: str = _env("YT_COOKIES_FILE", "")
+
+# Per-user rate limit on yt-dlp-bound endpoints (resolutions / search / discover
+# / album-search / category / radio). Generous enough that human browsing never
+# trips it (~1/sec sustained) but a script or spam can't saturate the extraction
+# threadpool or hammer YouTube against the shared cookies. ADMINs are exempt.
+RATELIMIT_PER_MIN: int = int(_env("YTDL_RATELIMIT_PER_MIN", "40"))
+RATELIMIT_WINDOW_SEC: int = int(_env("YTDL_RATELIMIT_WINDOW_SEC", "60"))
