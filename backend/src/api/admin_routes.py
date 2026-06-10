@@ -58,7 +58,6 @@ def jobs(
 
 @router.get("/tracks")
 def tracks(
-    orphans_only: bool = False,
     sort: str = "largest",
     limit: int = 200,
     offset: int = 0,
@@ -66,9 +65,7 @@ def tracks(
 ) -> dict:
     """Storage management table. Adds file_exists per row (filesystem check
     lives here, not in db)."""
-    rows = db.admin_list_tracks(
-        orphans_only=orphans_only, sort=sort, limit=limit, offset=offset,
-    )
+    rows = db.admin_list_tracks(sort=sort, limit=limit, offset=offset)
     for row in rows:
         row["file_exists"] = os.path.isfile(row["file_path"])
     return {"tracks": rows}
@@ -84,17 +81,26 @@ def delete_track(
 ) -> dict:
     """Hard-delete one master track row + its file on disk.
 
-    Refuses (409) while the track is still owned unless force=true. The
-    file_path comes from the trusted DB; os.remove is still wrapped so a
-    missing file (already gone) doesn't error the request."""
+    Refuses (409) while the track is still in use — owned by a user OR present in
+    any playlist — unless force=true. The playlist check matters because
+    playlist_tracks cascades on delete, so deleting a not-favourited-but-
+    playlisted track would silently strip it from those playlists. The file_path
+    comes from the trusted DB; os.remove is wrapped so a missing file (already
+    gone) doesn't error the request."""
     if not VIDEO_ID_RE.match(video_id):
         raise HTTPException(status_code=422, detail="invalid video id")
 
     owner_count = db.count_owners(video_id, codec, bitrate)
-    if owner_count > 0 and not force:
+    playlist_count = db.count_playlist_refs(video_id, codec, bitrate)
+    if (owner_count > 0 or playlist_count > 0) and not force:
+        reasons = []
+        if owner_count > 0:
+            reasons.append(f"owned by {owner_count} user(s)")
+        if playlist_count > 0:
+            reasons.append(f"in {playlist_count} playlist(s)")
         raise HTTPException(
             status_code=409,
-            detail=f"track still owned by {owner_count} user(s); pass force=true to delete anyway",
+            detail=f"track still in use ({', '.join(reasons)}); pass force=true to delete anyway",
         )
 
     # Capture the file size before deleting the row so we can report bytes freed.
@@ -123,6 +129,7 @@ def delete_track(
         "deleted": True,
         "bytes_reclaimed": bytes_reclaimed,
         "owner_count": owner_count,
+        "playlist_count": playlist_count,
     }
 
 
@@ -169,31 +176,6 @@ def backfill_metadata(
         "no_file": no_file,
         "no_new_tags": no_new,
     }
-
-
-@router.post("/tracks/cleanup-orphans")
-def cleanup_orphans(user: CurrentUser = Depends(require_admin)) -> dict:
-    """Delete every orphan master (owner_count==0) plus its file. Orphans never
-    need force — they have no owners by definition."""
-    deleted = 0
-    bytes_reclaimed = 0
-    for orphan in db.admin_orphan_tracks():
-        path = orphan["file_path"]
-        file_size = orphan.get("file_size") or 0
-        existed = False
-        try:
-            os.remove(path)
-            existed = True
-        except OSError:
-            # FileNotFoundError or any other OS error (permission, network
-            # mount): treat as not-existed and keep cleaning the rest of the
-            # batch instead of aborting the loop mid-way.
-            existed = False
-        db.delete_track_master(orphan["video_id"], orphan["codec"], orphan["bitrate"])
-        deleted += 1
-        if existed:
-            bytes_reclaimed += file_size
-    return {"deleted": deleted, "bytes_reclaimed": bytes_reclaimed}
 
 
 @router.get("/system")
