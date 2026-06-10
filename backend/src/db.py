@@ -112,7 +112,10 @@ CREATE TABLE IF NOT EXISTS tracks (
     codec           TEXT NOT NULL,       -- 'mp3' | 'm4a' | 'flac' | ...
     bitrate         TEXT NOT NULL,       -- '192' | '320' | 'lossless' | '0'
     title           TEXT,
-    artist          TEXT,                -- yt uploader
+    artist          TEXT,                -- all credited artists, joined ", "
+    album           TEXT,                -- album title (YouTube Music metadata)
+    album_artist    TEXT,                -- primary album artist, if distinct
+    release_year    INTEGER,             -- release year, if known
     duration_sec    INTEGER,
     thumbnail_url   TEXT,
     source_url      TEXT NOT NULL,
@@ -144,6 +147,9 @@ CREATE INDEX IF NOT EXISTS idx_track_owners_owner ON track_owners(owner_id, adde
 -- all of track_owners twice — and discover/suggestions/radio/daily-mixes each
 -- read 400-500 rows. This index turns those scans into lookups.
 CREATE INDEX IF NOT EXISTS idx_track_owners_track ON track_owners(video_id, codec, bitrate);
+-- NOTE: the album column + its index (idx_tracks_album) are added in init()
+-- AFTER the idempotent ALTERs — a legacy `tracks` table predates the column, so
+-- indexing it here (before the ALTER) would fail with "no such column: album".
 
 -- `track_likes`: heart/favorite. Independent from ownership so a user can
 -- like a track without adding it to their library, and vice versa.
@@ -241,6 +247,19 @@ def init() -> None:
         if "owner_id" not in cols:
             conn.execute("ALTER TABLE jobs ADD COLUMN owner_id TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_id)")
+        # Album metadata columns landed after the tracks table shipped; add them
+        # idempotently for legacy DBs (CREATE TABLE IF NOT EXISTS won't alter an
+        # existing table). The album index is created by the schema script above.
+        track_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
+        for col, decl in (
+            ("album", "TEXT"),
+            ("album_artist", "TEXT"),
+            ("release_year", "INTEGER"),
+        ):
+            if col not in track_cols:
+                conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {decl}")
+        # Safe now that `album` is guaranteed to exist (fresh schema or ALTER'd).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album)")
         conn.execute(
             f"UPDATE jobs SET status = '{INTERRUPTED}', error_message = ? "
             f"WHERE status IN ({','.join('?' * len(ACTIVE_STATUSES))})",
@@ -510,18 +529,29 @@ def register_track(
     file_path: str,
     file_size: int | None,
     sha256: str | None,
+    album: str | None = None,
+    album_artist: str | None = None,
+    release_year: int | None = None,
 ) -> None:
-    """Idempotent: re-registering an existing track overwrites the row."""
+    """Idempotent: re-registering an existing track overwrites the row.
+
+    `album`/`album_artist`/`release_year` use COALESCE on conflict so a later
+    re-download that happens to carry less metadata (e.g. a flat playlist entry)
+    never blanks out album info captured by an earlier richer extraction."""
     with _write() as conn:
         conn.execute(
             """
             INSERT INTO tracks (
-                video_id, codec, bitrate, title, artist, duration_sec,
-                thumbnail_url, source_url, file_path, file_size, sha256, downloaded_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                video_id, codec, bitrate, title, artist, album, album_artist,
+                release_year, duration_sec, thumbnail_url, source_url, file_path,
+                file_size, sha256, downloaded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(video_id, codec, bitrate) DO UPDATE SET
                 title = excluded.title,
                 artist = excluded.artist,
+                album = COALESCE(excluded.album, tracks.album),
+                album_artist = COALESCE(excluded.album_artist, tracks.album_artist),
+                release_year = COALESCE(excluded.release_year, tracks.release_year),
                 duration_sec = excluded.duration_sec,
                 thumbnail_url = excluded.thumbnail_url,
                 source_url = excluded.source_url,
@@ -531,8 +561,9 @@ def register_track(
                 downloaded_at = excluded.downloaded_at
             """,
             (
-                video_id, codec, bitrate, title, artist, duration_sec,
-                thumbnail_url, source_url, file_path, file_size, sha256, _now(),
+                video_id, codec, bitrate, title, artist, album, album_artist,
+                release_year, duration_sec, thumbnail_url, source_url, file_path,
+                file_size, sha256, _now(),
             ),
         )
 
@@ -627,7 +658,8 @@ def list_library(owner_id: str, limit: int = 500) -> list[dict[str, Any]]:
     conn = _get_conn()
     rows = conn.execute(
         """
-        SELECT t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+        SELECT t.video_id, t.codec, t.bitrate, t.title, t.artist,
+               t.album, t.album_artist, t.release_year, t.duration_sec,
                t.thumbnail_url, t.source_url, t.file_size,
                o.added_at, o.source_playlist_title
           FROM track_owners o
@@ -700,7 +732,8 @@ def list_catalog(
     rows = conn.execute(
         f"""
         SELECT
-            t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+            t.video_id, t.codec, t.bitrate, t.title, t.artist,
+            t.album, t.album_artist, t.release_year, t.duration_sec,
             t.thumbnail_url, t.source_url, t.file_size, t.downloaded_at,
             (SELECT COUNT(*) FROM track_owners o2
               WHERE o2.video_id = t.video_id
@@ -752,7 +785,8 @@ def list_catalog_by_video_ids(
 # Reused SELECT for catalog-item-shaped rows. The single `?` is the viewer for
 # the is_owned flag and must be the first bound param wherever this is spliced in.
 _TRACK_COLS = """
-    t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+    t.video_id, t.codec, t.bitrate, t.title, t.artist,
+    t.album, t.album_artist, t.release_year, t.duration_sec,
     t.thumbnail_url, t.source_url, t.file_size, t.downloaded_at,
     (SELECT COUNT(*) FROM track_owners o2
       WHERE o2.video_id = t.video_id
@@ -907,7 +941,8 @@ def list_recent_additions(*, limit: int = 30) -> list[dict[str, Any]]:
                (SELECT s.username FROM sessions s
                  WHERE s.user_id = o.owner_id
                  ORDER BY s.last_seen_at DESC LIMIT 1) AS username,
-               t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+               t.video_id, t.codec, t.bitrate, t.title, t.artist,
+               t.album, t.album_artist, t.release_year, t.duration_sec,
                t.thumbnail_url, t.source_url, t.file_size, t.downloaded_at
           FROM track_owners o
           JOIN tracks t
@@ -1049,7 +1084,8 @@ def list_playlist_tracks(playlist_id: str) -> list[dict[str, Any]]:
     conn = _get_conn()
     rows = conn.execute(
         """
-        SELECT t.video_id, t.codec, t.bitrate, t.title, t.artist, t.duration_sec,
+        SELECT t.video_id, t.codec, t.bitrate, t.title, t.artist,
+               t.album, t.album_artist, t.release_year, t.duration_sec,
                t.thumbnail_url, t.source_url, t.file_size,
                pt.position, pt.added_at
           FROM playlist_tracks pt

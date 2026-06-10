@@ -392,6 +392,58 @@ def get_available_resolutions(url, audio_only=False):
     }
 
 
+def _extract_music_meta(info: dict) -> dict:
+    """Pull artist/album fields out of a yt-dlp info dict into a normalized shape.
+
+    yt-dlp exposes `artists` (a list — every credited performer) for YouTube
+    Music tracks, plus `album` / `album_artist` / `release_year`. The legacy
+    single `artist` string only ever held the first name, which is why the app
+    used to show one artist. We prefer the `artists` list and join it for the
+    display string so collaborations render every name.
+
+    Returns: { artists: list[str], artist: str|None, album, album_artist,
+               release_year } — `artist` is the ", "-joined display string,
+    falling back through artist → uploader → channel when no list is present.
+    """
+    artists = info.get("artists")
+    if not isinstance(artists, list):
+        artists = []
+    # Clean + de-dupe while preserving order.
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for a in artists:
+        name = (a or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            cleaned.append(name)
+    artists = cleaned
+
+    if artists:
+        display = ", ".join(artists)
+    else:
+        display = (info.get("artist") or info.get("uploader") or info.get("channel"))
+        if display:
+            display = display.strip() or None
+
+    year = info.get("release_year")
+    if year is None:
+        rd = info.get("release_date") or info.get("upload_date") or ""
+        if isinstance(rd, str) and len(rd) >= 4 and rd[:4].isdigit():
+            year = int(rd[:4])
+    try:
+        year = int(year) if year is not None else None
+    except (TypeError, ValueError):
+        year = None
+
+    return {
+        "artists": artists,
+        "artist": display,
+        "album": (info.get("album") or None),
+        "album_artist": (info.get("album_artist") or None),
+        "release_year": year,
+    }
+
+
 def _looks_like_music(info: dict) -> bool:
     """Heuristic for "this video is a song, not a vlog/tutorial/whatever".
 
@@ -528,13 +580,19 @@ def get_playlist_tracks(url):
             if thumbs:
                 thumb = thumbs[-1].get('url')
         duration = e.get('duration')
+        emeta = _extract_music_meta(e)
         tracks.append({
             'id': vid,
             'title': e.get('title') or vid,
-            # YouTube Music tracks expose a canonical `artist`; fall back to
-            # `uploader`/`channel` for normal videos. Without this the track
-            # lands in the library with artist=None.
-            'uploader': e.get('artist') or e.get('uploader') or e.get('channel'),
+            # Display artist = all credited names joined (flat entries usually
+            # only carry `channel`/`uploader`, but album/artist data, when
+            # present, is captured too). Per-track richer metadata is filled in
+            # at download time from the full extraction.
+            'uploader': emeta['artist'],
+            'artists': emeta['artists'],
+            'album': emeta['album'],
+            'album_artist': emeta['album_artist'],
+            'release_year': emeta['release_year'],
             'url': e.get('url') or f'https://www.youtube.com/watch?v={vid}',
             'duration_sec': int(duration) if duration else None,
             'thumbnail': thumb,
@@ -594,13 +652,17 @@ def get_single_video_info(url):
     if not vid:
         raise RuntimeError("yt-dlp returned no video id for this URL")
     duration = info.get('duration')
+    meta = _extract_music_meta(info)
     return {
         'id': vid,
         'title': info.get('title') or vid,
-        # YouTube Music tracks set a canonical `artist`; regular videos only
-        # have `uploader` / `channel`. Try in that order so the library shows
-        # the most accurate name.
-        'uploader': info.get('artist') or info.get('uploader') or info.get('channel'),
+        # `uploader` is the display artist (all credited names joined), kept
+        # under this key for backward-compat with set_metadata/job rows.
+        'uploader': meta['artist'],
+        'artists': meta['artists'],
+        'album': meta['album'],
+        'album_artist': meta['album_artist'],
+        'release_year': meta['release_year'],
         'duration_sec': int(duration) if duration else None,
         'thumbnail': info.get('thumbnail'),
         'webpage_url': info.get('webpage_url') or url,
@@ -653,6 +715,11 @@ def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
     Download a single video as audio with the given codec+bitrate, writing the
     final post-processed file to `dest_path`. Creates parent dirs as needed.
 
+    Returns the music metadata dict (`_extract_music_meta` shape, plus `title`)
+    captured from the actual extraction — this is the only path that sees the
+    full per-video info for playlist/album imports (flat playlist entries don't
+    carry artists/album), so callers use it to register accurate tags.
+
     Implementation note: yt-dlp's FFmpegExtractAudio rewrites the file extension
     *after* download, so we let yt-dlp produce the file in a per-call tmp dir
     (under dest_path's parent) and then move the result atomically into place.
@@ -696,7 +763,10 @@ def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=True)
+
+        meta = _extract_music_meta(info or {})
+        meta['title'] = (info or {}).get('title')
 
         produced = None
         for fname in os.listdir(work_dir):
@@ -711,7 +781,7 @@ def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
         if os.path.exists(dest_path):
             os.remove(dest_path)
         os.replace(produced, dest_path)
-        return dest_path
+        return meta
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 

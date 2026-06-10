@@ -114,7 +114,11 @@ export type LibraryItem = {
   codec: string
   bitrate: string
   title: string | null
+  /** All credited artists, joined ", " by the backend (multi-artist display). */
   artist: string | null
+  album?: string | null
+  album_artist?: string | null
+  release_year?: number | null
   duration_sec: number | null
   thumbnail_url: string | null
   source_url: string
@@ -136,7 +140,11 @@ export type CatalogItem = {
   codec: string
   bitrate: string
   title: string | null
+  /** All credited artists, joined ", " by the backend (multi-artist display). */
   artist: string | null
+  album?: string | null
+  album_artist?: string | null
+  release_year?: number | null
   duration_sec: number | null
   thumbnail_url: string | null
   source_url: string
@@ -235,6 +243,9 @@ export type ActivityItem = {
   bitrate: string
   title: string | null
   artist: string | null
+  album?: string | null
+  album_artist?: string | null
+  release_year?: number | null
   duration_sec: number | null
   thumbnail_url: string | null
   source_url: string
@@ -253,6 +264,32 @@ export type StatsResponse = {
   total_plays: number
   top_tracks: CatalogItem[]
   top_artists: ArtistStat[]
+}
+
+// ── Albums (YouTube Music) ────────────────────────────────────────────────────
+
+/** An album cover card from `/api/albums/search`. */
+export type AlbumCard = {
+  album_id: string
+  title: string | null
+  artist: string | null
+  thumbnail: string | null
+  track_count: number
+  /** Canonical album URL — handed to the playlist-download flow to grab it all. */
+  url: string
+}
+
+export type AlbumsSearchResponse = {
+  albums: AlbumCard[]
+}
+
+/** Full album: header + the ordered tracklist. `tracks` is every track in album
+ * order (external shape); `db` holds the ones already in the catalog (playable
+ * now) — the client matches them by video_id to pick a playable vs download row. */
+export type AlbumDetailResponse = {
+  album: AlbumCard
+  tracks: ExternalCatalogItem[]
+  db: CatalogItem[]
 }
 
 // ── Playlists ────────────────────────────────────────────────────────────────
@@ -279,6 +316,9 @@ export type PlaylistTrackRow = {
   bitrate: string
   title: string | null
   artist: string | null
+  album?: string | null
+  album_artist?: string | null
+  release_year?: number | null
   duration_sec: number | null
   thumbnail_url: string | null
   source_url: string
