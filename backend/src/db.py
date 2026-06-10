@@ -954,14 +954,17 @@ def top_played_tracks(
 def list_tracks_by_artist(
     viewer_id: str, artist: str, *, limit: int = 40,
 ) -> list[dict[str, Any]]:
-    """Catalog tracks by an exact artist match, newest first — catalog-item
-    shaped. Used to anchor daily mixes to an artist."""
+    """Catalog tracks featuring an artist, newest first — catalog-item shaped.
+    Used to anchor daily mixes to an artist. `t.artist` is a ", "-joined credit
+    string, so we match the anchor as a *member* of that list (wrapping both
+    sides in the ", " delimiter) — that way "Lola Indigo" still matches a track
+    stored as "Lola Indigo, La Zowi". A full joined anchor string matches too."""
     conn = _get_conn()
     rows = conn.execute(
         f"""
         SELECT {_TRACK_COLS}
           FROM tracks t
-         WHERE t.artist = ?
+         WHERE (', ' || t.artist || ', ') LIKE ('%, ' || ? || ', %') COLLATE NOCASE
          ORDER BY t.downloaded_at DESC
          LIMIT ?
         """,
@@ -974,14 +977,19 @@ def top_played_artists(
     viewer_id: str, *, limit: int = 10, since: str | None = None,
 ) -> list[dict[str, Any]]:
     """Most-played artists for a user: [{artist, play_count}], busiest first.
-    `since` is an ISO timestamp lower bound on played_at (None = all time)."""
+    `since` is an ISO timestamp lower bound on played_at (None = all time).
+
+    `t.artist` is a ", "-joined credit string (a collab stores all names in one
+    row), so grouping by it raw would surface whole credit lists as a single
+    "artist". We group per-string in SQL, then split on commas and tally each
+    individual artist case-insensitively (keeping the first-seen casing), so a
+    feat counts toward every artist on it."""
     conn = _get_conn()
     where = "WHERE p.user_id = ? AND t.artist IS NOT NULL AND TRIM(t.artist) != ''"
     params: list[Any] = [viewer_id]
     if since:
         where += " AND p.played_at >= ?"
         params.append(since)
-    params.append(limit)
     rows = conn.execute(
         f"""
         SELECT t.artist AS artist, COUNT(*) AS play_count
@@ -992,12 +1000,24 @@ def top_played_artists(
            AND p.bitrate  = t.bitrate
          {where}
          GROUP BY t.artist
-         ORDER BY play_count DESC
-         LIMIT ?
         """,
         tuple(params),
     ).fetchall()
-    return [dict(r) for r in rows]
+    counts: dict[str, int] = {}
+    display: dict[str, str] = {}
+    for r in rows:
+        n = int(r["play_count"])
+        for raw in (r["artist"] or "").split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            key = name.lower()
+            counts[key] = counts.get(key, 0) + n
+            display.setdefault(key, name)
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    return [
+        {"artist": display[key], "play_count": cnt} for key, cnt in ranked[:limit]
+    ]
 
 
 def count_plays(viewer_id: str, *, since: str | None = None) -> int:

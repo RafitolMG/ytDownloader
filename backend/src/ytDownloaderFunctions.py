@@ -255,6 +255,44 @@ def get_video_codec(path):
         return None
 
 
+# YouTube Music credits everyone on a track in the `artists` list / embedded
+# ARTIST tag — not just the performers, but featured artists, producers and
+# songwriters/composers (often under their legal names). Left unbounded the
+# display string balloons to 10+ "artists" mixing stage and legal names. The
+# performing artists lead the list (composers trail), so capping keeps the
+# real artists and sheds the writer/producer noise.
+MAX_DISPLAY_ARTISTS = 4
+
+
+def normalize_artist_names(names: "list[str] | str | None") -> list[str]:
+    """Clean, case-insensitively de-dupe, and cap a credited-artist list.
+
+    Accepts either yt-dlp's `artists` list or a ", "-joined string (the embedded
+    ARTIST tag ffprobe reads). Trims blanks, drops case-insensitive duplicates
+    (so "BakBeats" and "Bakbeats" collapse to one), preserves order, and caps to
+    MAX_DISPLAY_ARTISTS. Returns the cleaned list (possibly empty)."""
+    if names is None:
+        items: list[str] = []
+    elif isinstance(names, str):
+        items = names.split(",")
+    elif isinstance(names, list):
+        items = names
+    else:
+        items = []
+    seen: set[str] = set()
+    out: list[str] = []
+    for a in items:
+        name = (a or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out[:MAX_DISPLAY_ARTISTS]
+
+
 def read_file_tags(path: str) -> dict | None:
     """Read embedded metadata tags from a local audio file via ffprobe — fully
     offline, no network/cookies. yt-dlp's FFmpegMetadata postprocessor embeds
@@ -289,9 +327,14 @@ def read_file_tags(path: str) -> dict | None:
     if d and len(d) >= 4 and d[:4].isdigit():
         year = int(d[:4])
 
+    # The embedded ARTIST tag is a comma-joined credit string — normalize it the
+    # same way the live `artists` list is, so the backfill writes a clean, capped
+    # display string instead of the raw 10+-name dump.
+    artist_raw = pick('artist', 'artists', 'author')
+    artist_names = normalize_artist_names(artist_raw)
     return {
         'title': pick('title', 'track'),
-        'artist': pick('artist', 'artists', 'author'),
+        'artist': (", ".join(artist_names) if artist_names else None),
         'album': pick('album'),
         'album_artist': pick('album_artist', 'albumartist'),
         'release_year': year,
@@ -500,18 +543,10 @@ def _extract_music_meta(info: dict) -> dict:
                release_year } — `artist` is the ", "-joined display string,
     falling back through artist → uploader → channel when no list is present.
     """
-    artists = info.get("artists")
-    if not isinstance(artists, list):
-        artists = []
-    # Clean + de-dupe while preserving order.
-    seen: set[str] = set()
-    cleaned: list[str] = []
-    for a in artists:
-        name = (a or "").strip()
-        if name and name not in seen:
-            seen.add(name)
-            cleaned.append(name)
-    artists = cleaned
+    # Clean, case-insensitively de-dupe, and cap (see normalize_artist_names) —
+    # YT Music lists writers/producers alongside performers, so the raw list is
+    # noisy and unbounded.
+    artists = normalize_artist_names(info.get("artists"))
 
     if artists:
         display = ", ".join(artists)
