@@ -213,6 +213,32 @@ def related(video_id: str, limit: int = 20) -> list[dict]:
     return results
 
 
+def related_many(video_ids: list[str], limit: int = 12) -> dict[str, list[dict]]:
+    """Fetch `related()` for several seeds concurrently → {video_id: results}.
+
+    Each seed is individually cached (15min), but a cold daily-mixes/suggestions
+    request would otherwise pay 4-6 yt-dlp round-trips *serially* (~1-3s each),
+    blocking a threadpool worker the whole time. Overlapping them cuts the wall
+    time to roughly one round-trip. Per-seed failures degrade to an empty list.
+    """
+    ids = [v for v in dict.fromkeys(video_ids) if v]  # de-dupe, preserve order
+    if not ids:
+        return {}
+
+    def _one(vid: str) -> tuple[str, list[dict]]:
+        try:
+            return vid, related(vid, limit=limit)
+        except Exception:
+            log.warning("related failed for %r", vid, exc_info=True)
+            return vid, []
+
+    out: dict[str, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=min(6, len(ids))) as ex:
+        for vid, res in ex.map(_one, ids):
+            out[vid] = res
+    return out
+
+
 # ── Albums (YouTube Music) ────────────────────────────────────────────────────
 # YouTube Music models an album as a browse page (id `MPREb…`) or a playlist
 # (id `OLAK5uy_…`), both of which yt-dlp extracts as a normal playlist of the

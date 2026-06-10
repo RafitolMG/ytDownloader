@@ -597,7 +597,10 @@ function useExternalDownload(item: ExternalCatalogItem, opts: { own?: boolean } 
     if (isDone) {
       queryClient.invalidateQueries({ queryKey: ['discover'] })
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
-      queryClient.invalidateQueries({ queryKey: ['catalog-suggestions'] })
+      // Deliberately NOT invalidating ['catalog-suggestions'] here: the
+      // suggestions carousel hosts this very card, so refetching it would yank
+      // the card the moment its download finishes. The card shows its own
+      // "✓ added" state instead and the carousel refreshes on its own staleTime.
       queryClient.invalidateQueries({ queryKey: ['daily-mixes'] })
       queryClient.invalidateQueries({ queryKey: ['library'] })
     } else if (live.status === 'error') {
@@ -834,11 +837,15 @@ function SuggestionCard({ item }: { item: ExternalCatalogItem }) {
         <button
           type="button"
           onClick={dl.start}
-          disabled={dl.isPending}
+          disabled={dl.isPending || dl.isDone}
           title="download mp3 · 320 and add to the catalog"
-          className="w-full font-pixel text-xs uppercase tracking-widest flex items-center justify-center gap-1 px-2 py-1 border rounded-xs transition disabled:opacity-50 border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)]"
+          className={`w-full font-pixel text-xs uppercase tracking-widest flex items-center justify-center gap-1 px-2 py-1 border rounded-xs transition disabled:opacity-60 ${
+            dl.isDone
+              ? 'border-hot/60 text-hot bg-hot/10'
+              : 'border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)]'
+          }`}
         >
-          {dl.isPending ? '···' : '⬇ add'}
+          {dl.isDone ? '✓ added' : dl.isPending ? '···' : '⬇ add'}
         </button>
         {dl.failed && (
           <div className="mt-1 font-pixel text-[10px] text-crit line-clamp-1">
