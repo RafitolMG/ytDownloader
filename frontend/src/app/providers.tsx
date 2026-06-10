@@ -3,6 +3,7 @@ import { BrowserRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { AuthProvider } from '@/features/auth/AuthProvider'
 import { AudioPlayerProvider } from '@/features/player/AudioPlayerProvider'
+import { ToastProvider } from '@/shared/ui/ToastProvider'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -22,7 +23,9 @@ export function AppProviders({ children }: { children: ReactNode }) {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <AuthProvider>
-          <AudioPlayerProvider>{children}</AudioPlayerProvider>
+          <AudioPlayerProvider>
+            <ToastProvider>{children}</ToastProvider>
+          </AudioPlayerProvider>
         </AuthProvider>
       </BrowserRouter>
     </QueryClientProvider>
