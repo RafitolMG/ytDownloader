@@ -178,6 +178,34 @@ def backfill_metadata(
     }
 
 
+@router.post("/tracks/normalize-artists")
+def normalize_artists(
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Re-normalize the stored `artist` string of every track: case-insensitive
+    de-dupe + cap to the first few names (see ytDownloaderFunctions.
+    normalize_artist_names). Cleans up the over-stuffed credit lists the backfill
+    wrote (YT Music dumps writers/producers alongside performers). Offline,
+    idempotent, re-runnable; only rows whose artist actually changes are touched."""
+    scanned = updated = 0
+    samples: list[dict] = []
+    for t in db.list_tracks_for_backfill(only_missing_album=False):
+        scanned += 1
+        cur = (t.get("artist") or "").strip()
+        if not cur:
+            continue
+        names = ytDownloaderFunctions.normalize_artist_names(cur)
+        cleaned = ", ".join(names)
+        if cleaned and cleaned != cur:
+            if db.update_track_metadata(
+                t["video_id"], t["codec"], t["bitrate"], artist=cleaned
+            ):
+                updated += 1
+                if len(samples) < 10:
+                    samples.append({"before": cur, "after": cleaned})
+    return {"scanned": scanned, "updated": updated, "samples": samples}
+
+
 @router.get("/system")
 def system(user: CurrentUser = Depends(require_admin)) -> dict:
     """System health panel: yt-dlp version, cookies config status, cached
