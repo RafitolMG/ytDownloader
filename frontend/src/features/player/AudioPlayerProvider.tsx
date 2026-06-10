@@ -10,8 +10,34 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
-import type { LibraryItem } from '@/shared/api/types'
+import type { CatalogItem, LibraryItem } from '@/shared/api/types'
 import { useAuth } from '@/features/auth/AuthProvider'
+
+const PLAYER_SNAPSHOT_KEY = 'ytdl.player.v1'
+const PLAYER_POSITION_KEY = 'ytdl.player.position'
+const PLAYER_VOLUME_KEY = 'ytdl.player.volume'
+const PLAYER_AUTORADIO_KEY = 'ytdl.player.autoradio'
+
+/** Map a catalog row (radio db hit) to a player item. Kept local to avoid a
+ * provider↔CatalogPage import cycle. */
+function catalogToLibrary(c: CatalogItem): LibraryItem {
+  return {
+    video_id: c.video_id,
+    codec: c.codec,
+    bitrate: c.bitrate,
+    title: c.title,
+    artist: c.artist,
+    album: c.album,
+    album_artist: c.album_artist,
+    release_year: c.release_year,
+    duration_sec: c.duration_sec,
+    thumbnail_url: c.thumbnail_url,
+    source_url: c.source_url,
+    file_size: c.file_size,
+    added_at: c.downloaded_at,
+    source_playlist_title: null,
+  }
+}
 
 export type RepeatMode = 'off' | 'one' | 'all'
 
@@ -63,6 +89,10 @@ type PlayerCtx = {
   sleepEndOfTrack: boolean
   /** Arm/replace the sleep timer: a minute count, 'endOfTrack', or null to clear. */
   setSleepTimer: (v: number | 'endOfTrack' | null) => void
+  /** When on, the queue keeps going at its tail by appending the current
+   * track's radio (already-downloaded tracks only). Persisted. */
+  autoRadio: boolean
+  toggleAutoRadio: () => void
   /** Insert a track to play right after the current one. Starts playing it if
    * nothing is loaded. */
   playNext: (track: LibraryItem) => void
@@ -123,6 +153,15 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const [sleepEndOfTrack, setSleepEndOfTrack] = useState(false)
   const [sleepRemainingMs, setSleepRemainingMs] = useState<number | null>(null)
   const sleepEndOfTrackRef = useRef(false)
+  // Persistence + auto-radio.
+  const hydratedRef = useRef(false)
+  const pendingSeekRef = useRef<number | null>(null)
+  // Suppress autoplay for the one track restored on mount (resume paused);
+  // every subsequent track load autoplays normally.
+  const autoplayRef = useRef(true)
+  const [autoRadio, setAutoRadio] = useState(false)
+  const autoRadioBusyRef = useRef(false)
+  const autoRadioSeenRef = useRef<Set<string>>(new Set())
 
   const index = pos >= 0 && pos < order.length ? order[pos] : -1
   const current = index >= 0 && index < queue.length ? queue[index] : null
@@ -163,9 +202,15 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     // Ignore the AbortError from a play() that a rapid track switch interrupts:
     // only flip isPlaying off if this load is still the active one. Otherwise a
     // stale rejection desyncs the UI after the next track has already started.
-    void el.play().catch(() => {
-      if (!cancelled) setIsPlaying(false)
-    })
+    // autoplayRef is false only for the track restored from localStorage on
+    // mount — we resume paused, then re-enable autoplay for later track changes.
+    if (autoplayRef.current) {
+      void el.play().catch(() => {
+        if (!cancelled) setIsPlaying(false)
+      })
+    } else {
+      autoplayRef.current = true
+    }
     return () => {
       cancelled = true
     }
@@ -210,6 +255,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const play = useCallback(
     (nextQueue: LibraryItem[], startAt = 0) => {
       if (nextQueue.length === 0) return
+      // Fresh queue → let auto-radio seed from scratch again.
+      autoRadioSeenRef.current.clear()
       const clamped = Math.max(0, Math.min(startAt, nextQueue.length - 1))
       const newOrder = buildOrder(nextQueue.length, clamped, shuffle)
       setQueue(nextQueue)
@@ -439,6 +486,145 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     if (el) el.volume = volume
   }, [current && trackKey(current), volume])
 
+  // ── Persistence: restore on mount (paused), then snapshot on change ─────────
+  useEffect(() => {
+    // Volume lives in its own key so it survives a cleared queue.
+    try {
+      const v = localStorage.getItem(PLAYER_VOLUME_KEY)
+      if (v != null) {
+        const n = Number(v)
+        if (n >= 0 && n <= 1) setVolumeState(n)
+      }
+      setAutoRadio(localStorage.getItem(PLAYER_AUTORADIO_KEY) === '1')
+    } catch {
+      /* ignore storage errors */
+    }
+    try {
+      const raw = localStorage.getItem(PLAYER_SNAPSHOT_KEY)
+      if (raw) {
+        const snap = JSON.parse(raw)
+        // Drop preview-codec tracks — they proxy a live, expiring YouTube URL
+        // and aren't a stable thing to resume.
+        const q: LibraryItem[] = Array.isArray(snap.queue)
+          ? snap.queue.filter((t: LibraryItem) => t && t.codec && t.codec !== 'preview')
+          : []
+        if (q.length > 0) {
+          // Reuse the stored order only if it still maps 1:1 to the (filtered)
+          // queue; otherwise fall back to identity.
+          const order: number[] =
+            Array.isArray(snap.order) &&
+            snap.order.length === q.length &&
+            snap.order.every((i: number) => Number.isInteger(i) && i >= 0 && i < q.length)
+              ? snap.order
+              : q.map((_, i) => i)
+          const pos =
+            typeof snap.pos === 'number' && snap.pos >= 0 && snap.pos < order.length
+              ? snap.pos
+              : 0
+          autoplayRef.current = false // resume paused
+          setQueue(q)
+          setOrder(order)
+          setPos(pos)
+          if (snap.shuffle) setShuffle(true)
+          if (snap.repeat === 'one' || snap.repeat === 'all') setRepeat(snap.repeat)
+          const savedPos = Number(localStorage.getItem(PLAYER_POSITION_KEY))
+          if (Number.isFinite(savedPos) && savedPos > 1) {
+            pendingSeekRef.current = savedPos
+          }
+        }
+      }
+    } catch {
+      /* corrupt snapshot — start fresh */
+    }
+    hydratedRef.current = true
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Snapshot the heavy resumable bits only when they actually change — NOT on
+  // every position tick — so we don't re-stringify the whole queue each second.
+  useEffect(() => {
+    if (!hydratedRef.current) return
+    const id = setTimeout(() => {
+      try {
+        if (queue.length === 0) {
+          localStorage.removeItem(PLAYER_SNAPSHOT_KEY)
+          localStorage.removeItem(PLAYER_POSITION_KEY)
+        } else {
+          localStorage.setItem(
+            PLAYER_SNAPSHOT_KEY,
+            JSON.stringify({ queue, order, pos, shuffle, repeat }),
+          )
+        }
+      } catch {
+        /* ignore quota errors */
+      }
+    }, 800)
+    return () => clearTimeout(id)
+  }, [queue, order, pos, shuffle, repeat])
+
+  // Position is tiny and changes ~1/s — persist it on its own slow debounce.
+  useEffect(() => {
+    if (!hydratedRef.current || queue.length === 0) return
+    const id = setTimeout(() => {
+      try {
+        localStorage.setItem(PLAYER_POSITION_KEY, String(Math.floor(position)))
+      } catch {
+        /* ignore */
+      }
+    }, 2000)
+    return () => clearTimeout(id)
+  }, [position, queue.length])
+
+  useEffect(() => {
+    if (!hydratedRef.current) return
+    try {
+      localStorage.setItem(PLAYER_VOLUME_KEY, String(volume))
+    } catch {
+      /* ignore */
+    }
+  }, [volume])
+
+  const toggleAutoRadio = useCallback(() => {
+    setAutoRadio((on) => {
+      const next = !on
+      try {
+        localStorage.setItem(PLAYER_AUTORADIO_KEY, next ? '1' : '0')
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }, [])
+
+  // Fetch the current track's radio and append its already-downloaded (db)
+  // tracks to the queue, then jump to the first new one. Only db tracks — never
+  // externals — so nothing downloads silently. Deduped against the queue and a
+  // session "seen" set so it can't loop on the same tail.
+  async function triggerAutoRadio() {
+    if (autoRadioBusyRef.current || !current) return
+    autoRadioBusyRef.current = true
+    try {
+      const feed = await api.radio(current.video_id, { external_limit: 0 })
+      const existing = new Set(queue.map(trackKey))
+      const seen = autoRadioSeenRef.current
+      const fresh = (feed.db ?? [])
+        .map(catalogToLibrary)
+        .filter((t) => !existing.has(trackKey(t)) && !seen.has(t.video_id))
+        .slice(0, 20)
+      if (fresh.length > 0) {
+        fresh.forEach((t) => seen.add(t.video_id))
+        const startIdx = queue.length
+        setQueue([...queue, ...fresh])
+        setOrder([...order, ...fresh.map((_, i) => startIdx + i)])
+        setPos(order.length) // first newly-appended track's order position
+      }
+    } catch {
+      /* best-effort — radio is non-critical */
+    } finally {
+      autoRadioBusyRef.current = false
+    }
+  }
+
   const orderedQueue = useMemo(
     () =>
       order
@@ -513,6 +699,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       sleepRemainingMs,
       sleepEndOfTrack,
       setSleepTimer,
+      autoRadio,
+      toggleAutoRadio,
       playNext,
       enqueue,
       removeFromQueueAt,
@@ -524,6 +712,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       shuffle, repeat, volume, setVolume,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
       sleepRemainingMs, sleepEndOfTrack, setSleepTimer,
+      autoRadio, toggleAutoRadio,
       playNext, enqueue, removeFromQueueAt, jumpTo, orderedQueue,
     ],
   )
@@ -536,7 +725,20 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
-        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+        onLoadedMetadata={(e) => {
+          const el = e.currentTarget
+          setDuration(el.duration)
+          // Resume to the persisted position once metadata (and thus duration)
+          // is known. Clamp just shy of the end so it doesn't instantly 'ended'.
+          if (pendingSeekRef.current != null) {
+            const target = pendingSeekRef.current
+            pendingSeekRef.current = null
+            if (Number.isFinite(el.duration) && target < el.duration) {
+              el.currentTime = target
+              setPosition(target)
+            }
+          }
+        }}
         onEnded={() => {
           // End-of-track sleep: stop here, leaving the queue intact.
           if (sleepEndOfTrackRef.current) {
@@ -550,6 +752,13 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
               el.currentTime = 0
               void el.play().catch(() => setIsPlaying(false))
             }
+            return
+          }
+          // Queue hit its tail with nothing left to advance to → if auto-radio
+          // is on, seed more playable tracks instead of stopping.
+          const atTail = pos + 1 >= order.length
+          if (atTail && !(shuffle && queue.length > 1) && repeat !== 'all' && autoRadio) {
+            void triggerAutoRadio()
             return
           }
           advanceOrReshuffle()
