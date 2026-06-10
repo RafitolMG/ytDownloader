@@ -1,8 +1,14 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { useMutation } from '@tanstack/react-query'
 import { useAudioPlayer } from './AudioPlayerProvider'
+import { useGlobalPlayerHotkeys } from './useGlobalPlayerHotkeys'
+import { api } from '@/shared/api/client'
+import { G } from '@/shared/ui/glyphs'
 
 export function PlayerBar() {
   const p = useAudioPlayer()
+  useGlobalPlayerHotkeys()
   const [queueOpen, setQueueOpen] = useState(false)
   if (!p.current) return null
 
@@ -133,6 +139,7 @@ export function PlayerBar() {
               {p.orderPos + 1}/{p.queue.length}
             </span>
           )}
+          <SleepButton />
           <button
             type="button"
             onClick={() => setQueueOpen((v) => !v)}
@@ -230,15 +237,18 @@ function PlayQueuePanel({ onClose }: { onClose: () => void }) {
         <span className="font-pixel text-xs text-cool uppercase tracking-[0.2em]">
           ░▒▓ play queue ▓▒░
         </span>
-        <button
-          type="button"
-          onClick={onClose}
-          title="close"
-          aria-label="close queue"
-          className="font-pixel text-sm text-ink-lo hover:text-crit transition"
-        >
-          ✕
-        </button>
+        <div className="flex items-center gap-3">
+          <SaveQueueButton />
+          <button
+            type="button"
+            onClick={onClose}
+            title="close"
+            aria-label="close queue"
+            className="font-pixel text-sm text-ink-lo hover:text-crit transition"
+          >
+            {G.close}
+          </button>
+        </div>
       </div>
       <ul className="flex-1 overflow-y-auto divide-y divide-border">
         {p.orderedQueue.map(({ track, orderPos, isCurrent }) => (
@@ -301,4 +311,161 @@ function fmtTime(sec: number): string {
   const m = Math.floor(sec / 60)
   const s = Math.floor(sec % 60)
   return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function fmtCountdown(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+/** Sleep-timer control: a popover (15/30/60 / end of track / off) with a live
+ * countdown on the button while a timed sleep is armed. */
+function SleepButton() {
+  const p = useAudioPlayer()
+  const [open, setOpen] = useState(false)
+  const active = p.sleepRemainingMs != null || p.sleepEndOfTrack
+  const label =
+    p.sleepRemainingMs != null
+      ? fmtCountdown(p.sleepRemainingMs)
+      : p.sleepEndOfTrack
+        ? 'end'
+        : null
+  const lowTime = p.sleepRemainingMs != null && p.sleepRemainingMs < 60_000
+
+  const opts: { label: string; value: number | 'endOfTrack' | null }[] = [
+    { label: '15 min', value: 15 },
+    { label: '30 min', value: 30 },
+    { label: '60 min', value: 60 },
+    { label: 'end of track', value: 'endOfTrack' },
+    { label: 'off', value: null },
+  ]
+
+  return (
+    <div className="relative hidden sm:block">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title="sleep timer"
+        aria-label="sleep timer"
+        className={`h-8 sm:h-9 px-2 font-pixel text-base flex items-center justify-center transition rounded-xs border ${
+          active
+            ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
+            : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
+        }`}
+      >
+        {G.sleep}
+        {label && (
+          <span className={`ml-1 text-[10px] tabular-nums ${lowTime ? 'text-sun' : ''}`}>
+            {label}
+          </span>
+        )}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute bottom-full right-0 mb-2 z-50 w-36 card-vapor rounded-sm border border-border p-1.5 flex flex-col gap-1 shadow-[var(--shadow-glow-cool)]">
+            <div className="font-pixel text-[10px] uppercase tracking-widest text-cool px-1 pb-1">
+              ░ sleep ░
+            </div>
+            {opts.map((o) => (
+              <button
+                key={o.label}
+                type="button"
+                onClick={() => {
+                  p.setSleepTimer(o.value)
+                  setOpen(false)
+                }}
+                className="text-left font-sans text-sm text-ink-hi px-2 py-1 rounded-xs hover:bg-violet/10 transition"
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/** Save the current play order as a new private playlist (preview-only tracks
+ * are skipped — they have no DB row). Navigates to the new playlist on success. */
+function SaveQueueButton() {
+  const p = useAudioPlayer()
+  const navigate = useNavigate()
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState('')
+
+  const realTracks = p.orderedQueue.filter((x) => x.track.codec !== 'preview')
+  const skipped = p.orderedQueue.length - realTracks.length
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const fallback = realTracks[0]?.track.title
+        ? `Queue — ${realTracks[0].track.title}`
+        : 'Saved queue'
+      const { id } = await api.createPlaylist({
+        name: name.trim() || fallback,
+        visibility: 'private',
+      })
+      for (const { track } of realTracks) {
+        try {
+          await api.addToPlaylist(id, {
+            video_id: track.video_id,
+            codec: track.codec,
+            bitrate: track.bitrate,
+          })
+        } catch {
+          /* skip a track that can't be added; keep the rest */
+        }
+      }
+      return id
+    },
+    onSuccess: (id) => {
+      setEditing(false)
+      navigate(`/playlists/${id}`)
+    },
+  })
+
+  if (realTracks.length === 0) return null
+
+  if (editing) {
+    return (
+      <form
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (!save.isPending) save.mutate()
+        }}
+        className="flex items-center gap-1"
+      >
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="playlist name"
+          className="bg-page text-ink-hi text-xs px-2 py-1 border border-border rounded-xs outline-none focus:border-cool w-28 sm:w-36"
+        />
+        <button
+          type="submit"
+          disabled={save.isPending}
+          title={skipped > 0 ? `${skipped} preview track(s) will be skipped` : undefined}
+          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-hot text-hot hover:bg-hot/15 rounded-xs disabled:opacity-40 transition"
+        >
+          {save.isPending ? '···' : 'save'}
+        </button>
+      </form>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      title="save this queue as a playlist"
+      className="font-pixel text-xs uppercase tracking-widest text-cool hover:text-ink-hi transition"
+    >
+      {G.add} save queue
+    </button>
+  )
 }

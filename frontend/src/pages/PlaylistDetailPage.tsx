@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
+import { ConfirmButton } from '@/shared/ui/ConfirmButton'
 import { api } from '@/shared/api/client'
 import type {
   LibraryItem,
@@ -184,20 +185,12 @@ function PlaylistDetailView() {
               />
             )}
             {playlist.is_owner && (
-              <button
-                type="button"
-                onClick={() => {
-                  if (
-                    window.confirm(`Delete "${playlist.name}"? This can't be undone.`)
-                  ) {
-                    deletePlaylist.mutate()
-                  }
-                }}
+              <ConfirmButton
+                onConfirm={() => deletePlaylist.mutate()}
                 disabled={deletePlaylist.isPending}
-                className="font-pixel text-sm uppercase tracking-widest px-3 py-1 border border-crit/60 text-crit hover:bg-crit/10 disabled:opacity-30 transition rounded-xs"
-              >
-                ✕ delete
-              </button>
+                idle="✕ delete"
+                title={`delete "${playlist.name}" — can't be undone`}
+              />
             )}
           </div>
         </header>

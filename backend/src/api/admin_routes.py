@@ -169,6 +169,9 @@ def system(user: CurrentUser = Depends(require_admin)) -> dict:
         "configured": resolved is not None,
         "source": source,
         "error": ytDownloaderFunctions._COOKIES_DATA_ERROR,
+        # Expiry summary so admins get an advance warning before cookies lapse
+        # (the worst silent prod failure). None when no cookies file is set.
+        "expiry": ytDownloaderFunctions.get_cookies_expiry(),
     }
 
     # Extraction probe — lazy import to avoid an import-time cycle (routes

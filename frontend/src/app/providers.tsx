@@ -10,6 +10,9 @@ const queryClient = new QueryClient({
       retry: 1,
       refetchOnWindowFocus: false,
       staleTime: 30_000,
+      // Drop cached data 5 min after the last observer unmounts so navigating
+      // away from heavy lists (catalog/library) frees memory instead of pinning it.
+      gcTime: 5 * 60_000,
     },
   },
 })
