@@ -168,6 +168,14 @@ export const api = {
     }>(`/api/admin/tracks/backfill-metadata?${qs.toString()}`, { method: 'POST' })
   },
 
+  // ── admin: re-normalize over-stuffed artist strings (offline, in-DB) ──
+  adminNormalizeArtists: () =>
+    json<{
+      scanned: number
+      updated: number
+      samples: { before: string; after: string }[]
+    }>(`/api/admin/tracks/normalize-artists`, { method: 'POST' }),
+
   // ── music library ──
   library: (limit = 500) =>
     json<LibraryResponse>(`/api/library?limit=${limit}`),

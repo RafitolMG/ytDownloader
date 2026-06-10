@@ -488,6 +488,7 @@ function StorageView() {
 
         <span className="flex-1" />
 
+        <NormalizeArtistsButton onDone={invalidate} />
         <BackfillButton onDone={invalidate} />
       </div>
 
@@ -630,6 +631,37 @@ function BackfillButton({ onDone }: { onDone: () => void }) {
         : r
           ? `✓ filled ${r.updated}/${r.scanned}`
           : '◈ backfill metadata'}
+    </button>
+  )
+}
+
+/** Re-normalize the stored artist string of every track: case-insensitive
+ * de-dupe + cap to the first few names. Cleans the over-stuffed credit lists
+ * (writers/producers) YT Music embeds. Offline, in-DB, idempotent. */
+function NormalizeArtistsButton({ onDone }: { onDone: () => void }) {
+  const normalize = useMutation({
+    mutationFn: () => api.adminNormalizeArtists(),
+    onSuccess: () => {
+      onDone()
+    },
+  })
+  const r = normalize.data
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!normalize.isPending) normalize.mutate()
+      }}
+      disabled={normalize.isPending}
+      title="de-duplicate and trim each track's artist list (offline, in-DB). YouTube Music credits writers/producers alongside performers, bloating the artist field — this caps it to the main names."
+      className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-violet/60 text-violet hover:bg-violet/10 hover:shadow-[var(--shadow-glow-cool)] disabled:opacity-50 transition rounded-xs whitespace-nowrap"
+    >
+      {normalize.isPending
+        ? '··· cleaning artists'
+        : r
+          ? `✓ cleaned ${r.updated}/${r.scanned}`
+          : '✦ tidy artists'}
     </button>
   )
 }
