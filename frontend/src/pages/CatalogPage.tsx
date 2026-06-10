@@ -21,13 +21,16 @@ import { AddToPlaylistMenu } from '@/features/playlists/AddToPlaylistMenu'
 /** Map a catalog row to the shape the audio player expects. The two types
  * differ in metadata (catalog has like/owner counts, library has added_at)
  * but the player only cares about identity + display fields. */
-function toLibraryItem(c: CatalogItem): LibraryItem {
+export function toLibraryItem(c: CatalogItem): LibraryItem {
   return {
     video_id: c.video_id,
     codec: c.codec,
     bitrate: c.bitrate,
     title: c.title,
     artist: c.artist,
+    album: c.album,
+    album_artist: c.album_artist,
+    release_year: c.release_year,
     duration_sec: c.duration_sec,
     thumbnail_url: c.thumbnail_url,
     source_url: c.source_url,
@@ -40,7 +43,7 @@ function toLibraryItem(c: CatalogItem): LibraryItem {
 /** Map an external (undownloaded) candidate to a player item that streams via
  * the preview proxy. The sentinel codec 'preview' tells the player to use
  * /api/preview/{id} instead of the library stream. */
-function toPreviewItem(e: ExternalCatalogItem): LibraryItem {
+export function toPreviewItem(e: ExternalCatalogItem): LibraryItem {
   return {
     video_id: e.video_id,
     codec: 'preview',
@@ -422,7 +425,7 @@ export default function CatalogPage() {
   )
 }
 
-function CatalogRow({
+export function CatalogRow({
   item,
   position,
   allItems,
@@ -508,6 +511,7 @@ function CatalogRow({
         </div>
         <div className="text-sm text-ink-lo truncate mt-0.5">
           {item.artist ?? '—'}
+          {item.album ? <span className="text-ink-lo/70"> · {item.album}</span> : null}
         </div>
       </div>
 
@@ -621,7 +625,7 @@ function useExternalDownload(item: ExternalCatalogItem, opts: { own?: boolean } 
  * tail). Fires every download at once — each call just enqueues a background
  * job and returns immediately — then refreshes the catalog views. Per-row
  * progress lives in the queue; here we only show how many were queued. */
-function DownloadAllButton({
+export function DownloadAllButton({
   items,
   own,
 }: {
@@ -679,7 +683,7 @@ function DownloadAllButton({
 
 /** Full-width list row for a YouTube candidate — used in the search results
  * ("found on youtube") section. */
-function ExternalRow({
+export function ExternalRow({
   item,
   position,
   own,
@@ -1476,7 +1480,7 @@ function RadioView({
   )
 }
 
-function fmtDuration(sec: number): string {
+export function fmtDuration(sec: number): string {
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
   const s = sec % 60

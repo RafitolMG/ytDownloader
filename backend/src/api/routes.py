@@ -302,10 +302,10 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
                     raise _Cancelled()
                 progress_queue.put({"type": "progress", "value": round(pct, 1)})
 
-            ytDownloaderFunctions.download_track_audio(
+            meta = ytDownloaderFunctions.download_track_audio(
                 info['webpage_url'], codec, bitrate, dest_path,
                 on_progress=on_progress,
-            )
+            ) or {}
 
             file_size = os.path.getsize(dest_path)
             sha256 = _sha256_file(dest_path)
@@ -313,8 +313,11 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
                 video_id=video_id,
                 codec=codec,
                 bitrate=bitrate,
-                title=info.get('title'),
-                artist=info.get('uploader'),
+                title=meta.get('title') or info.get('title'),
+                artist=meta.get('artist') or info.get('uploader'),
+                album=meta.get('album') or info.get('album'),
+                album_artist=meta.get('album_artist') or info.get('album_artist'),
+                release_year=meta.get('release_year') or info.get('release_year'),
                 duration_sec=info.get('duration_sec'),
                 thumbnail_url=info.get('thumbnail'),
                 source_url=info['webpage_url'],
@@ -618,11 +621,11 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
                 # video shouldn't abort the entire playlist. _Cancelled still
                 # propagates so the user's abort works.
                 try:
-                    ytDownloaderFunctions.download_track_audio(
+                    meta = ytDownloaderFunctions.download_track_audio(
                         entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
                         codec, bitrate, dest_path,
                         on_progress=on_track_progress,
-                    )
+                    ) or {}
 
                     file_size = os.path.getsize(dest_path)
                     sha256 = _sha256_file(dest_path)
@@ -631,8 +634,13 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
                         video_id=video_id,
                         codec=codec,
                         bitrate=bitrate,
-                        title=title,
-                        artist=entry.get('uploader'),
+                        title=meta.get('title') or title,
+                        # Flat playlist entries lack artists/album; the download's
+                        # full extraction (meta) supplies them per track.
+                        artist=meta.get('artist') or entry.get('uploader'),
+                        album=meta.get('album') or entry.get('album'),
+                        album_artist=meta.get('album_artist') or entry.get('album_artist'),
+                        release_year=meta.get('release_year') or entry.get('release_year'),
                         duration_sec=entry.get('duration_sec'),
                         thumbnail_url=entry.get('thumbnail'),
                         source_url=entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
@@ -1272,6 +1280,74 @@ def catalog_radio(
         externals.append(item)
 
     return {"db": db_items, "external": externals}
+
+
+# ── Albums (YouTube Music) ────────────────────────────────────────────────────
+
+# Album browse ids (`MPREb…`) or playlist-style album ids (`OLAK5uy_…`). Validate
+# before handing to yt-dlp so the album endpoints can't be pointed at arbitrary
+# browse pages.
+_ALBUM_ID_RE = re.compile(r"^(MPREb[A-Za-z0-9_-]+|OLAK5uy_[A-Za-z0-9_-]+)$")
+
+
+@app.get("/api/albums/search")
+def albums_search(
+    q: str = "",
+    limit: int = 12,
+    user: CurrentUser = Depends(current_user),
+):
+    """Search YouTube Music for albums. Each result carries enough to render a
+    cover card (title/artist/cover/track count) and to open the album or fire a
+    whole-album download via the playlist flow. Slow + heavily cached upstream."""
+    q_norm = (q or "").strip()
+    if not q_norm:
+        return {"albums": []}
+    limit = max(1, min(limit, 16))
+    try:
+        albums = search_mod.search_albums(q_norm, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"album search failed: {e}")
+    return {"albums": albums}
+
+
+@app.get("/api/albums/{album_id}")
+def album_detail(
+    album_id: str,
+    user: CurrentUser = Depends(current_user),
+):
+    """An album's header + ordered tracklist. Tracks already in the shared
+    catalog come back under `db` (playable now); the ordered id list in the
+    header lets the client render the full tracklist in album order, choosing a
+    playable or downloadable row per track."""
+    if not _ALBUM_ID_RE.match(album_id):
+        raise HTTPException(status_code=400, detail="invalid album id")
+    album = search_mod.get_album(album_id)
+    if album is None:
+        raise HTTPException(status_code=404, detail="album not found")
+
+    tracks = album.pop("tracks", [])
+    by_id = {
+        c["video_id"]: c
+        for c in db.list_catalog(user.user_id, sort="popular", limit=500)
+    }
+
+    ordered: list[dict] = []
+    db_items: list[dict] = []
+    seen: set[str] = set()
+    for entry in tracks:
+        vid = entry.get("id")
+        if not vid or vid in seen:
+            continue
+        seen.add(vid)
+        ordered.append(_external_item(entry))
+        if vid in by_id:
+            db_items.append(by_id[vid])
+
+    return {
+        "album": album,
+        "tracks": ordered,
+        "db": db_items,
+    }
 
 
 @app.get("/api/catalog/daily-mixes")

@@ -9,6 +9,8 @@ import type {
   PlaylistVisibility,
   PlaylistsResponse,
   ActivityResponse,
+  AlbumsSearchResponse,
+  AlbumDetailResponse,
   CategoriesResponse,
   CategoryFeed,
   DailyMixesResponse,
@@ -133,6 +135,15 @@ export const api = {
     ),
 
   history: (limit = 20) => json<HistoryResponse>(`/api/history?limit=${limit}`),
+
+  // ── albums (youtube music) ──
+  albumSearch: (q: string, limit = 12) =>
+    json<AlbumsSearchResponse>(
+      `/api/albums/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
+
+  album: (albumId: string) =>
+    json<AlbumDetailResponse>(`/api/albums/${encodeURIComponent(albumId)}`),
 
   // ── music library ──
   library: (limit = 500) =>

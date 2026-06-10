@@ -52,7 +52,10 @@ export function PlayerBar() {
             <div className="font-sans text-sm font-semibold text-ink-hi truncate">
               {t.title ?? t.video_id}
             </div>
-            <div className="text-xs text-ink-lo truncate">{t.artist ?? '—'}</div>
+            <div className="text-xs text-ink-lo truncate">
+              {t.artist ?? '—'}
+              {t.album ? <span className="text-ink-lo/70"> · {t.album}</span> : null}
+            </div>
           </div>
         </div>
 
