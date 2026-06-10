@@ -507,6 +507,8 @@ function StorageView() {
 
         <span className="flex-1" />
 
+        <BackfillButton onDone={invalidate} />
+
         <CleanOrphansButton
           onConfirm={() => cleanup.mutate()}
           pending={cleanup.isPending}
@@ -617,6 +619,36 @@ function StorageRow({
         />
       </div>
     </li>
+  )
+}
+
+/** Recover album / multi-artist / year for existing tracks from their embedded
+ * file tags (offline ffprobe — no YouTube). Idempotent; safe to re-run. */
+function BackfillButton({ onDone }: { onDone: () => void }) {
+  const backfill = useMutation({
+    mutationFn: () => api.adminBackfillMetadata({ onlyMissing: true, overwriteArtist: true }),
+    onSuccess: () => {
+      onDone()
+    },
+  })
+  const r = backfill.data
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!backfill.isPending) backfill.mutate()
+      }}
+      disabled={backfill.isPending}
+      title="read album / artist / year from each track's embedded file tags (offline — no YouTube). Fixes tracks downloaded before album metadata was captured."
+      className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)] disabled:opacity-50 transition rounded-xs whitespace-nowrap"
+    >
+      {backfill.isPending
+        ? '··· scanning tags'
+        : r
+          ? `✓ filled ${r.updated}/${r.scanned}`
+          : '◈ backfill metadata'}
+    </button>
   )
 }
 
