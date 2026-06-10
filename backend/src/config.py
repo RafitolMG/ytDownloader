@@ -92,3 +92,10 @@ YT_COOKIES_FILE: str = _env("YT_COOKIES_FILE", "")
 # threadpool or hammer YouTube against the shared cookies. ADMINs are exempt.
 RATELIMIT_PER_MIN: int = int(_env("YTDL_RATELIMIT_PER_MIN", "40"))
 RATELIMIT_WINDOW_SEC: int = int(_env("YTDL_RATELIMIT_WINDOW_SEC", "60"))
+
+# Dedicated bounded threadpool for yt-dlp-bound request handlers. Keeps slow
+# extraction subprocesses off the default request threadpool so they can't stall
+# the cheap DB endpoints (library/catalog/playlists). Sized to the (small ARM)
+# core count by default. EXTRACTION_TIMEOUT_SEC bounds a single request → 504.
+EXTRACTION_WORKERS: int = int(_env("YTDL_EXTRACTION_WORKERS", "0")) or min(4, (os.cpu_count() or 4))
+EXTRACTION_TIMEOUT_SEC: float = float(_env("YTDL_EXTRACTION_TIMEOUT_SEC", "45"))
