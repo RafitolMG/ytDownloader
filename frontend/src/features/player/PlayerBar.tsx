@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
 import { useAudioPlayer } from './AudioPlayerProvider'
 import { useGlobalPlayerHotkeys } from './useGlobalPlayerHotkeys'
+import { NowPlayingView } from './NowPlayingView'
 import { api } from '@/shared/api/client'
 import { G } from '@/shared/ui/glyphs'
 
@@ -10,6 +11,7 @@ export function PlayerBar() {
   const p = useAudioPlayer()
   useGlobalPlayerHotkeys()
   const [queueOpen, setQueueOpen] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   if (!p.current) return null
 
   const t = p.current
@@ -19,9 +21,22 @@ export function PlayerBar() {
   return (
     <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-page-mid shadow-[0_-8px_32px_rgba(0,0,0,0.6)]">
       {queueOpen && <PlayQueuePanel onClose={() => setQueueOpen(false)} />}
-      {/* Seek bar — clickable strip across the top of the player */}
+      {expanded && <NowPlayingView onClose={() => setExpanded(false)} />}
+      {/* Seek bar — clickable strip across the top of the player. A wrapper adds
+          a taller hit area and keyboard/ARIA slider semantics. */}
       <div
-        className="relative h-1.5 bg-page cursor-pointer group"
+        role="slider"
+        tabIndex={0}
+        aria-label="seek"
+        aria-valuemin={0}
+        aria-valuemax={Math.floor(dur)}
+        aria-valuenow={Math.floor(p.position)}
+        aria-valuetext={`${fmtTime(p.position)} of ${fmtTime(dur)}`}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowLeft') p.seek(Math.max(0, p.position - 5))
+          else if (e.key === 'ArrowRight') p.seek(p.position + 5)
+        }}
+        className="focus-vis relative h-1.5 bg-page cursor-pointer group"
         onClick={(e) => {
           if (dur <= 0) return
           const r = e.currentTarget.getBoundingClientRect()
@@ -40,8 +55,21 @@ export function PlayerBar() {
       </div>
 
       <div className="max-w-6xl mx-auto px-2 sm:px-4 py-2 sm:py-3 flex items-center gap-2 sm:gap-4">
-        {/* Cover + title */}
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+        {/* Cover + title — click to open the expanded "now playing" view. */}
+        <div
+          role="button"
+          tabIndex={0}
+          title="open now playing"
+          aria-label="open now playing"
+          onClick={() => setExpanded(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              setExpanded(true)
+            }
+          }}
+          className="focus-vis flex items-center gap-2 sm:gap-3 min-w-0 flex-1 cursor-pointer rounded-xs"
+        >
           <div className="relative w-10 sm:w-14 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page">
             {t.thumbnail_url ? (
               <img
@@ -124,7 +152,8 @@ export function PlayerBar() {
               type="button"
               onClick={() => p.setVolume(p.volume > 0 ? 0 : 1)}
               title={p.volume > 0 ? 'mute' : 'unmute'}
-              className={`font-pixel text-base transition w-5 text-center flex-shrink-0 ${
+              aria-label={p.volume > 0 ? 'mute' : 'unmute'}
+              className={`focus-vis font-pixel text-base transition w-5 text-center flex-shrink-0 ${
                 p.volume === 0 ? 'text-crit' : 'text-ink-lo hover:text-cool'
               }`}
             >
@@ -153,7 +182,7 @@ export function PlayerBar() {
             onClick={() => setQueueOpen((v) => !v)}
             title="queue"
             aria-label="play queue"
-            className={`font-pixel text-base w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center flex-shrink-0 transition rounded-xs border ${
+            className={`focus-vis font-pixel text-base w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center flex-shrink-0 transition rounded-xs border ${
               queueOpen
                 ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
                 : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
@@ -164,8 +193,9 @@ export function PlayerBar() {
           <button
             type="button"
             onClick={p.stop}
-            className="font-pixel text-sm uppercase tracking-widest px-2 py-1 flex-shrink-0 border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 transition rounded-xs"
+            className="focus-vis font-pixel text-sm uppercase tracking-widest px-2 py-1 flex-shrink-0 border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 transition rounded-xs"
             title="close player"
+            aria-label="close player"
           >
             ✕
           </button>
@@ -189,7 +219,7 @@ function PlayerButton({
   title?: string
 }) {
   const base =
-    'font-pixel text-sm sm:text-base flex items-center justify-center transition disabled:opacity-30 disabled:cursor-not-allowed rounded-xs border'
+    'focus-vis font-pixel text-sm sm:text-base flex items-center justify-center transition disabled:opacity-30 disabled:cursor-not-allowed rounded-xs border'
   const variant = primary
     ? 'w-10 h-10 sm:w-11 sm:h-11 border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25'
     : 'w-8 h-8 sm:w-9 sm:h-9 border-border text-ink-mid hover:text-cool hover:border-cool/70'
@@ -199,6 +229,7 @@ function PlayerButton({
       onClick={onClick}
       disabled={disabled}
       title={title}
+      aria-label={title}
       className={`${base} ${variant}`}
     >
       {children}
@@ -224,7 +255,9 @@ function PlayerToggle({
       type="button"
       onClick={onClick}
       title={title}
-      className={`w-9 h-9 font-pixel text-base ${hideOnMobile ? 'hidden sm:flex' : 'flex'} items-center justify-center transition rounded-xs border ${
+      aria-label={title}
+      aria-pressed={active}
+      className={`focus-vis w-9 h-9 font-pixel text-base ${hideOnMobile ? 'hidden sm:flex' : 'flex'} items-center justify-center transition rounded-xs border ${
         active
           ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
           : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'
