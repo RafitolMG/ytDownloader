@@ -1,6 +1,7 @@
 import shutil
 import yt_dlp
 import os
+import json
 import subprocess
 import re
 from urllib.parse import urlparse, parse_qs
@@ -252,6 +253,49 @@ def get_video_codec(path):
         return out or None
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
+
+
+def read_file_tags(path: str) -> dict | None:
+    """Read embedded metadata tags from a local audio file via ffprobe — fully
+    offline, no network/cookies. yt-dlp's FFmpegMetadata postprocessor embeds
+    album / artist / date at download time, so this recovers album, multi-artist
+    (the joined string) and release year for tracks downloaded before the DB had
+    those columns. Returns the `_extract_music_meta`-style shape plus `title`, or
+    None if ffprobe is unavailable or the file can't be read."""
+    ffmpeg = _get_ffmpeg_path()
+    if not ffmpeg or not os.path.isfile(path):
+        return None
+    ffprobe = ffmpeg.replace('ffmpeg', 'ffprobe', 1)
+    try:
+        out = subprocess.check_output(
+            [ffprobe, '-v', 'error', '-show_entries', 'format_tags', '-of', 'json', path],
+            text=True, timeout=15,
+        )
+        tags = (json.loads(out).get('format') or {}).get('tags') or {}
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+    low = {(k or '').lower(): v for k, v in tags.items()}
+
+    def pick(*keys: str) -> str | None:
+        for k in keys:
+            v = low.get(k)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        return None
+
+    year = None
+    d = pick('date', 'year', 'originalyear', 'original_year')
+    if d and len(d) >= 4 and d[:4].isdigit():
+        year = int(d[:4])
+
+    return {
+        'title': pick('title', 'track'),
+        'artist': pick('artist', 'artists', 'author'),
+        'album': pick('album'),
+        'album_artist': pick('album_artist', 'albumartist'),
+        'release_year': year,
+    }
 
 
 def transcode_video_to_h264(input_file, output_file, video_frames, on_progress=None):

@@ -154,6 +154,21 @@ export const api = {
   album: (albumId: string) =>
     json<AlbumDetailResponse>(`/api/albums/${encodeURIComponent(albumId)}`),
 
+  // ── admin: metadata backfill (offline, from embedded file tags) ──
+  adminBackfillMetadata: (
+    opts: { onlyMissing?: boolean; overwriteArtist?: boolean } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    qs.set('only_missing', String(opts.onlyMissing ?? true))
+    qs.set('overwrite_artist', String(opts.overwriteArtist ?? true))
+    return json<{
+      scanned: number
+      updated: number
+      no_file: number
+      no_new_tags: number
+    }>(`/api/admin/tracks/backfill-metadata?${qs.toString()}`, { method: 'POST' })
+  },
+
   // ── music library ──
   library: (limit = 500) =>
     json<LibraryResponse>(`/api/library?limit=${limit}`),
