@@ -5,7 +5,6 @@ import type {
   AdminTrackSort,
   AdminTracksResponse,
   AdminDeleteTrackResponse,
-  AdminCleanupResponse,
   AdminSystem,
   JobStatus,
   CatalogResponse,
@@ -366,14 +365,12 @@ export const api = {
 
   adminTracks: (
     params: {
-      orphans_only?: boolean
       sort?: AdminTrackSort
       limit?: number
       offset?: number
     } = {},
   ) => {
     const qs = new URLSearchParams()
-    if (params.orphans_only) qs.set('orphans_only', 'true')
     if (params.sort) qs.set('sort', params.sort)
     if (params.limit != null) qs.set('limit', String(params.limit))
     if (params.offset != null) qs.set('offset', String(params.offset))
@@ -395,11 +392,6 @@ export const api = {
       { method: 'DELETE' },
     )
   },
-
-  adminCleanupOrphans: () =>
-    json<AdminCleanupResponse>('/api/admin/tracks/cleanup-orphans', {
-      method: 'POST',
-    }),
 
   adminSystem: () => json<AdminSystem>('/api/admin/system'),
 }

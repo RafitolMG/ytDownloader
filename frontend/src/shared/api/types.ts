@@ -387,6 +387,8 @@ export type AdminTrack = {
   file_size: number | null
   downloaded_at: string
   owner_count: number
+  /** Number of playlists referencing this track — deleting it cascades these. */
+  playlist_count: number
   file_exists: boolean
 }
 
@@ -397,11 +399,7 @@ export type AdminDeleteTrackResponse = {
   deleted: true
   bytes_reclaimed: number
   owner_count: number
-}
-
-export type AdminCleanupResponse = {
-  deleted: number
-  bytes_reclaimed: number
+  playlist_count: number
 }
 
 export type AdminSystem = {
