@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom'
+import { useAuth } from '@/features/auth/AuthProvider'
 
 // Labels collapse to icon-only below `md` so the nav fits on phones/small
 // tablets without wrapping into a second row. Each tab carries an aria-label
@@ -17,9 +18,16 @@ const baseCls =
   'font-pixel text-base md:text-lg uppercase tracking-widest px-2 md:px-3 py-1 rounded-xs border transition flex items-center gap-2'
 
 export function NavTabs() {
+  const { user } = useAuth()
+  // The admin console is gated to ADMINs — only surface the tab when the
+  // logged-in user can actually reach /admin (RequireAdmin guards the route).
+  const tabs =
+    user?.role === 'ADMIN'
+      ? [...TABS, { to: '/admin', icon: '◈', label: 'admin' }]
+      : TABS
   return (
     <nav className="flex items-center gap-1 md:gap-2 flex-wrap">
-      {TABS.map((t) => (
+      {tabs.map((t) => (
         <NavLink
           key={t.to}
           to={t.to}

@@ -7,7 +7,9 @@ import PlaylistsPage from '@/pages/PlaylistsPage'
 import PlaylistDetailPage from '@/pages/PlaylistDetailPage'
 import LikedSongsPage from '@/pages/LikedSongsPage'
 import LoginPage from '@/pages/LoginPage'
+import AdminPage from '@/pages/AdminPage'
 import { RequireAuth } from '@/features/auth/RequireAuth'
+import { RequireAdmin } from '@/features/auth/RequireAdmin'
 
 export function AppRouter() {
   return (
@@ -71,6 +73,15 @@ export function AppRouter() {
           <RequireAuth>
             <PlaylistDetailPage />
           </RequireAuth>
+        }
+      />
+      {/* RequireAdmin already covers auth — don't double-wrap in RequireAuth. */}
+      <Route
+        path="/admin"
+        element={
+          <RequireAdmin>
+            <AdminPage />
+          </RequireAdmin>
         }
       />
     </Routes>
