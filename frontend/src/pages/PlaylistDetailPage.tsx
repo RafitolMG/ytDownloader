@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { ConfirmButton } from '@/shared/ui/ConfirmButton'
+import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
+import { useToast } from '@/shared/ui/ToastProvider'
 import { api } from '@/shared/api/client'
 import type {
   LibraryItem,
@@ -43,6 +45,7 @@ function PlaylistDetailView() {
   const activeCount = countActive(jobsQuery.data)
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const showToast = useToast()
 
   const playlistQuery = useQuery({
     queryKey: ['playlist', id],
@@ -77,9 +80,22 @@ function PlaylistDetailView() {
   const remove = useMutation({
     mutationFn: (key: { video_id: string; codec: string; bitrate: string }) =>
       api.removeFromPlaylist(id, key.video_id, key.codec, key.bitrate),
-    onSuccess: () => {
+    onSuccess: (_data, key) => {
       qc.invalidateQueries({ queryKey: ['playlist', id] })
       qc.invalidateQueries({ queryKey: ['playlists'] })
+      showToast({
+        message: 'removed from playlist',
+        variant: 'success',
+        action: {
+          label: 'undo',
+          onClick: () => {
+            void api.addToPlaylist(id, key).then(() => {
+              qc.invalidateQueries({ queryKey: ['playlist', id] })
+              qc.invalidateQueries({ queryKey: ['playlists'] })
+            })
+          },
+        },
+      })
     },
   })
 
@@ -291,8 +307,8 @@ function TrackRow({
         </span>
       )}
       <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
-        {isCurrent && player.isPlaying ? (
-          <span className="text-hot">▶</span>
+        {isCurrent ? (
+          <NowPlayingTick playing={player.isPlaying} />
         ) : (
           String(position + 1).padStart(2, '0')
         )}
