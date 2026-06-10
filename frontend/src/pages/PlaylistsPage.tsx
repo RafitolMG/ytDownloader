@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
+import { useToast } from '@/shared/ui/ToastProvider'
 import { api } from '@/shared/api/client'
 import type { PlaylistSummary, PlaylistVisibility } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
@@ -78,6 +79,7 @@ export default function PlaylistsPage() {
             <TabButton active={tab === 'public'} onClick={() => setTab('public')}>
               ◉ public
             </TabButton>
+            <ImportButton />
             <button
               type="button"
               onClick={() => setCreating(true)}
@@ -127,6 +129,74 @@ export default function PlaylistsPage() {
         )}
       </main>
     </div>
+  )
+}
+
+/** Import a playlist from a JSON file (exported elsewhere): create it, then add
+ * each track. Tracks already in the shared catalog link instantly; ones not in
+ * the catalog are reported as skipped (they'd need a real download first). */
+function ImportButton() {
+  const qc = useQueryClient()
+  const showToast = useToast()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function onFile(file: File) {
+    setBusy(true)
+    try {
+      const data = JSON.parse(await file.text())
+      const name = String(data?.name || file.name.replace(/\.json$/i, '') || 'Imported playlist').slice(0, 100)
+      const tracks: Array<{ video_id?: string; codec?: string; bitrate?: string }> =
+        Array.isArray(data?.tracks) ? data.tracks : []
+      const { id } = await api.createPlaylist({
+        name,
+        description: typeof data?.description === 'string' ? data.description : null,
+        visibility: 'private',
+      })
+      const results = await Promise.allSettled(
+        tracks.map((t) =>
+          t?.video_id && t?.codec && t?.bitrate
+            ? api.addToPlaylist(id, { video_id: t.video_id, codec: t.codec, bitrate: t.bitrate })
+            : Promise.reject(new Error('bad track')),
+        ),
+      )
+      const added = results.filter((r) => r.status === 'fulfilled').length
+      const missing = results.length - added
+      qc.invalidateQueries({ queryKey: ['playlists'] })
+      showToast({
+        message: `imported "${name}" — ${added} added${missing ? `, ${missing} not in catalog yet` : ''}`,
+        variant: missing ? 'info' : 'success',
+      })
+    } catch {
+      showToast({ message: 'import failed — invalid playlist file', variant: 'err' })
+    } finally {
+      setBusy(false)
+      if (inputRef.current) inputRef.current.value = ''
+    }
+  }
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) void onFile(f)
+        }}
+      />
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => inputRef.current?.click()}
+        title="import a playlist from a JSON file"
+        className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-border text-ink-lo hover:text-cool hover:border-cool/70 disabled:opacity-50 transition rounded-xs"
+      >
+        {busy ? '··· importing' : '⬆ import'}
+      </button>
+    </>
   )
 }
 
