@@ -192,6 +192,10 @@ function PlaylistDetailView() {
                 ▶ play all
               </button>
             )}
+            {playlist.visibility === 'public' && <ShareButton id={playlist.id} />}
+            {tracks.length > 0 && (
+              <ExportButton name={playlist.name} description={playlist.description} tracks={tracks} />
+            )}
             {playlist.is_owner && (
               <EditPlaylistButton
                 id={playlist.id}
@@ -510,4 +514,72 @@ function fmtDuration(sec: number): string {
   const mm = String(m).padStart(h > 0 ? 2 : 1, '0')
   const ss = String(s).padStart(2, '0')
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
+}
+
+/** Copy a shareable link to this (public) playlist. Any logged-in user can open
+ * it via the normal /playlists/:id route — public playlists are viewable. */
+function ShareButton({ id }: { id: string }) {
+  const showToast = useToast()
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        const url = `${window.location.origin}/playlists/${id}`
+        try {
+          await navigator.clipboard.writeText(url)
+          showToast({ message: 'share link copied', variant: 'success' })
+        } catch {
+          showToast({ message: url, variant: 'info' })
+        }
+      }}
+      title="copy a link to this public playlist"
+      className="focus-vis font-pixel text-sm uppercase tracking-widest px-3 py-1 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+    >
+      ◈ share
+    </button>
+  )
+}
+
+/** Download this playlist as portable JSON (importable on Playlists). */
+function ExportButton({
+  name,
+  description,
+  tracks,
+}: {
+  name: string
+  description: string | null
+  tracks: PlaylistTrackRow[]
+}) {
+  const onExport = () => {
+    const data = {
+      name,
+      description,
+      tracks: tracks.map((t) => ({
+        video_id: t.video_id,
+        codec: t.codec,
+        bitrate: t.bitrate,
+        title: t.title,
+        artist: t.artist,
+      })),
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name.replace(/[^\w.-]+/g, '_').slice(0, 80) || 'playlist'}.json`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+  return (
+    <button
+      type="button"
+      onClick={onExport}
+      title="download this playlist as JSON"
+      className="focus-vis font-pixel text-sm uppercase tracking-widest px-3 py-1 border border-border text-ink-lo hover:text-cool hover:border-cool/70 transition rounded-xs"
+    >
+      ⬇ export
+    </button>
+  )
 }
