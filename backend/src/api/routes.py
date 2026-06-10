@@ -27,6 +27,7 @@ from src import (
     catalog_categories as categories_mod,
     config,
     db,
+    rate_limit,
     search as search_mod,
     ytDownloaderFunctions,
 )
@@ -182,9 +183,33 @@ def _validate_youtube_url(url: str) -> None:
         raise HTTPException(status_code=400, detail="only youtube urls are allowed")
 
 
+_extraction_limiter = rate_limit.SlidingWindowLimiter(
+    config.RATELIMIT_PER_MIN, config.RATELIMIT_WINDOW_SEC,
+)
+
+
+def rate_limit_extraction(user: CurrentUser = Depends(current_user)) -> CurrentUser:
+    """Dependency for yt-dlp-bound endpoints: 429 (with Retry-After) once a
+    non-admin user exceeds the per-user extraction budget, so one user can't
+    saturate the extraction threadpool or hammer YouTube against the shared
+    cookies. ADMINs are exempt."""
+    if user.is_admin:
+        return user
+    ok, retry_after = _extraction_limiter.check(user.user_id)
+    if not ok:
+        raise HTTPException(
+            status_code=429,
+            detail="too many requests — slow down a moment",
+            headers={"Retry-After": str(retry_after)},
+        )
+    return user
+
+
 @app.post("/api/resolutions")
 def get_resolutions(
-    body: ResolutionsRequest, user: CurrentUser = Depends(current_user)
+    body: ResolutionsRequest,
+    user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """Fetch available MP4 formats for a single video, or detect a playlist URL."""
     _validate_youtube_url(body.url)
@@ -1075,6 +1100,7 @@ def catalog_discover(
     limit: int = 20,
     external_limit: int = 10,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """
     Hybrid search: local catalog + YouTube candidates that aren't yet in the
@@ -1226,6 +1252,7 @@ def catalog_category(
     limit: int = 12,
     external_limit: int = 18,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """A category feed: the curated seed search run through the discover
     pipeline — catalog tracks you can play + YouTube candidates to download."""
@@ -1248,6 +1275,7 @@ def catalog_radio(
     video_id: str,
     external_limit: int = 18,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """"More like this" / artist radio for a track: the seed's YouTube Mix split
     into what's already in the catalog (playable now) and new candidates to
@@ -1298,6 +1326,7 @@ def albums_search(
     q: str = "",
     limit: int = 12,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """Search YouTube Music for albums. Each result carries enough to render a
     cover card (title/artist/cover/track count) and to open the album or fire a
@@ -1964,6 +1993,7 @@ def search_videos(
     q: str = "",
     limit: int = 20,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """yt-dlp ytsearch:<q> — listing-level metadata only. Cached 5min."""
     try:
