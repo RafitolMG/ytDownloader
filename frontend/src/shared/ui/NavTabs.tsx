@@ -16,7 +16,7 @@ const TABS: { to: string; icon: string; label: string }[] = [
 ]
 
 const baseCls =
-  'font-pixel text-base md:text-lg uppercase tracking-widest px-2 md:px-3 py-1 rounded-xs border transition flex items-center gap-2'
+  'focus-vis font-pixel text-base md:text-lg uppercase tracking-widest px-2 md:px-3 py-1 rounded-xs border transition flex items-center gap-2'
 
 export function NavTabs() {
   const { user } = useAuth()

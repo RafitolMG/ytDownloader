@@ -304,3 +304,11 @@ body::after {
 @media (prefers-reduced-motion: reduce) {
   .nptick > span { animation: none !important; height: 70%; }
 }
+
+/* Accessible focus ring — only on keyboard focus (focus-visible), cyan to fit
+   the theme. Applied via the .focus-vis class on interactive controls. */
+.focus-vis:focus-visible {
+  outline: 2px solid var(--color-cool);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
