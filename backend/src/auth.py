@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Cookie, HTTPException, status
+from fastapi import Cookie, Depends, HTTPException, status
 
 from src import config, db, homeauth
 
@@ -120,6 +120,16 @@ def current_user(ytdl_session: str | None = Cookie(default=None, alias=config.SE
         username=session["username"],
         role=session["role"],
     )
+
+
+def require_admin(user: CurrentUser = Depends(current_user)) -> CurrentUser:
+    """FastAPI dependency for admin-only routes. Layers on top of
+    `current_user`, so missing/expired sessions still 401 first; a valid
+    non-admin session then yields 403. DEV_AUTH_BYPASS makes the dev user
+    ADMIN, so local dev passes every admin route."""
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin only")
+    return user
 
 
 def optional_user(ytdl_session: str | None = Cookie(default=None, alias=config.SESSION_COOKIE_NAME)) -> CurrentUser | None:

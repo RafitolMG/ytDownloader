@@ -1,4 +1,13 @@
 import type {
+  AdminOverview,
+  AdminUsersResponse,
+  AdminJobsResponse,
+  AdminTrackSort,
+  AdminTracksResponse,
+  AdminDeleteTrackResponse,
+  AdminCleanupResponse,
+  AdminSystem,
+  JobStatus,
   CatalogResponse,
   CatalogSort,
   DiscoverResponse,
@@ -326,4 +335,56 @@ export const api = {
       `/api/playlists/${encodeURIComponent(id)}/order`,
       { method: 'PATCH', body: JSON.stringify({ order }) },
     ),
+
+  // ── admin ──
+  adminOverview: () => json<AdminOverview>('/api/admin/overview'),
+
+  adminUsers: () => json<AdminUsersResponse>('/api/admin/users'),
+
+  adminJobs: (params: { status?: JobStatus; limit?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (params.status) qs.set('status', params.status)
+    if (params.limit != null) qs.set('limit', String(params.limit))
+    const tail = qs.toString()
+    return json<AdminJobsResponse>(`/api/admin/jobs${tail ? `?${tail}` : ''}`)
+  },
+
+  adminTracks: (
+    params: {
+      orphans_only?: boolean
+      sort?: AdminTrackSort
+      limit?: number
+      offset?: number
+    } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    if (params.orphans_only) qs.set('orphans_only', 'true')
+    if (params.sort) qs.set('sort', params.sort)
+    if (params.limit != null) qs.set('limit', String(params.limit))
+    if (params.offset != null) qs.set('offset', String(params.offset))
+    const tail = qs.toString()
+    return json<AdminTracksResponse>(`/api/admin/tracks${tail ? `?${tail}` : ''}`)
+  },
+
+  adminDeleteTrack: (
+    videoId: string,
+    codec: string,
+    bitrate: string,
+    opts: { force?: boolean } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    if (opts.force) qs.set('force', 'true')
+    const tail = qs.toString()
+    return json<AdminDeleteTrackResponse>(
+      `/api/admin/tracks/${encodeURIComponent(videoId)}/${encodeURIComponent(codec)}/${encodeURIComponent(bitrate)}${tail ? `?${tail}` : ''}`,
+      { method: 'DELETE' },
+    )
+  },
+
+  adminCleanupOrphans: () =>
+    json<AdminCleanupResponse>('/api/admin/tracks/cleanup-orphans', {
+      method: 'POST',
+    }),
+
+  adminSystem: () => json<AdminSystem>('/api/admin/system'),
 }
