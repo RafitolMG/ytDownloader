@@ -151,21 +151,9 @@ CREATE INDEX IF NOT EXISTS idx_track_owners_track ON track_owners(video_id, code
 -- AFTER the idempotent ALTERs — a legacy `tracks` table predates the column, so
 -- indexing it here (before the ALTER) would fail with "no such column: album".
 
--- `track_likes`: heart/favorite. Independent from ownership so a user can
--- like a track without adding it to their library, and vice versa.
-CREATE TABLE IF NOT EXISTS track_likes (
-    user_id  TEXT NOT NULL,
-    video_id TEXT NOT NULL,
-    codec    TEXT NOT NULL,
-    bitrate  TEXT NOT NULL,
-    liked_at TEXT NOT NULL,
-    PRIMARY KEY (user_id, video_id, codec, bitrate),
-    FOREIGN KEY (video_id, codec, bitrate)
-        REFERENCES tracks(video_id, codec, bitrate) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_track_likes_track ON track_likes(video_id, codec, bitrate);
-CREATE INDEX IF NOT EXISTS idx_track_likes_user  ON track_likes(user_id, liked_at DESC);
+-- NOTE: the legacy `track_likes` table is gone — "liked" and "in library" were
+-- merged (the heart toggle is the library toggle, `owner_count` is the social
+-- signal). Existing DBs drop it via migration 3 in init().
 
 -- `plays`: one row per recorded playback. Append-only listening log that powers
 -- "recently played" and personalized daily mixes. A play is recorded only after
@@ -238,28 +226,70 @@ CANCELLED = "cancelled"
 ACTIVE_STATUSES = (QUEUED, DOWNLOADING, MERGING, TRANSCODING)
 
 
+# ── Migrations ─────────────────────────────────────────────────────────────────
+# Versioned, ordered, applied once each via `schema_meta.version`. Every step is
+# still written idempotently (PRAGMA checks / IF [NOT] EXISTS) so a DB in any
+# prior state — including one that pre-dates schema_meta — migrates cleanly. To
+# evolve the schema: append a new (version, fn) entry; never edit a shipped one.
+
+def _migrate_jobs_owner_id(conn: sqlite3.Connection) -> None:
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "owner_id" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN owner_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_id)")
+
+
+def _migrate_tracks_album(conn: sqlite3.Connection) -> None:
+    # CREATE TABLE IF NOT EXISTS won't alter a legacy `tracks` table, so add the
+    # album columns by hand. The index is created after, once `album` is sure to
+    # exist (indexing it inside the base schema would fail on an un-migrated DB).
+    track_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
+    for col, decl in (
+        ("album", "TEXT"),
+        ("album_artist", "TEXT"),
+        ("release_year", "INTEGER"),
+    ):
+        if col not in track_cols:
+            conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {decl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album)")
+
+
+def _migrate_drop_track_likes(conn: sqlite3.Connection) -> None:
+    # "Liked" and "in library" were merged; the table has been dead since.
+    conn.execute("DROP INDEX IF EXISTS idx_track_likes_track")
+    conn.execute("DROP INDEX IF EXISTS idx_track_likes_user")
+    conn.execute("DROP TABLE IF EXISTS track_likes")
+
+
+# (version, migration_fn) in apply order. Bump past `current` runs only the new ones.
+_MIGRATIONS: list[tuple[int, Any]] = [
+    (1, _migrate_jobs_owner_id),
+    (2, _migrate_tracks_album),
+    (3, _migrate_drop_track_likes),
+]
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL)")
+    row = conn.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
+    if row is None:
+        conn.execute("INSERT INTO schema_meta (version) VALUES (0)")
+        current = 0
+    else:
+        current = int(row["version"])
+    for version, fn in _MIGRATIONS:
+        if version > current:
+            fn(conn)
+            conn.execute("UPDATE schema_meta SET version = ?", (version,))
+            current = version
+
+
 def init() -> None:
-    """Create schema, then mark any jobs left mid-flight as interrupted."""
+    """Create the base schema, run pending migrations, then mark any jobs left
+    mid-flight (from a crash/restart) as interrupted."""
     with _write() as conn:
         conn.executescript(_SCHEMA)
-        # Idempotent ALTER for owner_id (legacy DBs predate this column).
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
-        if "owner_id" not in cols:
-            conn.execute("ALTER TABLE jobs ADD COLUMN owner_id TEXT")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_id)")
-        # Album metadata columns landed after the tracks table shipped; add them
-        # idempotently for legacy DBs (CREATE TABLE IF NOT EXISTS won't alter an
-        # existing table). The album index is created by the schema script above.
-        track_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
-        for col, decl in (
-            ("album", "TEXT"),
-            ("album_artist", "TEXT"),
-            ("release_year", "INTEGER"),
-        ):
-            if col not in track_cols:
-                conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {decl}")
-        # Safe now that `album` is guaranteed to exist (fresh schema or ALTER'd).
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album)")
+        _run_migrations(conn)
         conn.execute(
             f"UPDATE jobs SET status = '{INTERRUPTED}', error_message = ? "
             f"WHERE status IN ({','.join('?' * len(ACTIVE_STATUSES))})",
