@@ -1380,18 +1380,16 @@ def admin_list_users() -> list[dict[str, Any]]:
 
 def admin_list_tracks(
     *,
-    orphans_only: bool = False,
     sort: str = 'largest',
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     """Catalog tracks for the storage-management table. Each row carries
-    `owner_count` (number of users who have it in their library); `orphans_only`
-    restricts to owner_count == 0. `sort` is one of `_ADMIN_TRACK_SORTS`
-    (unknown → 'largest'). The route adds `file_exists` per row — no fs access
-    here."""
+    `owner_count` (users who have it in their library) and `playlist_count`
+    (playlists that reference it) so the admin sees what a delete would affect.
+    `sort` is one of `_ADMIN_TRACK_SORTS` (unknown → 'largest'). The route adds
+    `file_exists` per row — no fs access here."""
     order_by = _ADMIN_TRACK_SORTS.get(sort, _ADMIN_TRACK_SORTS['largest'])
-    having = "HAVING owner_count = 0" if orphans_only else ""
     conn = _get_conn()
     rows = conn.execute(
         f"""
@@ -1401,10 +1399,12 @@ def admin_list_tracks(
             (SELECT COUNT(*) FROM track_owners o
               WHERE o.video_id = t.video_id
                 AND o.codec    = t.codec
-                AND o.bitrate  = t.bitrate) AS owner_count
+                AND o.bitrate  = t.bitrate) AS owner_count,
+            (SELECT COUNT(*) FROM playlist_tracks pt
+              WHERE pt.video_id = t.video_id
+                AND pt.codec    = t.codec
+                AND pt.bitrate  = t.bitrate) AS playlist_count
           FROM tracks t
-         GROUP BY t.video_id, t.codec, t.bitrate
-         {having}
          ORDER BY {order_by}
          LIMIT ? OFFSET ?
         """,
@@ -1413,20 +1413,15 @@ def admin_list_tracks(
     return [dict(r) for r in rows]
 
 
-def admin_orphan_tracks() -> list[dict[str, Any]]:
-    """Every master track with no owners (owner_count == 0) — the worklist the
-    cleanup-orphans route iterates to rm files + call `delete_track_master`.
-    Minimal projection (no metadata); no fs access here."""
+def count_playlist_refs(video_id: str, codec: str, bitrate: str) -> int:
+    """How many playlists reference this track. Deleting the master cascades
+    playlist_tracks, so a delete must account for these (not just owners)."""
     conn = _get_conn()
-    rows = conn.execute(
+    row = conn.execute(
         """
-        SELECT t.video_id, t.codec, t.bitrate, t.file_path, t.file_size
-          FROM tracks t
-         WHERE NOT EXISTS(
-                SELECT 1 FROM track_owners o
-                 WHERE o.video_id = t.video_id
-                   AND o.codec    = t.codec
-                   AND o.bitrate  = t.bitrate)
-        """
-    ).fetchall()
-    return [dict(r) for r in rows]
+        SELECT COUNT(*) AS n FROM playlist_tracks
+         WHERE video_id = ? AND codec = ? AND bitrate = ?
+        """,
+        (video_id, codec, bitrate),
+    ).fetchone()
+    return int(row["n"]) if row else 0

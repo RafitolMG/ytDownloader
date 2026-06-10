@@ -440,12 +440,11 @@ const TRACK_SORTS: { id: AdminTrackSort; label: string }[] = [
 
 function StorageView() {
   const queryClient = useQueryClient()
-  const [orphansOnly, setOrphansOnly] = useState(false)
   const [sort, setSort] = useState<AdminTrackSort>('largest')
 
   const q = useQuery({
-    queryKey: ['admin', 'tracks', { orphans_only: orphansOnly, sort }],
-    queryFn: () => api.adminTracks({ orphans_only: orphansOnly, sort, limit: 200 }),
+    queryKey: ['admin', 'tracks', { sort }],
+    queryFn: () => api.adminTracks({ sort, limit: 200 }),
     staleTime: 10_000,
   })
 
@@ -467,29 +466,11 @@ function StorageView() {
     onSuccess: invalidate,
   })
 
-  const cleanup = useMutation({
-    mutationFn: () => api.adminCleanupOrphans(),
-    onSuccess: invalidate,
-  })
-
   const tracks = q.data?.tracks ?? []
 
   return (
     <>
       <div className="mb-3 flex items-center gap-2 flex-wrap">
-        <button
-          type="button"
-          onClick={() => setOrphansOnly((o) => !o)}
-          title="show only tracks no user owns"
-          className={`font-pixel text-xs uppercase tracking-widest px-3 py-1 border rounded-xs transition ${
-            orphansOnly
-              ? 'border-crit/60 text-crit bg-crit/10'
-              : 'border-border text-ink-lo hover:text-cool hover:border-cool/70'
-          }`}
-        >
-          ⚠ orphans only
-        </button>
-
         {TRACK_SORTS.map((s) => (
           <button
             key={s.id}
@@ -508,12 +489,6 @@ function StorageView() {
         <span className="flex-1" />
 
         <BackfillButton onDone={invalidate} />
-
-        <CleanOrphansButton
-          onConfirm={() => cleanup.mutate()}
-          pending={cleanup.isPending}
-          result={cleanup.data ?? null}
-        />
       </div>
 
       {q.isLoading ? (
@@ -522,9 +497,7 @@ function StorageView() {
         <ErrorLine error={q.error} />
       ) : tracks.length === 0 ? (
         <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
-          {orphansOnly
-            ? '⊹ no orphan tracks — every master is owned ⊹'
-            : '⊹ no tracks on disk ⊹'}
+          ⊹ no tracks on disk ⊹
         </div>
       ) : (
         <ul className="card-vapor rounded-sm divide-y divide-border">
@@ -532,6 +505,7 @@ function StorageView() {
             <span className="flex-1 min-w-0">track</span>
             <span className="w-16 sm:w-20 text-right">codec</span>
             <span className="w-14 text-right">owners</span>
+            <span className="w-14 text-right">lists</span>
             <span className="w-16 sm:w-20 text-right">size</span>
             <span className="w-[5.5rem] text-right">action</span>
           </TableHeader>
@@ -565,9 +539,11 @@ function StorageRow({
   onDelete: (force: boolean) => void
   busy: boolean
 }) {
-  const isOrphan = track.owner_count === 0
-  // Owned tracks need force=true to delete; orphans don't.
-  const force = !isOrphan
+  // A track is "in use" if any user owns it OR any playlist references it.
+  // Deleting a master cascades playlist_tracks, so an in-use delete needs
+  // force=true (and a clear warning) — a not-favourited track can still live in
+  // someone's playlist.
+  const inUse = track.owner_count > 0 || track.playlist_count > 0
   return (
     <li className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2">
       <div className="flex-1 min-w-0">
@@ -581,8 +557,10 @@ function StorageRow({
               {fmtDuration(track.duration_sec)}
             </span>
           )}
-          {isOrphan && (
-            <span className="text-crit uppercase tracking-widest">⚠ orphan</span>
+          {track.playlist_count > 0 && (
+            <span className="text-sun uppercase tracking-widest">
+              ⚠ in {track.playlist_count} playlist{track.playlist_count === 1 ? '' : 's'}
+            </span>
           )}
           {!track.file_exists && (
             <span className="text-crit uppercase tracking-widest">⚠ missing</span>
@@ -594,12 +572,16 @@ function StorageRow({
         {track.codec}·{track.bitrate}
       </span>
 
+      <span className="w-14 text-right font-sans text-sm tabular-nums text-violet">
+        {track.owner_count}
+      </span>
+
       <span
         className={`w-14 text-right font-sans text-sm tabular-nums ${
-          isOrphan ? 'text-crit' : 'text-violet'
+          track.playlist_count > 0 ? 'text-sun' : 'text-ink-lo'
         }`}
       >
-        {track.owner_count}
+        {track.playlist_count}
       </span>
 
       <span className="w-16 sm:w-20 text-right font-sans text-sm text-cool tabular-nums">
@@ -608,13 +590,13 @@ function StorageRow({
 
       <div className="w-[5.5rem] flex items-center justify-end">
         <ConfirmButton
-          onConfirm={() => onDelete(force)}
+          onConfirm={() => onDelete(inUse)}
           disabled={busy}
           idle="✕ del"
           title={
-            force
-              ? 'force-delete an owned track + its file'
-              : 'delete this orphan track + its file'
+            inUse
+              ? 'force-delete a track that is owned or in a playlist (removes it from those playlists) + its file'
+              : 'delete this unused track + its file'
           }
         />
       </div>
@@ -648,63 +630,6 @@ function BackfillButton({ onDone }: { onDone: () => void }) {
         : r
           ? `✓ filled ${r.updated}/${r.scanned}`
           : '◈ backfill metadata'}
-    </button>
-  )
-}
-
-function CleanOrphansButton({
-  onConfirm,
-  pending,
-  result,
-}: {
-  onConfirm: () => void
-  pending: boolean
-  result: { deleted: number; bytes_reclaimed: number } | null
-}) {
-  const [armed, setArmed] = useState(false)
-
-  if (result && !armed) {
-    return (
-      <span className="font-pixel text-xs uppercase tracking-widest text-violet">
-        ✓ removed {result.deleted} · freed {fmtBytes(result.bytes_reclaimed)}
-      </span>
-    )
-  }
-
-  if (armed) {
-    return (
-      <span className="flex items-center gap-1">
-        <button
-          type="button"
-          disabled={pending}
-          onClick={() => {
-            onConfirm()
-            setArmed(false)
-          }}
-          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-crit/60 text-crit bg-crit/10 hover:bg-crit/20 transition rounded-xs disabled:opacity-40"
-        >
-          ⚠ confirm
-        </button>
-        <button
-          type="button"
-          onClick={() => setArmed(false)}
-          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool transition rounded-xs"
-        >
-          ✕ cancel
-        </button>
-      </span>
-    )
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={() => setArmed(true)}
-      disabled={pending}
-      title="delete every orphan master track + its file on disk"
-      className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-crit/60 text-crit hover:bg-crit/10 transition rounded-xs disabled:opacity-40"
-    >
-      {pending ? '··· cleaning' : '⚠ clean orphans'}
     </button>
   )
 }
