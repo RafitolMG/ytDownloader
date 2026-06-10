@@ -737,26 +737,31 @@ def list_catalog(
     """
     order_by = _CATALOG_SORTS.get(sort, _CATALOG_SORTS['newest'])
 
-    # Positional params must line up with the order `?` placeholders appear in
-    # the final SQL text: the SELECT's is_owned EXISTS first, then WHERE
-    # conditions, then LIMIT/OFFSET.
+    # owner_count (COUNT) and is_owned (per-viewer) used to be two correlated
+    # subqueries evaluated per row — 600-1000 executions at the limits the
+    # catalog/discover/radio/daily-mixes endpoints use. A single LEFT JOIN +
+    # GROUP BY computes both in one pass (served by idx_track_owners_track).
+    #
+    # Param order must match the `?` order in the final SQL text: is_owned's
+    # viewer in the SELECT, then the WHERE LIKE pair, then the owned_only HAVING
+    # viewer, then LIMIT/OFFSET.
     conditions: list[str] = []
     where_params: list[Any] = []
     if query:
         conditions.append("(t.title LIKE ? OR t.artist LIKE ?)")
         wildcard = f"%{query}%"
         where_params.extend([wildcard, wildcard])
-    if owned_only:
-        conditions.append(
-            """EXISTS(SELECT 1 FROM track_owners o4
-                    WHERE o4.owner_id = ?
-                      AND o4.video_id = t.video_id
-                      AND o4.codec    = t.codec
-                      AND o4.bitrate  = t.bitrate)"""
-        )
-        where_params.append(viewer_id)
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    params: list[Any] = [viewer_id, *where_params, limit, offset]
+
+    having = ""
+    having_params: list[Any] = []
+    if owned_only:
+        # Keep only tracks the viewer owns — a post-aggregate filter reusing the
+        # same is_owned expression instead of a second correlated subquery.
+        having = " HAVING MAX(CASE WHEN o.owner_id = ? THEN 1 ELSE 0 END) = 1"
+        having_params.append(viewer_id)
+
+    params: list[Any] = [viewer_id, *where_params, *having_params, limit, offset]
 
     conn = _get_conn()
     rows = conn.execute(
@@ -765,17 +770,16 @@ def list_catalog(
             t.video_id, t.codec, t.bitrate, t.title, t.artist,
             t.album, t.album_artist, t.release_year, t.duration_sec,
             t.thumbnail_url, t.source_url, t.file_size, t.downloaded_at,
-            (SELECT COUNT(*) FROM track_owners o2
-              WHERE o2.video_id = t.video_id
-                AND o2.codec    = t.codec
-                AND o2.bitrate  = t.bitrate) AS owner_count,
-            EXISTS(SELECT 1 FROM track_owners o3
-                    WHERE o3.owner_id = ?
-                      AND o3.video_id = t.video_id
-                      AND o3.codec    = t.codec
-                      AND o3.bitrate  = t.bitrate) AS is_owned
+            COUNT(o.owner_id) AS owner_count,
+            MAX(CASE WHEN o.owner_id = ? THEN 1 ELSE 0 END) AS is_owned
           FROM tracks t
+          LEFT JOIN track_owners o
+            ON o.video_id = t.video_id
+           AND o.codec    = t.codec
+           AND o.bitrate  = t.bitrate
           {where}
+         GROUP BY t.video_id, t.codec, t.bitrate
+         {having}
          ORDER BY {order_by}
          LIMIT ? OFFSET ?
         """,
