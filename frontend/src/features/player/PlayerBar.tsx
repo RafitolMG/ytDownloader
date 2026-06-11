@@ -19,7 +19,7 @@ export function PlayerBar() {
   const pct = dur > 0 ? Math.min(100, (p.position / dur) * 100) : 0
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-page-mid shadow-[0_-8px_32px_rgba(0,0,0,0.6)]">
+    <div className="fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] sm:bottom-0 left-0 right-0 z-40 border-t border-border bg-page-mid shadow-[0_-8px_32px_rgba(0,0,0,0.6)]">
       {queueOpen && <PlayQueuePanel onClose={() => setQueueOpen(false)} />}
       {expanded && <NowPlayingView onClose={() => setExpanded(false)} />}
       {/* Seek bar — clickable strip across the top of the player. A wrapper adds

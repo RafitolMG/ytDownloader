@@ -36,7 +36,7 @@ export function QueueDrawer({
         role="dialog"
         aria-label="download queue"
         aria-modal="true"
-        className={`fixed top-0 right-0 z-50 h-full w-full sm:w-[30rem] max-w-full bg-page-mid border-l border-cool/40 shadow-[var(--shadow-glow-cool)] flex flex-col transition-transform duration-200 ease-out ${
+        className={`fixed top-0 right-0 z-50 h-full w-full sm:w-[30rem] max-w-full bg-page-mid border-l border-cool/40 shadow-[var(--shadow-glow-cool)] flex flex-col transition-transform duration-200 ease-out pt-[env(safe-area-inset-top)] ${
           open ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
@@ -49,7 +49,7 @@ export function QueueDrawer({
             onClick={onClose}
             title="close"
             aria-label="close queue"
-            className="font-pixel text-sm uppercase tracking-widest px-2 py-px border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 transition rounded-xs"
+            className="font-pixel text-base uppercase tracking-widest w-10 h-10 flex items-center justify-center border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 active:text-crit transition rounded-xs"
           >
             ✕
           </button>
