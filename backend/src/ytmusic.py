@@ -91,6 +91,34 @@ def clean_artists(video_id: str) -> list[str] | None:
     return names or None
 
 
+def square_cover(video_id: str, size: int = 1080) -> "str | None":
+    """Return a square album-cover URL for a YT Music track, or None.
+
+    The stored thumbnail is the 16:9 video frame, which a square notification /
+    now-playing slot crops awkwardly. YT Music exposes proper square art on
+    yt3.googleusercontent.com; we take the largest and bump its size param to
+    `size`. Best-effort: never raises."""
+    if not config.YTMUSIC_ENABLED or not video_id:
+        return None
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        song = client.get_song(video_id)
+        thumbs = (
+            (song.get("videoDetails") or {}).get("thumbnail", {}).get("thumbnails") or []
+        )
+    except Exception as e:
+        log.debug("ytmusic cover lookup failed for %s: %s", video_id, e)
+        return None
+    square = [t for t in thumbs if t.get("url") and t.get("width") == t.get("height")]
+    if not square:
+        return None
+    url = square[-1]["url"]
+    # Bump the googleusercontent size param (=w544-h544-…) to the requested size.
+    return re.sub(r"=w\d+-h\d+", f"=w{size}-h{size}", url)
+
+
 # ── Spotify → YT Music matching ───────────────────────────────────────────────
 # Spotify hands us {artist, title, duration} but no audio (DRM). We re-find each
 # song on YT Music and download that. The hard part is rejecting wrong matches:

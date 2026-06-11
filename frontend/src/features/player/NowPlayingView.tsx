@@ -88,7 +88,7 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
         >
           {t.thumbnail_url ? (
             <img
-              src={hiResThumbnail(t.thumbnail_url) ?? undefined}
+              src={p.coverUrl ?? hiResThumbnail(t.thumbnail_url) ?? undefined}
               onError={(e) => thumbnailFallback(e, t.thumbnail_url)}
               onLoad={(e) => thumbnailFallback(e, t.thumbnail_url)}
               alt=""
