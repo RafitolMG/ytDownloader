@@ -14,6 +14,7 @@ const TABS: NavTab[] = [
   { to: '/catalog', icon: '⊕', label: 'catalog' },
   { to: '/albums', icon: '◉', label: 'albums' },
   { to: '/playlists', icon: '≣', label: 'playlists' },
+  { to: '/import', icon: '⬇', label: 'import' },
   { to: '/stats', icon: '★', label: 'stats' },
 ]
 
