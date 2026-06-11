@@ -76,6 +76,15 @@ body {
   min-height: 100vh;
 }
 
+/* Native (Capacitor) safe areas — push page content below the status bar; the
+   fixed gradient bg (above) still fills the whole screen behind it, so the bar
+   area shows the app's horizon instead of a grey strip. The fixed player and
+   the now-playing overlay handle the bottom inset themselves. No-op on the web,
+   where env() insets resolve to 0. */
+#root {
+  padding-top: env(safe-area-inset-top);
+}
+
 ::selection {
   background: var(--color-hot);
   color: var(--color-page);
