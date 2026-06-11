@@ -50,6 +50,9 @@ export type RepeatMode = 'off' | 'one' | 'all'
 type PlayerCtx = {
   /** Track currently loaded in the <audio> element. Null = nothing playing. */
   current: LibraryItem | null
+  /** Square album-cover URL for `current` (YT Music), resolved async; null until
+   *  loaded or when none exists. Falls back to the 16:9 thumbnail in the UI. */
+  coverUrl: string | null
   /** All tracks in the current queue (original order — not affected by shuffle). */
   queue: LibraryItem[]
   /** Index of `current` within `queue`. -1 when nothing is loaded. */
@@ -163,6 +166,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const autoplayRef = useRef(true)
   const autoRadioBusyRef = useRef(false)
   const autoRadioSeenRef = useRef<Set<string>>(new Set())
+  const [coverUrl, setCoverUrl] = useState<string | null>(null)
 
   const index = pos >= 0 && pos < order.length ? order[pos] : -1
   const current = index >= 0 && index < queue.length ? queue[index] : null
@@ -631,19 +635,31 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!current) {
       msSetMetadata(null)
+      setCoverUrl(null)
       return
     }
     let cancelled = false
+    const vid = current.video_id
     const base = {
       title: current.title ?? current.video_id,
       artist: current.artist ?? '',
       album: current.album ?? undefined,
     }
-    // Resolve a verified hi-res artwork URL (maxres only if it really exists,
-    // not YouTube's grey placeholder) so the notification image is sharp.
-    void resolveArtworkUrl(current.thumbnail_url).then((art) => {
-      if (!cancelled) msSetMetadata({ ...base, artworkUrl: art })
-    })
+    // Prefer the square YT Music album cover (proper art, no awkward 16:9 crop
+    // in the notification). Fall back to a verified hi-res video frame when YT
+    // Music has none.
+    void (async () => {
+      let art: string | null | undefined = null
+      try {
+        art = (await api.trackCover(vid)).cover_url
+      } catch {
+        /* ignore */
+      }
+      if (!art) art = await resolveArtworkUrl(current.thumbnail_url)
+      if (cancelled) return
+      setCoverUrl(art ?? null)
+      msSetMetadata({ ...base, artworkUrl: art })
+    })()
     return () => {
       cancelled = true
     }
@@ -677,6 +693,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const value = useMemo<PlayerCtx>(
     () => ({
       current,
+      coverUrl,
       queue,
       index,
       orderPos: pos,
@@ -707,7 +724,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       orderedQueue,
     }),
     [
-      current, queue, index, pos, canGoNext, canGoPrev, isPlaying, position, duration,
+      current, coverUrl, queue, index, pos, canGoNext, canGoPrev, isPlaying, position, duration,
       shuffle, repeat, volume, setVolume,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
       sleepRemainingMs, sleepEndOfTrack, setSleepTimer,

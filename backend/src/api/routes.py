@@ -1970,6 +1970,22 @@ def reorder_playlist(
     return {"ok": True, "reordered": reordered}
 
 
+_cover_cache: dict[str, str | None] = {}
+
+
+@app.get("/api/track/{video_id}/cover")
+def track_cover(video_id: str, user: CurrentUser = Depends(current_user)):
+    """Square album-cover URL for a track (YT Music), for the now-playing screen
+    and the media notification — the stored thumbnail is a 16:9 video frame that
+    crops badly into a square slot. Cached per process (the art URL is stable);
+    returns {cover_url: null} when YT Music has nothing or is disabled."""
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=422, detail="invalid video id")
+    if video_id not in _cover_cache:
+        _cover_cache[video_id] = ytmusic.square_cover(video_id)
+    return {"cover_url": _cover_cache[video_id]}
+
+
 @app.get("/api/track/{video_id}/stream")
 def stream_track(
     video_id: str,

@@ -64,6 +64,9 @@ export function wsUrl(path: string): string {
 // as `mt`. No-op on the web, where the cookie rides along same-origin.
 let mediaToken: string | null = null
 
+/** Per-session cache of square album-cover URLs (null = looked up, none found). */
+const coverCache = new Map<string, string | null>()
+
 /** Fetch + cache the media token. Returns null (and does nothing) on the web. */
 export async function ensureMediaToken(force = false): Promise<string | null> {
   if (!IS_REMOTE) return null
@@ -269,6 +272,18 @@ export const api = {
 
   /** Proxy-stream URL for previewing a not-yet-downloaded track. */
   previewUrl: (videoId: string) => mediaUrl(`/api/preview/${encodeURIComponent(videoId)}`),
+
+  /** Square album cover (YT Music) for the now-playing screen + notification —
+   *  the stored thumbnail is a 16:9 video frame. Cached per session. */
+  trackCover: async (videoId: string): Promise<{ cover_url: string | null }> => {
+    const hit = coverCache.get(videoId)
+    if (hit !== undefined) return { cover_url: hit }
+    const r = await json<{ cover_url: string | null }>(
+      `/api/track/${encodeURIComponent(videoId)}/cover`,
+    )
+    coverCache.set(videoId, r.cover_url)
+    return r
+  },
 
   // ── shared catalog ──
   catalog: (params: {
