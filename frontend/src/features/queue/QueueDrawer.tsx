@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { QueueList } from './QueueList'
+import { useBackClose } from '@/shared/lib/backStack'
 
 /** Slide-over panel holding the job queue. The queue is a transient status
  * surface, not a destination, so it lives behind the header indicator rather
@@ -11,6 +12,8 @@ export function QueueDrawer({
   open: boolean
   onClose: () => void
 }) {
+  useBackClose(open, onClose)
+
   // Close on Escape — standard for any overlay.
   useEffect(() => {
     if (!open) return
