@@ -128,14 +128,6 @@ export function PlayerBar() {
           >
             {p.repeat === 'one' ? '↻¹' : '↻'}
           </PlayerToggle>
-          <PlayerToggle
-            onClick={p.toggleAutoRadio}
-            active={p.autoRadio}
-            title={p.autoRadio ? 'auto-radio on — keeps playing related tracks' : 'auto-radio off'}
-            hideOnMobile
-          >
-            {G.autoplay}
-          </PlayerToggle>
         </div>
 
         {/* Right cluster: time · volume · queue · close. Kept together with a
