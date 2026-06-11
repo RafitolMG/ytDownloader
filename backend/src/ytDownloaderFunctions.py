@@ -933,6 +933,15 @@ def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
 
         meta = _extract_music_meta(info or {})
         meta['title'] = (info or {}).get('title')
+        # Prefer YT Music's clean performer list over the yt-dlp credit dump
+        # (which mixes in songwriters/producers). Best-effort: keeps the
+        # heuristic value when the lookup yields nothing. This is the only
+        # per-download path, so it never runs during flat playlist listing.
+        from src import ytmusic
+        clean = ytmusic.clean_artists((info or {}).get('id') or '')
+        if clean:
+            meta['artists'] = clean
+            meta['artist'] = ", ".join(clean)
 
         produced = None
         for fname in os.listdir(work_dir):

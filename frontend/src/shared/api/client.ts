@@ -176,6 +176,15 @@ export const api = {
       samples: { before: string; after: string }[]
     }>(`/api/admin/tracks/normalize-artists`, { method: 'POST' }),
 
+  // ── admin: re-fetch clean performer lists from YouTube Music (online) ──
+  adminRefetchArtists: () =>
+    json<{
+      scanned: number
+      updated: number
+      no_clean: number
+      samples: { before: string; after: string }[]
+    }>(`/api/admin/tracks/refetch-artists`, { method: 'POST' }),
+
   // ── music library ──
   library: (limit = 500) =>
     json<LibraryResponse>(`/api/library?limit=${limit}`),
