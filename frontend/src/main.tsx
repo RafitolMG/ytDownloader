@@ -5,6 +5,7 @@ import { AppProviders } from './app/providers'
 import { AppRouter } from './app/router'
 import { ErrorBoundary } from './app/ErrorBoundary'
 import { PlayerBar } from './features/player/PlayerBar'
+import { BottomNav } from './shared/ui/BottomNav'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -12,6 +13,7 @@ createRoot(document.getElementById('root')!).render(
       <ErrorBoundary>
         <AppRouter />
         <PlayerBar />
+        <BottomNav />
       </ErrorBoundary>
     </AppProviders>
   </StrictMode>,

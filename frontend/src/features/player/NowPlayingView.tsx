@@ -158,7 +158,7 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
             onClick={() => p.setVolume(p.volume > 0 ? 0 : 1)}
             title={p.volume > 0 ? 'mute' : 'unmute'}
             aria-label={p.volume > 0 ? 'mute' : 'unmute'}
-            className={`focus-vis font-pixel text-base w-6 text-center ${
+            className={`hidden sm:inline focus-vis font-pixel text-base w-6 text-center ${
               p.volume === 0 ? 'text-crit' : 'text-ink-lo hover:text-cool'
             }`}
           >
@@ -172,7 +172,7 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
             value={p.volume}
             onChange={(e) => p.setVolume(Number(e.target.value))}
             aria-label="volume"
-            className="focus-vis w-40 accent-[var(--color-cool)] cursor-pointer"
+            className="hidden sm:block focus-vis w-40 accent-[var(--color-cool)] cursor-pointer"
           />
           <NPToggle
             onClick={p.toggleAutoRadio}
