@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { HistoryItem, SearchResultItem } from '@/shared/api/types'
 import { looksLikeUrl, useDropdownPreview, useHistory } from './useSearch'
+import { isCoarsePointer } from '@/shared/lib/device'
 
 type Mode = 'idle' | 'history' | 'preview' | 'preview-loading' | 'url'
 
@@ -142,7 +143,7 @@ export function SearchBar({ value, onChange, onSubmit, busy }: Props) {
           placeholder="search or paste URL..."
           spellCheck={false}
           autoComplete="off"
-          autoFocus
+          autoFocus={!isCoarsePointer}
           className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo font-pixel text-lg sm:text-2xl caret-cool min-w-0"
         />
         <span className="caret-blink text-cool">▮</span>
