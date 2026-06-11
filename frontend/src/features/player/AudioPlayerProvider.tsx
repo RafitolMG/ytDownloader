@@ -12,6 +12,12 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
 import type { CatalogItem, LibraryItem } from '@/shared/api/types'
 import { useAuth } from '@/features/auth/AuthProvider'
+import {
+  msSetActionHandler,
+  msSetMetadata,
+  msSetPlaybackState,
+  msSetPosition,
+} from './mediaSession'
 
 const PLAYER_SNAPSHOT_KEY = 'ytdl.player.v1'
 const PLAYER_POSITION_KEY = 'ytdl.player.position'
@@ -618,39 +624,44 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     [order, queue, pos],
   )
 
-  // ── MediaSession: lock-screen / headphone / OS media controls ──────────────
+  // ── MediaSession: lock-screen / notification / headphone controls + native
+  // background playback (the plugin's foreground service keeps audio alive and
+  // auto-advancing when the screen is off). See ./mediaSession. ───────────────
   useEffect(() => {
-    if (!('mediaSession' in navigator)) return
     if (!current) {
-      navigator.mediaSession.metadata = null
+      msSetMetadata(null)
       return
     }
-    navigator.mediaSession.metadata = new MediaMetadata({
+    msSetMetadata({
       title: current.title ?? current.video_id,
       artist: current.artist ?? '',
-      artwork: current.thumbnail_url
-        ? [{ src: current.thumbnail_url, sizes: '480x360', type: 'image/jpeg' }]
-        : [],
+      album: current.album ?? undefined,
+      artworkUrl: current.thumbnail_url,
     })
   }, [current && trackKey(current)])
 
   useEffect(() => {
-    if (!('mediaSession' in navigator)) return
-    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
-  }, [isPlaying])
+    // 'playing' is what starts the native foreground service.
+    msSetPlaybackState(!current ? 'none' : isPlaying ? 'playing' : 'paused')
+  }, [isPlaying, current])
+
+  // Keep the notification scrubber roughly in sync (the OS extrapolates while
+  // playing, so a refresh on track change / play-pause / seek is enough).
+  useEffect(() => {
+    msSetPosition(duration, position, isPlaying)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current && trackKey(current), duration, isPlaying])
 
   useEffect(() => {
-    if (!('mediaSession' in navigator)) return
-    const ms = navigator.mediaSession
-    ms.setActionHandler('play', () => togglePlay())
-    ms.setActionHandler('pause', () => togglePlay())
-    ms.setActionHandler('previoustrack', () => prev())
-    ms.setActionHandler('nexttrack', () => next())
+    msSetActionHandler('play', () => togglePlay())
+    msSetActionHandler('pause', () => togglePlay())
+    msSetActionHandler('previoustrack', () => prev())
+    msSetActionHandler('nexttrack', () => next())
     return () => {
-      ms.setActionHandler('play', null)
-      ms.setActionHandler('pause', null)
-      ms.setActionHandler('previoustrack', null)
-      ms.setActionHandler('nexttrack', null)
+      msSetActionHandler('play', null)
+      msSetActionHandler('pause', null)
+      msSetActionHandler('previoustrack', null)
+      msSetActionHandler('nexttrack', null)
     }
   }, [togglePlay, prev, next])
 

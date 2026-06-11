@@ -32,4 +32,10 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Background audio: the media-session plugin runs a mediaPlayback
+         foreground service. FOREGROUND_SERVICE_MEDIA_PLAYBACK is required from
+         Android 14 (API 34) and the plugin (built for an older target) doesn't
+         declare it. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 </manifest>
