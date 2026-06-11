@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useAudioPlayer } from './AudioPlayerProvider'
 import { G } from '@/shared/ui/glyphs'
+import { hiResThumbnail, thumbnailFallback } from '@/shared/lib/thumbnail'
 
 function fmtTime(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) return '0:00'
@@ -39,7 +40,7 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
   const subtitle = [t.artist ?? '—', t.album, year].filter(Boolean).join(' · ')
 
   return createPortal(
-    <div className="fixed inset-0 z-[80] flex flex-col bg-page/95 backdrop-blur-md overflow-y-auto">
+    <div className="fixed inset-0 z-[80] flex flex-col bg-page/95 backdrop-blur-md overflow-y-auto pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
       {/* header */}
       <div className="flex items-center justify-between px-4 sm:px-6 py-4 flex-shrink-0">
         <span className="font-pixel text-xs uppercase tracking-[0.3em] text-cool">
@@ -61,7 +62,9 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
         <div className="relative w-full max-w-sm mx-auto aspect-square rounded-sm overflow-hidden border border-violet/40 bg-page-mid shadow-[var(--shadow-glow-cool)] mt-2 mb-6">
           {t.thumbnail_url ? (
             <img
-              src={t.thumbnail_url}
+              src={hiResThumbnail(t.thumbnail_url) ?? undefined}
+              onError={(e) => thumbnailFallback(e, t.thumbnail_url)}
+              onLoad={(e) => thumbnailFallback(e, t.thumbnail_url)}
               alt=""
               className="w-full h-full object-cover"
               referrerPolicy="no-referrer"
