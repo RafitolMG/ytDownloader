@@ -257,20 +257,55 @@ def get_video_codec(path):
 
 # YouTube Music credits everyone on a track in the `artists` list / embedded
 # ARTIST tag — not just the performers, but featured artists, producers and
-# songwriters/composers (often under their legal names). Left unbounded the
-# display string balloons to 10+ "artists" mixing stage and legal names. The
-# performing artists lead the list (composers trail), so capping keeps the
-# real artists and sheds the writer/producer noise.
+# songwriters/composers (often under their legal names). yt-dlp exposes no field
+# that separates the two (`artist`/`artists`/`creator`/`creators` are all the
+# same bloated list), so we drop the government names by shape: a credit of 3+
+# plain word tokens ("Alejo Nahuel Acosta Migliarini", "Cristina Vela Chacón")
+# is almost always a writer, whereas stage names are 1-2 tokens ("Ysy A",
+# "ONIRIA") or carry symbols/digits ("Mac & Phil", "TD Beats").
 MAX_DISPLAY_ARTISTS = 4
+
+# Lowercased tokens that mark a multi-word *stage* name, so a 3-token credit
+# like "Bigla The Kid" or "Lil Baby Boi" isn't mistaken for a legal name.
+_STAGE_NAME_TOKENS = {
+    "the", "kid", "lil", "big", "young", "dj", "mc", "mr", "mrs", "ft", "feat",
+    "da", "el", "la", "los", "las", "del", "x", "boy", "boi", "baby", "king",
+    "queen", "god", "money", "gang", "crew", "click", "boys", "girls",
+}
+
+
+def _looks_like_legal_name(name: str) -> bool:
+    """Heuristic: does this credit look like a songwriter/producer's government
+    name rather than a stage name?
+
+    True when it is 3+ whitespace tokens, all plain alphabetic words (accents
+    ok), with no digit, no '&', and no stage-name particle. That shape catches
+    the Spanish "Nombre Apellido1 Apellido2" credits YT Music dumps alongside
+    the performers, while sparing real multi-word aliases."""
+    tokens = name.split()
+    if len(tokens) < 3:
+        return False
+    if "&" in name or any(c.isdigit() for c in name):
+        return False
+    if any(t.lower() in _STAGE_NAME_TOKENS for t in tokens):
+        return False
+    # Every token must be a plain word (letters, optionally hyphen/apostrophe).
+    return all(
+        t.replace("-", "").replace("'", "").replace("’", "").isalpha()
+        for t in tokens
+    )
 
 
 def normalize_artist_names(names: "list[str] | str | None") -> list[str]:
-    """Clean, case-insensitively de-dupe, and cap a credited-artist list.
+    """Clean a credited-artist list down to just the performers.
 
     Accepts either yt-dlp's `artists` list or a ", "-joined string (the embedded
     ARTIST tag ffprobe reads). Trims blanks, drops case-insensitive duplicates
-    (so "BakBeats" and "Bakbeats" collapse to one), preserves order, and caps to
-    MAX_DISPLAY_ARTISTS. Returns the cleaned list (possibly empty)."""
+    (so "BakBeats" and "Bakbeats" collapse to one), strips songwriter/producer
+    government names (see `_looks_like_legal_name`), preserves order, and caps to
+    MAX_DISPLAY_ARTISTS. If filtering would remove *every* name (e.g. a solo
+    artist credited only under a legal-looking name) it keeps the de-duped list
+    so a track never ends up with no artist. Returns the cleaned list."""
     if names is None:
         items: list[str] = []
     elif isinstance(names, str):
@@ -290,7 +325,8 @@ def normalize_artist_names(names: "list[str] | str | None") -> list[str]:
             continue
         seen.add(key)
         out.append(name)
-    return out[:MAX_DISPLAY_ARTISTS]
+    performers = [n for n in out if not _looks_like_legal_name(n)]
+    return (performers or out)[:MAX_DISPLAY_ARTISTS]
 
 
 def read_file_tags(path: str) -> dict | None:
@@ -897,6 +933,15 @@ def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
 
         meta = _extract_music_meta(info or {})
         meta['title'] = (info or {}).get('title')
+        # Prefer YT Music's clean performer list over the yt-dlp credit dump
+        # (which mixes in songwriters/producers). Best-effort: keeps the
+        # heuristic value when the lookup yields nothing. This is the only
+        # per-download path, so it never runs during flat playlist listing.
+        from src import ytmusic
+        clean = ytmusic.clean_artists((info or {}).get('id') or '')
+        if clean:
+            meta['artists'] = clean
+            meta['artist'] = ", ".join(clean)
 
         produced = None
         for fname in os.listdir(work_dir):

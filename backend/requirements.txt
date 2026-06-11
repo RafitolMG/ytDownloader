@@ -1,5 +1,6 @@
 yt-dlp==2026.3.17
 yt-dlp-ejs
+ytmusicapi==1.12.1
 fastapi==0.135.3
 uvicorn[standard]==0.44.0
 starlette==1.0.0

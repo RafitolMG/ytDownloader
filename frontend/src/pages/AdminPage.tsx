@@ -488,6 +488,7 @@ function StorageView() {
 
         <span className="flex-1" />
 
+        <RefetchArtistsButton onDone={invalidate} />
         <NormalizeArtistsButton onDone={invalidate} />
         <BackfillButton onDone={invalidate} />
       </div>
@@ -662,6 +663,34 @@ function NormalizeArtistsButton({ onDone }: { onDone: () => void }) {
         : r
           ? `✓ cleaned ${r.updated}/${r.scanned}`
           : '✦ tidy artists'}
+    </button>
+  )
+}
+
+function RefetchArtistsButton({ onDone }: { onDone: () => void }) {
+  const refetch = useMutation({
+    mutationFn: () => api.adminRefetchArtists(),
+    onSuccess: () => {
+      onDone()
+    },
+  })
+  const r = refetch.data
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!refetch.isPending) refetch.mutate()
+      }}
+      disabled={refetch.isPending}
+      title="re-fetch each track's real performers from YouTube Music (online, one API call per track). Replaces the yt-dlp credit dump with the clean artist line the app shows — recovers names the offline heuristic can't tell from a legal name. Tracks not in YT Music are left untouched."
+      className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)] disabled:opacity-50 transition rounded-xs whitespace-nowrap"
+    >
+      {refetch.isPending
+        ? '··· fetching artists'
+        : r
+          ? `✓ refetched ${r.updated}/${r.scanned}`
+          : '◉ refetch artists'}
     </button>
   )
 }
