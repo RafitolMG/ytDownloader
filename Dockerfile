@@ -6,7 +6,10 @@ FROM node:22-alpine AS frontend-build
 WORKDIR /build
 
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+# --legacy-peer-deps: @jofr/capacitor-media-session declares a Capacitor 6 peer
+# but builds/runs on our Capacitor 8 (verified). Mirrors frontend/.npmrc, which
+# isn't copied into this build stage.
+RUN npm ci --legacy-peer-deps
 
 COPY frontend/ ./
 RUN npm run build
