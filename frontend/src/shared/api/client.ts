@@ -31,6 +31,64 @@ import type {
   SuggestResponse,
 } from './types'
 
+/**
+ * Absolute base URL for the API. Empty on the web build — the SPA is served
+ * from the same origin as the backend (or proxied in dev), so relative
+ * `/api/...` paths just work. In the native (Capacitor) build it's set via
+ * VITE_API_BASE to the public backend URL, because the app is served from its
+ * own origin (https://localhost) and must reach the backend cross-origin.
+ */
+export const API_BASE = (import.meta.env.VITE_API_BASE ?? '').replace(/\/+$/, '')
+
+/** True when the SPA and API live on different origins (native build). */
+export const IS_REMOTE = API_BASE !== ''
+
+/** Prefix a root-relative path with API_BASE; pass through anything else. */
+export function apiUrl(path: string): string {
+  return path.startsWith('/') ? API_BASE + path : path
+}
+
+/** Build a WebSocket URL. Same-origin on the web; derived from API_BASE
+ *  (http→ws, https→wss) in the native build. */
+export function wsUrl(path: string): string {
+  if (IS_REMOTE) return API_BASE.replace(/^http/, 'ws') + path
+  const loc = window.location
+  const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${loc.host}${path}`
+}
+
+// ── media token (native only) ────────────────────────────────────────────────
+// <audio>/download requests are issued by the element, not by JS, so in the
+// native build they can't carry the httponly session cookie cross-origin. We
+// fetch the session id once (over a normal cookie-authed request) and append it
+// as `mt`. No-op on the web, where the cookie rides along same-origin.
+let mediaToken: string | null = null
+
+/** Fetch + cache the media token. Returns null (and does nothing) on the web. */
+export async function ensureMediaToken(force = false): Promise<string | null> {
+  if (!IS_REMOTE) return null
+  if (mediaToken && !force) return mediaToken
+  try {
+    const r = await json<{ token: string }>('/api/auth/media-token')
+    mediaToken = r.token
+  } catch {
+    mediaToken = null
+  }
+  return mediaToken
+}
+
+/** Drop the cached media token (call on logout). */
+export function clearMediaToken(): void {
+  mediaToken = null
+}
+
+/** Append the media token to a media URL in the native build. */
+function mediaUrl(path: string): string {
+  if (!IS_REMOTE || !mediaToken) return apiUrl(path)
+  const sep = path.includes('?') ? '&' : '?'
+  return apiUrl(`${path}${sep}mt=${encodeURIComponent(mediaToken)}`)
+}
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, message: string) {
@@ -47,7 +105,7 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
 }
 
 async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
-  const res = await fetch(input, {
+  const res = await fetch(typeof input === 'string' ? apiUrl(input) : input, {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     ...init,
@@ -113,7 +171,7 @@ export const api = {
   delete: (jobId: string) =>
     json<{ ok: true }>(`/api/jobs/${jobId}`, { method: 'DELETE' }),
 
-  fileUrl: (jobId: string) => `/api/file/${jobId}`,
+  fileUrl: (jobId: string) => mediaUrl(`/api/file/${jobId}`),
 
   // ── auth ──
   login: (usernameOrEmail: string, password: string) =>
@@ -123,7 +181,7 @@ export const api = {
     }),
 
   logout: () =>
-    fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }),
+    fetch(apiUrl('/api/auth/logout'), { method: 'POST', credentials: 'include' }),
 
   whoami: () =>
     json<{ user_id: string; username: string; role: string }>('/api/auth/whoami'),
@@ -196,10 +254,12 @@ export const api = {
     ),
 
   trackStreamUrl: (videoId: string, codec: string, bitrate: string) =>
-    `/api/track/${encodeURIComponent(videoId)}/stream?codec=${encodeURIComponent(codec)}&bitrate=${encodeURIComponent(bitrate)}`,
+    mediaUrl(
+      `/api/track/${encodeURIComponent(videoId)}/stream?codec=${encodeURIComponent(codec)}&bitrate=${encodeURIComponent(bitrate)}`,
+    ),
 
   /** Proxy-stream URL for previewing a not-yet-downloaded track. */
-  previewUrl: (videoId: string) => `/api/preview/${encodeURIComponent(videoId)}`,
+  previewUrl: (videoId: string) => mediaUrl(`/api/preview/${encodeURIComponent(videoId)}`),
 
   // ── shared catalog ──
   catalog: (params: {

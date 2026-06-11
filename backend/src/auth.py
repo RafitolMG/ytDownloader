@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Cookie, Depends, HTTPException, status
+from fastapi import Cookie, Depends, HTTPException, Query, status
 
 from src import config, db, homeauth
 
@@ -120,6 +120,22 @@ def current_user(ytdl_session: str | None = Cookie(default=None, alias=config.SE
         username=session["username"],
         role=session["role"],
     )
+
+
+def media_user(
+    mt: str | None = Query(default=None),
+    ytdl_session: str | None = Cookie(default=None, alias=config.SESSION_COOKIE_NAME),
+) -> CurrentUser:
+    """Auth for media endpoints (<audio> stream, preview, file download).
+
+    The browser carries the httponly session cookie automatically, but a native
+    (Capacitor) WebView loads the SPA from a different origin than the API, so
+    those media requests — issued by the <audio>/anchor element, not by JS —
+    cannot ride the cookie. The native client therefore passes the session id as
+    an `mt` query param instead. Resolution is identical to the cookie path
+    (`current_user`), so refresh/role/expiry all behave the same; the cookie
+    still wins for the web app where `mt` is absent."""
+    return current_user(ytdl_session=mt or ytdl_session)
 
 
 def require_admin(user: CurrentUser = Depends(current_user)) -> CurrentUser:
