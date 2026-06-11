@@ -151,8 +151,8 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
           </NPToggle>
         </div>
 
-        {/* volume + autoradio */}
-        <div className="flex items-center gap-3 justify-center mb-8">
+        {/* volume — desktop only (phones use hardware buttons) */}
+        <div className="hidden sm:flex items-center gap-3 justify-center mb-8">
           <button
             type="button"
             onClick={() => p.setVolume(p.volume > 0 ? 0 : 1)}
@@ -174,13 +174,6 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
             aria-label="volume"
             className="hidden sm:block focus-vis w-40 accent-[var(--color-cool)] cursor-pointer"
           />
-          <NPToggle
-            onClick={p.toggleAutoRadio}
-            active={p.autoRadio}
-            title={p.autoRadio ? 'auto-radio on' : 'auto-radio off'}
-          >
-            {G.autoplay}
-          </NPToggle>
         </div>
 
         {/* up next */}

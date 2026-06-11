@@ -16,7 +16,6 @@ import { useAuth } from '@/features/auth/AuthProvider'
 const PLAYER_SNAPSHOT_KEY = 'ytdl.player.v1'
 const PLAYER_POSITION_KEY = 'ytdl.player.position'
 const PLAYER_VOLUME_KEY = 'ytdl.player.volume'
-const PLAYER_AUTORADIO_KEY = 'ytdl.player.autoradio'
 
 /** Map a catalog row (radio db hit) to a player item. Kept local to avoid a
  * provider↔CatalogPage import cycle. */
@@ -89,10 +88,6 @@ type PlayerCtx = {
   sleepEndOfTrack: boolean
   /** Arm/replace the sleep timer: a minute count, 'endOfTrack', or null to clear. */
   setSleepTimer: (v: number | 'endOfTrack' | null) => void
-  /** When on, the queue keeps going at its tail by appending the current
-   * track's radio (already-downloaded tracks only). Persisted. */
-  autoRadio: boolean
-  toggleAutoRadio: () => void
   /** Insert a track to play right after the current one. Starts playing it if
    * nothing is loaded. */
   playNext: (track: LibraryItem) => void
@@ -159,7 +154,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   // Suppress autoplay for the one track restored on mount (resume paused);
   // every subsequent track load autoplays normally.
   const autoplayRef = useRef(true)
-  const [autoRadio, setAutoRadio] = useState(false)
   const autoRadioBusyRef = useRef(false)
   const autoRadioSeenRef = useRef<Set<string>>(new Set())
 
@@ -495,7 +489,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         const n = Number(v)
         if (n >= 0 && n <= 1) setVolumeState(n)
       }
-      setAutoRadio(localStorage.getItem(PLAYER_AUTORADIO_KEY) === '1')
     } catch {
       /* ignore storage errors */
     }
@@ -583,18 +576,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       /* ignore */
     }
   }, [volume])
-
-  const toggleAutoRadio = useCallback(() => {
-    setAutoRadio((on) => {
-      const next = !on
-      try {
-        localStorage.setItem(PLAYER_AUTORADIO_KEY, next ? '1' : '0')
-      } catch {
-        /* ignore */
-      }
-      return next
-    })
-  }, [])
 
   // Fetch the current track's radio and append its already-downloaded (db)
   // tracks to the queue, then jump to the first new one. Only db tracks — never
@@ -699,8 +680,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       sleepRemainingMs,
       sleepEndOfTrack,
       setSleepTimer,
-      autoRadio,
-      toggleAutoRadio,
       playNext,
       enqueue,
       removeFromQueueAt,
@@ -712,7 +691,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       shuffle, repeat, volume, setVolume,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
       sleepRemainingMs, sleepEndOfTrack, setSleepTimer,
-      autoRadio, toggleAutoRadio,
       playNext, enqueue, removeFromQueueAt, jumpTo, orderedQueue,
     ],
   )
@@ -754,10 +732,10 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
             }
             return
           }
-          // Queue hit its tail with nothing left to advance to → if auto-radio
-          // is on, seed more playable tracks instead of stopping.
+          // Queue hit its tail with nothing left to advance to → seed more
+          // playable tracks (auto-radio is always on) instead of stopping.
           const atTail = pos + 1 >= order.length
-          if (atTail && !(shuffle && queue.length > 1) && repeat !== 'all' && autoRadio) {
+          if (atTail && !(shuffle && queue.length > 1) && repeat !== 'all') {
             void triggerAutoRadio()
             return
           }
