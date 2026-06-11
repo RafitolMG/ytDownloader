@@ -1,3 +1,5 @@
+import { isCoarsePointer } from '@/shared/lib/device'
+
 type Props = {
   value: string
   onChange: (next: string) => void
@@ -26,7 +28,7 @@ export function UrlInput({ value, onChange, onAnalyze, busy }: Props) {
           placeholder="enter signal..."
           spellCheck={false}
           autoComplete="off"
-          autoFocus
+          autoFocus={!isCoarsePointer}
           className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo font-pixel text-2xl caret-cool"
         />
         <span className="caret-blink text-cool">▮</span>
