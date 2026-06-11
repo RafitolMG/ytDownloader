@@ -1,12 +1,12 @@
 import { NavLink } from 'react-router-dom'
-import { useAuth } from '@/features/auth/AuthProvider'
 
 // Labels collapse to icon-only below `md` so the nav fits on phones/small
 // tablets without wrapping into a second row. Each tab carries an aria-label
 // so the icon-only state is still understandable to screen readers.
 //
-// The queue isn't here — it's a transient status surface, so it lives behind
-// the QueueIndicator in the header rather than as a destination tab.
+// These are the *primary* destinations (header tabs on desktop, bottom bar on
+// phones). Secondary surfaces — stats, admin, settings — live in the SideMenu;
+// the queue lives behind the header QueueIndicator.
 export type NavTab = { to: string; icon: string; label: string }
 
 const TABS: NavTab[] = [
@@ -14,17 +14,13 @@ const TABS: NavTab[] = [
   { to: '/catalog', icon: '⊕', label: 'catalog' },
   { to: '/albums', icon: '◉', label: 'albums' },
   { to: '/playlists', icon: '≣', label: 'playlists' },
-  { to: '/stats', icon: '★', label: 'stats' },
+  { to: '/import', icon: '⬇', label: 'import' },
 ]
 
-/** The nav destinations for the current user — adds the admin console only for
- *  ADMINs (RequireAdmin guards the route). Shared by the desktop header tabs and
- *  the mobile bottom bar. */
+/** Primary nav destinations, shared by the desktop header tabs and the mobile
+ *  bottom bar. */
 export function useNavTabs(): NavTab[] {
-  const { user } = useAuth()
-  return user?.role === 'ADMIN'
-    ? [...TABS, { to: '/admin', icon: '◈', label: 'admin' }]
-    : TABS
+  return TABS
 }
 
 const baseCls =

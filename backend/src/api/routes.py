@@ -29,7 +29,9 @@ from src import (
     db,
     rate_limit,
     search as search_mod,
+    spotify,
     ytDownloaderFunctions,
+    ytmusic,
 )
 from src.api.admin_routes import router as admin_router
 from src.api.auth_routes import router as auth_router
@@ -922,6 +924,168 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
 
     target = run_zip if body.as_file else run
     threading.Thread(target=target, daemon=True).start()
+    return {"job_id": job_id}
+
+
+class TrackImportRequest(BaseModel):
+    # A Spotify playlist link (read via the public embed, ~100-track cap) OR a
+    # pasted list — Exportify CSV / "Artist - Title" lines (unlimited).
+    source: str
+
+
+@app.post("/api/import/tracklist")
+def start_tracklist_import(body: TrackImportRequest, user: CurrentUser = Depends(current_user)):
+    """Bulk-import a wishlist into the library. Each wanted track is re-found on
+    YouTube Music and downloaded; tracks with no confident match are reported
+    rather than guessed. Mirrors the in-app playlist import (mp3-320, shared
+    library, dedup, a private mirror playlist) and adds a `no_match` tally.
+    Returns a job_id to follow over the same /ws/progress channel."""
+    codec, bitrate, ext = ytDownloaderFunctions.parse_audio_quality('mp3-320')
+
+    job_id = str(uuid.uuid4())
+    progress_queue: queue.Queue = queue.Queue()
+    _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": None}
+    db.create_job(
+        job_id=job_id,
+        url='tracklist-import',
+        format_code='mp3-320',
+        is_playlist=True,
+        owner_id=user.user_id,
+    )
+
+    def run():
+        try:
+            try:
+                wl = spotify.resolve(body.source)
+            except spotify.TrackListError as e:
+                raise RuntimeError(str(e)) from e
+
+            tracks = wl.tracks
+            total = len(tracks)
+            db.set_metadata(
+                job_id, playlist_title=wl.name, playlist_count=total, thumbnail_url=None,
+            )
+            progress_queue.put({
+                "type": "metadata", "title": wl.name, "count": total, "capped": wl.capped,
+            })
+            if not tracks:
+                raise RuntimeError("No tracks found to import.")
+
+            db.mark_started(job_id)
+            imported = reused = skipped = no_match = 0
+
+            mirrored_playlist_id: str | None = None
+
+            def ensure_mirrored_playlist() -> str:
+                nonlocal mirrored_playlist_id
+                if mirrored_playlist_id is None:
+                    pid = str(uuid.uuid4())
+                    db.create_playlist(
+                        playlist_id=pid,
+                        owner_id=user.user_id,
+                        name=wl.name or "Imported list",
+                        description="Imported via track-list import",
+                        visibility="private",
+                    )
+                    mirrored_playlist_id = pid
+                return mirrored_playlist_id
+
+            for idx, w in enumerate(tracks, start=1):
+                if job_id in _cancelled:
+                    raise _Cancelled()
+
+                label = (f"{w.artist} — {w.title}" if w.artist else w.title).strip()
+                progress_queue.put({"type": "track", "index": idx, "total": total, "title": label})
+                base_pct = (idx - 1) / total * 100
+
+                # Re-find on YT Music. No confident match → report, don't guess.
+                match = ytmusic.search_match(w.artist, w.title, w.duration_sec)
+                if match is None:
+                    no_match += 1
+                    progress_queue.put({
+                        "type": "track_skipped", "index": idx, "total": total,
+                        "title": label, "message": "no match on YouTube Music",
+                    })
+                    db.update_progress(job_id, idx / total * 100)
+                    continue
+
+                video_id = match.video_id
+                existing = db.get_track(video_id, codec, bitrate)
+                if existing and os.path.isfile(existing['file_path']):
+                    db.link_owner(
+                        owner_id=user.user_id, video_id=video_id, codec=codec,
+                        bitrate=bitrate, source_playlist_title=wl.name,
+                    )
+                    db.add_track_to_playlist(ensure_mirrored_playlist(), video_id, codec, bitrate)
+                    reused += 1
+                    progress_queue.put({"type": "progress", "value": round(idx / total * 100, 1)})
+                    db.update_progress(job_id, idx / total * 100)
+                    continue
+
+                dest_path = _library_path(video_id, codec, bitrate, ext)
+
+                def on_track_progress(pct: float, _base=base_pct, _total=total):
+                    if job_id in _cancelled:
+                        raise _Cancelled()
+                    progress_queue.put({"type": "progress", "value": round(_base + pct / _total, 1)})
+
+                try:
+                    meta = ytDownloaderFunctions.download_track_audio(
+                        f"https://www.youtube.com/watch?v={video_id}",
+                        codec, bitrate, dest_path, on_progress=on_track_progress,
+                    ) or {}
+                    file_size = os.path.getsize(dest_path)
+                    sha256 = _sha256_file(dest_path)
+                    db.register_track(
+                        video_id=video_id, codec=codec, bitrate=bitrate,
+                        title=meta.get('title') or w.title,
+                        artist=meta.get('artist') or (w.artist or None),
+                        album=meta.get('album'),
+                        album_artist=meta.get('album_artist'),
+                        release_year=meta.get('release_year'),
+                        duration_sec=match.duration or w.duration_sec,
+                        thumbnail_url=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                        source_url=f"https://www.youtube.com/watch?v={video_id}",
+                        file_path=dest_path, file_size=file_size, sha256=sha256,
+                    )
+                    db.link_owner(
+                        owner_id=user.user_id, video_id=video_id, codec=codec,
+                        bitrate=bitrate, source_playlist_title=wl.name,
+                    )
+                    db.add_track_to_playlist(ensure_mirrored_playlist(), video_id, codec, bitrate)
+                    imported += 1
+                except _Cancelled:
+                    raise
+                except Exception as track_err:
+                    traceback.print_exc()
+                    skipped += 1
+                    progress_queue.put({
+                        "type": "track_skipped", "index": idx, "total": total,
+                        "title": label, "message": str(track_err),
+                    })
+
+                db.update_progress(job_id, idx / total * 100)
+
+            db.finish(job_id, size_bytes=None)
+            progress_queue.put({
+                "type": "done", "filename": None,
+                "imported": imported, "reused": reused, "skipped": skipped,
+                "no_match": no_match,
+            })
+
+        except _Cancelled:
+            _jobs.pop(job_id, None)
+            _cancelled.discard(job_id)
+            db.cancel(job_id)
+            progress_queue.put({"type": "cancelled"})
+
+        except Exception as e:
+            traceback.print_exc()
+            _jobs.pop(job_id, None)
+            db.fail(job_id, str(e))
+            progress_queue.put({"type": "error", "message": str(e)})
+
+    threading.Thread(target=run, daemon=True).start()
     return {"job_id": job_id}
 
 

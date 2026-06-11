@@ -1,8 +1,9 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useAudioPlayer } from './AudioPlayerProvider'
 import { G } from '@/shared/ui/glyphs'
 import { hiResThumbnail, thumbnailFallback } from '@/shared/lib/thumbnail'
+import { useBackClose } from '@/shared/lib/backStack'
 
 function fmtTime(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) return '0:00'
@@ -18,6 +19,27 @@ function fmtTime(sec: number): string {
  * the ✕ close it; body scroll is locked while open. */
 export function NowPlayingView({ onClose }: { onClose: () => void }) {
   const p = useAudioPlayer()
+  useBackClose(true, onClose)
+
+  // Swipe the cover left → next, right → previous. Attached to the artwork only
+  // (not the whole view) so it never fights the seek bar or vertical scroll.
+  const swipeRef = useRef<{ x: number; y: number } | null>(null)
+  const onCoverTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0]
+    swipeRef.current = { x: t.clientX, y: t.clientY }
+  }
+  const onCoverTouchEnd = (e: React.TouchEvent) => {
+    const s = swipeRef.current
+    swipeRef.current = null
+    if (!s) return
+    const t = e.changedTouches[0]
+    const dx = t.clientX - s.x
+    const dy = t.clientY - s.y
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      if (dx < 0) p.next()
+      else p.prev()
+    }
+  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -59,7 +81,11 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
 
       <div className="flex-1 w-full max-w-2xl mx-auto px-4 sm:px-6 pb-8 flex flex-col">
         {/* cover */}
-        <div className="relative w-full max-w-sm mx-auto aspect-square rounded-sm overflow-hidden border border-violet/40 bg-page-mid shadow-[var(--shadow-glow-cool)] mt-2 mb-6">
+        <div
+          onTouchStart={onCoverTouchStart}
+          onTouchEnd={onCoverTouchEnd}
+          className="relative w-full max-w-sm mx-auto aspect-square rounded-sm overflow-hidden border border-violet/40 bg-page-mid shadow-[var(--shadow-glow-cool)] mt-2 mb-6 select-none"
+        >
           {t.thumbnail_url ? (
             <img
               src={hiResThumbnail(t.thumbnail_url) ?? undefined}
@@ -151,8 +177,8 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
           </NPToggle>
         </div>
 
-        {/* volume + autoradio */}
-        <div className="flex items-center gap-3 justify-center mb-8">
+        {/* volume — desktop only (phones use hardware buttons) */}
+        <div className="hidden sm:flex items-center gap-3 justify-center mb-8">
           <button
             type="button"
             onClick={() => p.setVolume(p.volume > 0 ? 0 : 1)}
@@ -174,13 +200,6 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
             aria-label="volume"
             className="hidden sm:block focus-vis w-40 accent-[var(--color-cool)] cursor-pointer"
           />
-          <NPToggle
-            onClick={p.toggleAutoRadio}
-            active={p.autoRadio}
-            title={p.autoRadio ? 'auto-radio on' : 'auto-radio off'}
-          >
-            {G.autoplay}
-          </NPToggle>
         </div>
 
         {/* up next */}
