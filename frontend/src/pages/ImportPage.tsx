@@ -110,6 +110,15 @@ export default function ImportPage() {
     }
   }, [source, phase, subscribe])
 
+  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = '' // let the same file be picked again later
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => setSource(String(reader.result ?? ''))
+    reader.readAsText(file)
+  }
+
   const running = phase === 'running'
 
   return (
@@ -142,14 +151,32 @@ export default function ImportPage() {
               URL de Spotify → hasta 100 · lista/CSV → sin límite. Cada tema se
               busca en YouTube Music y se descarga.
             </p>
-            <button
-              type="button"
-              onClick={start}
-              disabled={running || !source.trim()}
-              className="font-pixel text-base uppercase tracking-widest px-4 py-1.5 border border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)] disabled:opacity-40 transition rounded-xs whitespace-nowrap"
-            >
-              {running ? '··· importing' : '⬇ import'}
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <label
+                className={`font-pixel text-base uppercase tracking-widest px-4 py-1.5 border border-violet/60 text-violet rounded-xs whitespace-nowrap transition ${
+                  running
+                    ? 'opacity-40'
+                    : 'cursor-pointer hover:bg-violet/10 hover:shadow-[var(--shadow-glow-violet)]'
+                }`}
+              >
+                ▤ subir csv
+                <input
+                  type="file"
+                  accept=".csv,text/csv,text/plain"
+                  disabled={running}
+                  onChange={onFile}
+                  className="hidden"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={start}
+                disabled={running || !source.trim()}
+                className="font-pixel text-base uppercase tracking-widest px-4 py-1.5 border border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)] disabled:opacity-40 transition rounded-xs whitespace-nowrap"
+              >
+                {running ? '··· importing' : '⬇ import'}
+              </button>
+            </div>
           </div>
         </section>
 
