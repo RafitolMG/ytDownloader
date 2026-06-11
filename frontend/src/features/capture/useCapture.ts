@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api } from '@/shared/api/client'
+import { api, wsUrl } from '@/shared/api/client'
 import type {
   FormatInfo,
   JobStatus,
@@ -170,9 +170,7 @@ export function useCapture() {
 
   const subscribeWs = useCallback(
     (id: string) => {
-      const loc = window.location
-      const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
-      const ws = new WebSocket(`${proto}//${loc.host}/ws/progress/${id}`)
+      const ws = new WebSocket(wsUrl(`/ws/progress/${id}`))
       wsRef.current = ws
 
       ws.onmessage = (ev) => {

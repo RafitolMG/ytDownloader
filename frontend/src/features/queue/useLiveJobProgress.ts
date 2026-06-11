@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { wsUrl } from '@/shared/api/client'
 import type { JobStatus, WsEvent } from '@/shared/api/types'
 
 /** Live overlay for an active job — subscribes to /ws/progress/{jobId} and
@@ -37,9 +38,7 @@ export function useLiveJobProgress(
       return
     }
 
-    const loc = window.location
-    const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${loc.host}/ws/progress/${jobId}`)
+    const ws = new WebSocket(wsUrl(`/ws/progress/${jobId}`))
     wsRef.current = ws
 
     ws.onmessage = (ev) => {

@@ -18,7 +18,7 @@ import yt_dlp
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from src import config, db, ytDownloaderFunctions
+from src import config, db, ytDownloaderFunctions, ytmusic
 from src.auth import CurrentUser, require_admin
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -204,6 +204,49 @@ def normalize_artists(
                 if len(samples) < 10:
                     samples.append({"before": cur, "after": cleaned})
     return {"scanned": scanned, "updated": updated, "samples": samples}
+
+
+@router.post("/tracks/refetch-artists")
+def refetch_artists(
+    user: CurrentUser = Depends(require_admin),
+) -> dict:
+    """Re-fetch the clean performer list for existing tracks from YouTube Music
+    (ytmusicapi), replacing the yt-dlp credit dump. Unlike normalize-artists
+    (which only prunes the stored string offline), this makes one API call per
+    distinct video id to get the *real* artists — the ones the app shows — so it
+    also recovers performers the heuristic can't tell from a legal name.
+
+    Online and slower (network per track); needs YTMUSIC_ENABLED and, on a
+    datacenter IP, possibly cookies. Falls through silently for tracks not in
+    the YT Music catalog (no_clean), leaving their value untouched. Idempotent."""
+    scanned = updated = no_clean = 0
+    samples: list[dict] = []
+    # Many rows share a video id (codec/bitrate variants) — resolve each id once.
+    cache: dict[str, str | None] = {}
+    for t in db.list_tracks_for_backfill(only_missing_album=False):
+        scanned += 1
+        cur = (t.get("artist") or "").strip()
+        vid = t["video_id"]
+        if vid not in cache:
+            names = ytmusic.clean_artists(vid)
+            cache[vid] = ", ".join(names) if names else None
+        cleaned = cache[vid]
+        if not cleaned:
+            no_clean += 1
+            continue
+        if cleaned != cur:
+            if db.update_track_metadata(
+                t["video_id"], t["codec"], t["bitrate"], artist=cleaned
+            ):
+                updated += 1
+                if len(samples) < 10:
+                    samples.append({"before": cur, "after": cleaned})
+    return {
+        "scanned": scanned,
+        "updated": updated,
+        "no_clean": no_clean,
+        "samples": samples,
+    }
 
 
 @router.get("/system")

@@ -120,6 +120,19 @@ def whoami(user: CurrentUser = Depends(current_user)):
     return WhoAmIResponse(user_id=user.user_id, username=user.username, role=user.role)
 
 
+@router.get("/media-token")
+def media_token(user: CurrentUser = Depends(current_user)):
+    """Hand the authenticated client a token it can append to media URLs.
+
+    Native (Capacitor) builds serve the SPA from a different origin than the
+    API, so the <audio>/download requests can't carry the httponly session
+    cookie. JS can't read the cookie either, so it asks here — over a normal
+    cookie-authed request — for a token to put in the `mt` query param. The
+    token is simply this session's id (the same credential the cookie holds);
+    the web app never calls this (it relies on the cookie)."""
+    return {"token": user.session_id}
+
+
 @router.get("/config")
 def auth_config():
     """

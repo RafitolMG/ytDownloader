@@ -86,6 +86,15 @@ LIBRARY_DIR: str = _env("LIBRARY_DIR", _DEFAULT_LIBRARY_DIR)
 YT_COOKIES_DATA: str = _env("YT_COOKIES_DATA", "")
 YT_COOKIES_FILE: str = _env("YT_COOKIES_FILE", "")
 
+# YouTube Music metadata enrichment. yt-dlp's scraped artist list mixes
+# performers with songwriters/producers (under legal names) and no field
+# separates them; the YT Music internal API (ytmusicapi) returns just the
+# performing artists. On a download we query it by video id and prefer its
+# clean list, falling back to the yt-dlp heuristic when it fails / the track
+# isn't in the YT Music catalog. Set to "false" in prod if the datacenter IP
+# gets blocked — the heuristic still applies.
+YTMUSIC_ENABLED: bool = _env_bool("YTMUSIC_ENABLED", True)
+
 # Per-user rate limit on yt-dlp-bound endpoints (resolutions / search / discover
 # / album-search / category / radio). Generous enough that human browsing never
 # trips it (~1/sec sustained) but a script or spam can't saturate the extraction
