@@ -283,6 +283,20 @@ body::after {
   background: transparent;
 }
 
+/* Touch devices (phones/tablets) scroll by swipe — the styled scrollbars just
+   clutter the vibe there, so hide them entirely. Desktop (fine pointer) keeps
+   the vaporwave bars above. */
+@media (pointer: coarse) {
+  * {
+    scrollbar-width: none;
+  }
+  ::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+}
+
 /* Now-playing equalizer tick (NowPlayingTick) — marks the active row. */
 .nptick {
   display: inline-flex;
