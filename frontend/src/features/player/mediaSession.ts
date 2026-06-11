@@ -1,6 +1,5 @@
 import { Capacitor } from '@capacitor/core'
 import { MediaSession } from '@jofr/capacitor-media-session'
-import { hiResThumbnail } from '@/shared/lib/thumbnail'
 
 /**
  * One media-session surface for both platforms.
@@ -24,16 +23,10 @@ type Meta = {
 type Action = 'play' | 'pause' | 'previoustrack' | 'nexttrack'
 
 function artworkOf(url?: string | null) {
-  // The stored thumbnail is hqdefault (480×360); upscaled onto a lock-screen /
-  // notification it looks blurry. Offer the 1280×720 maxres frame first with
-  // the original as a guaranteed fallback (maxres 404s for some videos), so the
-  // OS picks the sharpest one that loads.
-  if (!url) return []
-  const hi = hiResThumbnail(url)
-  const list: { src: string; sizes: string; type: string }[] = []
-  if (hi && hi !== url) list.push({ src: hi, sizes: '1280x720', type: 'image/jpeg' })
-  list.push({ src: url, sizes: '480x360', type: 'image/jpeg' })
-  return list
+  // A single entry: the native plugin loads whatever URL it's given (and keeps
+  // the *last* of the array), so the caller passes one already-resolved,
+  // verified-hi-res URL — see resolveArtworkUrl.
+  return url ? [{ src: url, sizes: '1280x720', type: 'image/jpeg' }] : []
 }
 
 export function msSetMetadata(m: Meta | null): void {

@@ -18,6 +18,7 @@ import {
   msSetPlaybackState,
   msSetPosition,
 } from './mediaSession'
+import { resolveArtworkUrl } from '@/shared/lib/thumbnail'
 
 const PLAYER_SNAPSHOT_KEY = 'ytdl.player.v1'
 const PLAYER_POSITION_KEY = 'ytdl.player.position'
@@ -632,12 +633,20 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       msSetMetadata(null)
       return
     }
-    msSetMetadata({
+    let cancelled = false
+    const base = {
       title: current.title ?? current.video_id,
       artist: current.artist ?? '',
       album: current.album ?? undefined,
-      artworkUrl: current.thumbnail_url,
+    }
+    // Resolve a verified hi-res artwork URL (maxres only if it really exists,
+    // not YouTube's grey placeholder) so the notification image is sharp.
+    void resolveArtworkUrl(current.thumbnail_url).then((art) => {
+      if (!cancelled) msSetMetadata({ ...base, artworkUrl: art })
     })
+    return () => {
+      cancelled = true
+    }
   }, [current && trackKey(current)])
 
   useEffect(() => {
