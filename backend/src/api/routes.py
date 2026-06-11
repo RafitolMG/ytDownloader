@@ -33,7 +33,7 @@ from src import (
 )
 from src.api.admin_routes import router as admin_router
 from src.api.auth_routes import router as auth_router
-from src.auth import CurrentUser, current_user
+from src.auth import CurrentUser, current_user, media_user
 from src.extraction_pool import run_extraction
 
 
@@ -976,7 +976,7 @@ async def progress_ws(websocket: WebSocket, job_id: str):
 def serve_file(
     job_id: str,
     background_tasks: BackgroundTasks,
-    user: CurrentUser = Depends(current_user),
+    user: CurrentUser = Depends(media_user),
 ):
     """Serve the downloaded file and clean up the temp directory afterwards."""
     row = db.get(job_id)
@@ -1812,7 +1812,7 @@ def stream_track(
     request: Request,
     codec: str = "mp3",
     bitrate: str = "192",
-    user: CurrentUser = Depends(current_user),
+    user: CurrentUser = Depends(media_user),
 ):
     """
     Stream a track from the library to an HTML <audio> element. Honors the
@@ -1959,7 +1959,7 @@ def _open_preview_upstream(direct: str, range_header: str | None):
 def preview_track(
     video_id: str,
     request: Request,
-    user: CurrentUser = Depends(current_user),
+    user: CurrentUser = Depends(media_user),
 ):
     """
     Proxy-stream a not-yet-downloaded track's audio from YouTube so it can be

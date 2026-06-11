@@ -8,7 +8,13 @@ import {
   type ReactNode,
 } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ApiError, api, setUnauthorizedHandler } from '@/shared/api/client'
+import {
+  ApiError,
+  api,
+  clearMediaToken,
+  ensureMediaToken,
+  setUnauthorizedHandler,
+} from '@/shared/api/client'
 
 export type AuthedUser = {
   user_id: string
@@ -34,7 +40,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     api
       .whoami()
-      .then((u) => setUser(u as AuthedUser))
+      .then((u) => {
+        setUser(u as AuthedUser)
+        // Native build only: prefetch the media token so <audio>/download can
+        // authenticate cross-origin. No-op on the web.
+        void ensureMediaToken()
+      })
       .catch((e) => {
         if (!(e instanceof ApiError && e.status === 401)) {
           // log but don't blow up — could be network during dev reload
@@ -48,6 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (usernameOrEmail: string, password: string) => {
     const u = await api.login(usernameOrEmail, password)
     setUser(u as AuthedUser)
+    await ensureMediaToken(true)
   }, [])
 
   const logout = useCallback(async () => {
@@ -56,6 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // ignore — we drop local state regardless
     }
+    clearMediaToken()
     setUser(null)
     navigate('/login', { replace: true })
   }, [navigate])
