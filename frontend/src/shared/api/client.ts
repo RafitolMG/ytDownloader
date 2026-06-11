@@ -160,6 +160,15 @@ export const api = {
       }),
     }),
 
+  /** Bulk-import a Spotify playlist link or a pasted "Artist - Title" / CSV
+   *  list. Each track is re-found on YT Music and downloaded. Returns a job id
+   *  to follow over the same /ws/progress channel as a playlist download. */
+  importTracklist: (source: string) =>
+    json<{ job_id: string }>('/api/import/tracklist', {
+      method: 'POST',
+      body: JSON.stringify({ source }),
+    }),
+
   jobs: () => json<{ jobs: JobRow[] }>('/api/jobs'),
 
   retry: (jobId: string) =>

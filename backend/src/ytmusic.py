@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import unicodedata
 
 from src import config
 
@@ -88,3 +89,99 @@ def clean_artists(video_id: str) -> list[str] | None:
         return None
     names = _parse_author(author)
     return names or None
+
+
+# ── Spotify → YT Music matching ───────────────────────────────────────────────
+# Spotify hands us {artist, title, duration} but no audio (DRM). We re-find each
+# song on YT Music and download that. The hard part is rejecting wrong matches:
+# a search for a song YT Music doesn't have still returns *something*, so taking
+# the first result would download the wrong track. We score candidates and only
+# accept a confident one — duration is the strongest signal (the same recording
+# is always within a few seconds), backed by title + artist token overlap.
+
+_DUR_HARD_LIMIT_SEC = 20   # reject a candidate further than this from Spotify's
+_MIN_TITLE_SIM = 0.45      # query-vs-candidate title token overlap floor
+_MIN_ARTIST_SIM = 0.30     # query-vs-candidate artist token overlap floor
+
+
+def _norm(s: str) -> str:
+    """Lowercase, strip accents, drop bracketed asides / feat-tails and
+    punctuation — so 'Tú Me Dejaste (Remaster)' ≈ 'tu me dejaste'."""
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
+    s = s.lower()
+    s = re.sub(r"\(.*?\)|\[.*?\]", " ", s)
+    s = re.sub(r"\b(feat|ft|with|prod)\b.*", " ", s)
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    return " ".join(s.split())
+
+
+def _coverage(query: str, text: str) -> float:
+    """Directional token coverage: what fraction of `query`'s tokens appear in
+    `text` (0..1). Asymmetric on purpose — a Spotify primary artist ('C.
+    Tangana') must be *contained* in YT Music's fuller credit ('C. Tangana, Niño
+    de Elche, La Hungara') without the extra featured names diluting the score."""
+    q, t = set(_norm(query).split()), set(_norm(text).split())
+    if not q or not t:
+        return 0.0
+    return len(q & t) / len(q)
+
+
+class Match:
+    """A scored YT Music candidate for a Spotify track."""
+
+    def __init__(self, video_id: str, title: str, artists: str, duration: "int | None", score: float):
+        self.video_id = video_id
+        self.title = title
+        self.artists = artists
+        self.duration = duration
+        self.score = score
+
+
+def search_match(
+    artist: str, title: str, duration_sec: "int | None" = None
+) -> "Match | None":
+    """Find the best-matching YT Music song for a Spotify track, or None when no
+    candidate is confident enough (so the caller can flag it 'no match' rather
+    than download the wrong song). Best-effort: never raises."""
+    if not config.YTMUSIC_ENABLED:
+        return None
+    client = _get_client()
+    if client is None:
+        return None
+    query = f"{artist} {title}".strip()
+    try:
+        results = client.search(query, filter="songs", limit=5)
+    except Exception as e:
+        log.debug("ytmusic search failed for %r: %s", query, e)
+        return None
+
+    best: "Match | None" = None
+    for r in results or []:
+        vid = r.get("videoId")
+        if not vid:
+            continue
+        cand_title = r.get("title") or ""
+        cand_artists = ", ".join(a.get("name", "") for a in (r.get("artists") or []))
+        cand_dur = r.get("duration_seconds")
+
+        title_sim = _coverage(title, cand_title)
+        artist_sim = _coverage(artist, cand_artists)
+        if title_sim < _MIN_TITLE_SIM:
+            continue
+        # Gate on the artist only when one was supplied — bare query lines (no
+        # "Artist - Title") lean on title + duration alone.
+        if artist and artist_sim < _MIN_ARTIST_SIM:
+            continue
+        if duration_sec and cand_dur and abs(cand_dur - duration_sec) > _DUR_HARD_LIMIT_SEC:
+            continue
+
+        # Duration proximity dominates (0 = exact); title/artist break ties.
+        dur_pen = (
+            abs(cand_dur - duration_sec) * 0.03
+            if (duration_sec and cand_dur)
+            else 0.0
+        )
+        score = title_sim + 0.5 * artist_sim - dur_pen
+        if best is None or score > best.score:
+            best = Match(vid, cand_title, cand_artists, cand_dur, score)
+    return best
