@@ -16,6 +16,7 @@ const PlaylistDetailPage = lazy(() => import('@/pages/PlaylistDetailPage'))
 const LikedSongsPage = lazy(() => import('@/pages/LikedSongsPage'))
 const StatsPage = lazy(() => import('@/pages/StatsPage'))
 const ImportPage = lazy(() => import('@/pages/ImportPage'))
+const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
 const AdminPage = lazy(() => import('@/pages/AdminPage'))
 
 /** Themed splash while a route chunk loads — beats a blank flash on first nav. */
@@ -82,6 +83,14 @@ export function AppRouter() {
           element={
             <RequireAuth>
               <ImportPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <RequireAuth>
+              <SettingsPage />
             </RequireAuth>
           }
         />
