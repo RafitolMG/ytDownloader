@@ -1280,6 +1280,49 @@ def _is_music_candidate(item: dict, *, strict: bool) -> bool:
     return dur is None or 45 <= dur <= 1800
 
 
+def _owned_signatures(catalog: list[dict]) -> list[tuple[set, set]]:
+    """Normalized (title-tokens, artist-tokens) for every owned track, for
+    fuzzy "same song, different upload" dedup. The video_id set already catches
+    the exact same upload; this catches the *other* YouTube video of a song we
+    already have (e.g. an audio-only rip we own resurfacing as the music video,
+    which carries a different video_id)."""
+    sigs: list[tuple[set, set]] = []
+    for it in catalog:
+        title_tokens = set(ytmusic._norm(it.get("title") or "").split())
+        if not title_tokens:
+            continue
+        artist_tokens = set(ytmusic._norm(it.get("artist") or "").split())
+        sigs.append((title_tokens, artist_tokens))
+    return sigs
+
+
+def _matches_owned(item: dict, owned_sigs: list[tuple[set, set]]) -> bool:
+    """True when a YouTube candidate is (fuzzily) a song we already own. The
+    candidate's title is a raw YouTube title that usually embeds both the song
+    and the artist ('Bad Bunny - Tití Me Preguntó (Video Oficial)'), so we test
+    each owned track's title/artist tokens for containment in that blob.
+
+    An owned track counts as a match when ≥80% of its title tokens appear in the
+    candidate AND (when we have an artist on file) ≥50% of its artist tokens do —
+    enough to catch the same song while letting a *different* song by the same
+    artist through."""
+    blob = set(
+        ytmusic._norm(
+            f"{item.get('title') or ''} {item.get('artist') or ''}"
+        ).split()
+    )
+    if not blob:
+        return False
+    for title_tokens, artist_tokens in owned_sigs:
+        if len(title_tokens & blob) / len(title_tokens) < 0.8:
+            continue
+        if not artist_tokens:
+            return True
+        if len(artist_tokens & blob) / len(artist_tokens) >= 0.5:
+            return True
+    return False
+
+
 def _discover_feed(
     user_id: str,
     q_norm: str,
@@ -1401,6 +1444,9 @@ def catalog_suggestions(
         return {"external": []}
 
     known_ids = {it["video_id"] for it in catalog}
+    # Fuzzy title/artist signatures so we also skip a *different* upload of a
+    # song already in the library (same song, different video_id).
+    owned_sigs = _owned_signatures(catalog)
 
     # A few seeds is plenty — each Mix returns ~12 related videos and fetching
     # them is the slow part (one yt-dlp call each, cached 15min after). Fetched
@@ -1428,7 +1474,11 @@ def catalog_suggestions(
             # odd hour-long upload or sub-minute clip that sneaks in.
             if not _is_music_candidate(item, strict=False):
                 continue
+            # Skip a different upload of a song we already own (the video_id
+            # filter above only catches the exact same upload).
             seen.add(vid)
+            if _matches_owned(item, owned_sigs):
+                continue
             suggestions.append(item)
         depth += 1
 
