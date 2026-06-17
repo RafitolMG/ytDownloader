@@ -13,6 +13,8 @@ import type {
 } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
+import { useOffline } from '@/features/offline/OfflineProvider'
+import { offlineIndex } from '@/features/offline/offlineIndex'
 
 function toLibraryItem(t: PlaylistTrackRow): LibraryItem {
   return {
@@ -108,6 +110,7 @@ function PlaylistDetailView() {
   })
 
   const player = useAudioPlayer()
+  const off = useOffline()
 
   if (playlistQuery.isLoading) {
     return (
@@ -117,6 +120,18 @@ function PlaylistDetailView() {
     )
   }
   if (playlistQuery.isError || !playlistQuery.data) {
+    // The fetch failed (most likely offline). If this playlist was downloaded,
+    // fall back to its on-device copy so it still opens and plays with no net.
+    const offlineTracks = off.offlineTracksFor(id)
+    if (offlineTracks.length > 0) {
+      return (
+        <OfflinePlaylistView
+          name={off.playlistName(id) ?? 'downloaded playlist'}
+          tracks={offlineTracks}
+          queueCount={activeCount}
+        />
+      )
+    }
     return (
       <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
         <div className="font-pixel text-crit">
@@ -177,7 +192,7 @@ function PlaylistDetailView() {
             {playlist.description && (
               <p className="text-sm text-ink-mid mt-1">{playlist.description}</p>
             )}
-            <div className="font-pixel text-xs text-ink-lo uppercase tracking-widest mt-2">
+            <div className="font-pixel text-sm text-ink-mid uppercase tracking-widest mt-2">
               {tracks.length} track{tracks.length === 1 ? '' : 's'}
             </div>
           </div>
@@ -191,6 +206,13 @@ function PlaylistDetailView() {
               >
                 ▶ play all
               </button>
+            )}
+            {tracks.length > 0 && (
+              <DownloadPlaylistButton
+                playlistId={playlist.id}
+                playlistName={playlist.name}
+                tracks={tracks}
+              />
             )}
             {playlist.visibility === 'public' && <ShareButton id={playlist.id} />}
             {tracks.length > 0 && (
@@ -252,6 +274,75 @@ function PlaylistDetailView() {
   )
 }
 
+/** Read-only render of a downloaded playlist from the on-device manifest, shown
+ *  when the network fetch fails. Plays straight from the local files. */
+function OfflinePlaylistView({
+  name,
+  tracks,
+  queueCount,
+}: {
+  name: string
+  tracks: PlaylistTrackRow[]
+  queueCount: number
+}) {
+  const player = useAudioPlayer()
+
+  function playAll(startAt = 0) {
+    const queue = tracks.map(toLibraryItem)
+    if (queue.length > 0) player.play(queue, Math.max(0, startAt))
+  }
+
+  return (
+    <div className="relative z-10 min-h-full">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
+        <AppHeader queueCount={queueCount} />
+
+        <div className="mb-3">
+          <Link
+            to="/playlists"
+            className="font-pixel text-xs uppercase tracking-widest text-ink-lo hover:text-cool transition"
+          >
+            ◀ playlists
+          </Link>
+        </div>
+
+        <header className="card-vapor rounded-sm p-5 mb-6 flex items-center gap-4 flex-wrap">
+          <div className="flex-1 min-w-0">
+            <div className="font-pixel text-xs uppercase tracking-[0.2em] text-hot mb-1">
+              ⬇ offline · no connection
+            </div>
+            <h1 className="font-sans text-2xl font-bold text-ink-hi">{name}</h1>
+            <div className="font-pixel text-xs text-ink-lo uppercase tracking-widest mt-2">
+              {tracks.length} track{tracks.length === 1 ? '' : 's'} on device
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => playAll(0)}
+            className="font-pixel text-sm uppercase tracking-widest px-4 py-1 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+          >
+            ▶ play all
+          </button>
+        </header>
+
+        <ul className="card-vapor rounded-sm divide-y divide-border">
+          {tracks.map((t, i) => (
+            <TrackRow
+              key={`${t.video_id}/${t.codec}/${t.bitrate}`}
+              track={t}
+              position={i}
+              isOwner={false}
+              onPlay={() => playAll(i)}
+              onDropAt={() => {}}
+              onRemove={() => {}}
+            />
+          ))}
+        </ul>
+      </main>
+    </div>
+  )
+}
+
 function TrackRow({
   track,
   position,
@@ -268,8 +359,10 @@ function TrackRow({
   onRemove: () => void
 }) {
   const player = useAudioPlayer()
+  const off = useOffline()
   const [over, setOver] = useState(false)
 
+  const isOffline = off.isDownloaded(track.video_id, track.codec, track.bitrate)
   const isCurrent =
     player.current?.video_id === track.video_id &&
     player.current?.codec === track.codec &&
@@ -298,7 +391,7 @@ function TrackRow({
         const from = Number(e.dataTransfer.getData('text/plain'))
         if (!Number.isNaN(from)) onDropAt(from)
       }}
-      className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition group ${
+      className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2.5 sm:py-3 cursor-pointer transition group ${
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       } ${over ? 'border-t-2 border-cool' : ''}`}
     >
@@ -319,9 +412,9 @@ function TrackRow({
       </div>
 
       <div className="relative w-14 sm:w-20 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">
-        {track.thumbnail_url ? (
+        {offlineIndex.getCover(track.video_id) ?? track.thumbnail_url ? (
           <img
-            src={track.thumbnail_url}
+            src={offlineIndex.getCover(track.video_id) ?? track.thumbnail_url ?? undefined}
             alt=""
             className="w-full h-full object-cover"
             loading="lazy"
@@ -335,13 +428,21 @@ function TrackRow({
             {fmtDuration(track.duration_sec)}
           </span>
         )}
+        {isOffline && (
+          <span
+            title="downloaded for offline"
+            className="absolute top-0.5 left-0.5 font-pixel text-[10px] leading-none bg-page/80 text-hot px-1 py-0.5 rounded-xs"
+          >
+            ⬇
+          </span>
+        )}
       </div>
 
       <div className="flex-1 min-w-0">
         <div className="font-sans text-sm font-medium text-ink-hi leading-snug line-clamp-2">
           {track.title ?? track.video_id}
         </div>
-        <div className="text-sm text-ink-lo truncate mt-0.5">
+        <div className="text-sm text-ink-mid truncate mt-0.5">
           {track.artist ?? '—'}
         </div>
       </div>
@@ -354,7 +455,7 @@ function TrackRow({
             onRemove()
           }}
           title="remove from playlist"
-          className="font-pixel text-sm uppercase tracking-widest w-7 h-7 flex items-center justify-center border border-transparent text-ink-lo opacity-100 lg:opacity-0 lg:group-hover:opacity-100 hover:text-crit hover:border-crit/60 transition rounded-xs"
+          className="font-pixel text-base w-10 h-10 flex items-center justify-center border border-transparent text-ink-lo opacity-100 lg:opacity-0 lg:group-hover:opacity-100 hover:text-crit hover:border-crit/60 transition rounded-xs"
         >
           ✕
         </button>
@@ -514,6 +615,89 @@ function fmtDuration(sec: number): string {
   const mm = String(m).padStart(h > 0 ? 2 : 1, '0')
   const ss = String(s).padStart(2, '0')
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
+}
+
+/** Download every track of this playlist to the device for offline playback
+ *  (native only). Idle → progress → "✓ offline" with a two-step remove. */
+function DownloadPlaylistButton({
+  playlistId,
+  playlistName,
+  tracks,
+}: {
+  playlistId: string
+  playlistName: string
+  tracks: PlaylistTrackRow[]
+}) {
+  const off = useOffline()
+  const [armedRemove, setArmedRemove] = useState(false)
+
+  if (!off.supported) return null
+
+  const real = tracks.filter((t) => t.codec !== 'preview')
+  const total = real.length
+  if (total === 0) return null
+
+  const progress = off.progressFor(playlistId)
+  if (progress) {
+    return (
+      <span className="font-pixel text-sm uppercase tracking-widest px-4 py-1 border border-cool/60 text-cool rounded-xs">
+        ··· {progress.done}/{progress.total}
+      </span>
+    )
+  }
+
+  const done = real.filter((t) =>
+    off.isDownloaded(t.video_id, t.codec, t.bitrate),
+  ).length
+
+  if (done === total) {
+    if (armedRemove) {
+      return (
+        <span className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => {
+              void off.removePlaylist(playlistId)
+              setArmedRemove(false)
+            }}
+            title="confirm — delete downloaded files"
+            className="font-pixel text-sm uppercase tracking-widest px-2 py-1 border border-crit/60 text-crit bg-crit/10 hover:bg-crit/20 transition rounded-xs"
+          >
+            ⚠ remove
+          </button>
+          <button
+            type="button"
+            onClick={() => setArmedRemove(false)}
+            title="cancel"
+            className="font-pixel text-sm uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool transition rounded-xs"
+          >
+            ✕
+          </button>
+        </span>
+      )
+    }
+    return (
+      <button
+        type="button"
+        onClick={() => setArmedRemove(true)}
+        title="downloaded for offline — tap to remove"
+        className="font-pixel text-sm uppercase tracking-widest px-4 py-1 border border-cool bg-cool/10 text-cool shadow-[var(--shadow-glow-cool)] hover:bg-cool/20 transition rounded-xs"
+      >
+        ✓ offline
+      </button>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void off.downloadPlaylist(playlistId, playlistName, tracks)}
+      title="download for offline playback"
+      className="font-pixel text-sm uppercase tracking-widest px-4 py-1 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+    >
+      ⬇ {done > 0 ? `${done}/${total}` : 'download'}
+    </button>
+  )
 }
 
 /** Copy a shareable link to this (public) playlist. Any logged-in user can open

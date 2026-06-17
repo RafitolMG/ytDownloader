@@ -5,8 +5,8 @@ import { NavLink } from 'react-router-dom'
 // so the icon-only state is still understandable to screen readers.
 //
 // These are the *primary* destinations (header tabs on desktop, bottom bar on
-// phones). Secondary surfaces — stats, admin, settings — live in the SideMenu;
-// the queue lives behind the header QueueIndicator.
+// phones). Secondary surfaces — import, stats, admin, settings — live in the
+// SideMenu; the queue lives behind the header QueueIndicator.
 export type NavTab = { to: string; icon: string; label: string }
 
 const TABS: NavTab[] = [
@@ -14,7 +14,6 @@ const TABS: NavTab[] = [
   { to: '/catalog', icon: '⊕', label: 'catalog' },
   { to: '/albums', icon: '◉', label: 'albums' },
   { to: '/playlists', icon: '≣', label: 'playlists' },
-  { to: '/import', icon: '⬇', label: 'import' },
 ]
 
 /** Primary nav destinations, shared by the desktop header tabs and the mobile

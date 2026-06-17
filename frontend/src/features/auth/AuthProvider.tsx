@@ -31,10 +31,40 @@ type AuthState = {
 
 const AuthContext = createContext<AuthState | null>(null)
 
+// Persist the last signed-in user so a cold start with no network (airplane
+// mode, offline playback) keeps the session instead of bouncing to /login.
+const AUTH_USER_KEY = 'ytdl.auth.user'
+
+function readCachedUser(): AuthedUser | null {
+  try {
+    const raw = localStorage.getItem(AUTH_USER_KEY)
+    return raw ? (JSON.parse(raw) as AuthedUser) : null
+  } catch {
+    return null
+  }
+}
+
+function writeCachedUser(u: AuthedUser | null): void {
+  try {
+    if (u) localStorage.setItem(AUTH_USER_KEY, JSON.stringify(u))
+    else localStorage.removeItem(AUTH_USER_KEY)
+  } catch {
+    // storage unavailable — non-fatal
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthedUser | null>(null)
+  // Seed from cache so we render signed-in immediately, even offline. whoami
+  // below reconciles against the server once (if) the network answers.
+  const [user, setUserState] = useState<AuthedUser | null>(readCachedUser)
   const [loading, setLoading] = useState(true)
   const navigate = useNavigate()
+
+  // Keep the persisted copy in lockstep with in-memory user.
+  const setUser = useCallback((u: AuthedUser | null) => {
+    writeCachedUser(u)
+    setUserState(u)
+  }, [])
 
   // Hydrate on mount — backend tells us if the session cookie is valid.
   useEffect(() => {
@@ -47,20 +77,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         void ensureMediaToken()
       })
       .catch((e) => {
-        if (!(e instanceof ApiError && e.status === 401)) {
-          // log but don't blow up — could be network during dev reload
-          console.warn('whoami failed:', e)
+        if (e instanceof ApiError && e.status === 401) {
+          // Session genuinely rejected by the server — drop it.
+          setUser(null)
+        } else {
+          // Network unreachable (offline): keep the cached session so downloaded
+          // playlists stay playable. Don't log out on a failed fetch.
+          console.warn('whoami failed (offline?), keeping cached session:', e)
         }
-        setUser(null)
       })
       .finally(() => setLoading(false))
-  }, [])
+  }, [setUser])
 
-  const login = useCallback(async (usernameOrEmail: string, password: string) => {
-    const u = await api.login(usernameOrEmail, password)
-    setUser(u as AuthedUser)
-    await ensureMediaToken(true)
-  }, [])
+  const login = useCallback(
+    async (usernameOrEmail: string, password: string) => {
+      const u = await api.login(usernameOrEmail, password)
+      setUser(u as AuthedUser)
+      await ensureMediaToken(true)
+    },
+    [setUser],
+  )
 
   const logout = useCallback(async () => {
     try {
@@ -71,7 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearMediaToken()
     setUser(null)
     navigate('/login', { replace: true })
-  }, [navigate])
+  }, [navigate, setUser])
 
   // Wire the global 401 handler — when any API call gets a 401, redirect to /login.
   useEffect(() => {
@@ -80,7 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       navigate('/login', { replace: true })
     })
     return () => setUnauthorizedHandler(null)
-  }, [navigate])
+  }, [navigate, setUser])
 
   const value = useMemo<AuthState>(
     () => ({ user, loading, login, logout }),
