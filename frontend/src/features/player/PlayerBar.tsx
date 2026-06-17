@@ -4,15 +4,20 @@ import { useMutation } from '@tanstack/react-query'
 import { useAudioPlayer } from './AudioPlayerProvider'
 import { useGlobalPlayerHotkeys } from './useGlobalPlayerHotkeys'
 import { NowPlayingView } from './NowPlayingView'
+import { useAuth } from '@/features/auth/AuthProvider'
+import { offlineIndex } from '@/features/offline/offlineIndex'
 import { api } from '@/shared/api/client'
 import { G } from '@/shared/ui/glyphs'
 
 export function PlayerBar() {
+  const { user } = useAuth()
   const p = useAudioPlayer()
   useGlobalPlayerHotkeys()
   const [queueOpen, setQueueOpen] = useState(false)
   const [expanded, setExpanded] = useState(false)
-  if (!p.current) return null
+  // Rendered outside the router; a queue restored from localStorage would
+  // otherwise float over the login screen. Hide until signed in.
+  if (!user || !p.current) return null
 
   const t = p.current
   const dur = Number.isFinite(p.duration) ? p.duration : t.duration_sec ?? 0
@@ -71,9 +76,11 @@ export function PlayerBar() {
           className="focus-vis flex items-center gap-2 sm:gap-3 min-w-0 flex-1 cursor-pointer rounded-xs"
         >
           <div className="relative w-10 sm:w-14 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page">
-            {t.thumbnail_url ? (
+            {p.coverUrl ?? offlineIndex.getCover(t.video_id) ?? t.thumbnail_url ? (
               <img
-                src={t.thumbnail_url}
+                src={
+                  p.coverUrl ?? offlineIndex.getCover(t.video_id) ?? t.thumbnail_url ?? undefined
+                }
                 alt=""
                 className="w-full h-full object-cover"
                 referrerPolicy="no-referrer"
@@ -301,9 +308,9 @@ function PlayQueuePanel({ onClose }: { onClose: () => void }) {
                 {isCurrent ? <span className="text-hot">▶</span> : orderPos + 1}
               </span>
               <div className="relative w-10 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page">
-                {track.thumbnail_url ? (
+                {offlineIndex.getCover(track.video_id) ?? track.thumbnail_url ? (
                   <img
-                    src={track.thumbnail_url}
+                    src={offlineIndex.getCover(track.video_id) ?? track.thumbnail_url ?? undefined}
                     alt=""
                     className="w-full h-full object-cover"
                     loading="lazy"

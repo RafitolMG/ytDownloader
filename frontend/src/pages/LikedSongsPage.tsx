@@ -215,7 +215,7 @@ function LikedRow({
   return (
     <li
       onClick={() => player.play(queue, index)}
-      className={`group flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition ${
+      className={`group flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2.5 sm:py-3 cursor-pointer transition ${
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       }`}
     >
@@ -243,7 +243,7 @@ function LikedRow({
         <div className="font-sans text-sm font-medium text-ink-hi leading-snug line-clamp-2">
           {track.title ?? track.video_id}
         </div>
-        <div className="text-sm text-ink-lo truncate mt-0.5">
+        <div className="text-sm text-ink-mid truncate mt-0.5">
           {track.artist ?? '—'}
         </div>
       </div>
@@ -262,7 +262,7 @@ function LikedRow({
               open()
             }}
             title="track actions"
-            className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool hover:border-cool/60 transition rounded-xs"
+            className="font-pixel text-base w-10 h-10 flex items-center justify-center border border-border text-ink-mid hover:text-cool hover:border-cool/60 transition rounded-xs"
           >
             ≣+
           </button>
@@ -279,7 +279,7 @@ function LikedRow({
         }}
         disabled={remove.isPending}
         title="remove from liked"
-        className="font-pixel text-sm w-7 h-7 flex items-center justify-center border border-transparent text-hot hover:text-crit hover:border-crit/60 disabled:opacity-30 transition rounded-xs"
+        className="font-pixel text-base w-10 h-10 flex items-center justify-center border border-transparent text-hot hover:text-crit hover:border-crit/60 disabled:opacity-30 transition rounded-xs"
       >
         ♥
       </button>
