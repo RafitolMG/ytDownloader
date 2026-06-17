@@ -1531,6 +1531,10 @@ def catalog_suggestions(
     mixes: list[list[dict]] = [rel_map.get(vid, []) for vid in seed_ids]
 
     seen: set[str] = set()
+    # Fingerprints of songs already suggested, to collapse different uploads of
+    # the same song (audio rip vs "official video") — otherwise the same track
+    # shows twice and a user adding both downloads it twice.
+    kept_fps: list[frozenset] = []
     suggestions: list[dict] = []
     depth = 0
     # Round-robin: take the i-th entry from every mix before the (i+1)-th, so
@@ -1553,7 +1557,11 @@ def catalog_suggestions(
             seen.add(vid)
             if _matches_owned(item, owned_sigs):
                 continue
+            fp = _song_fingerprint(item)
+            if any(_same_song(fp, k) for k in kept_fps):
+                continue  # another upload of a song already suggested
             suggestions.append(item)
+            kept_fps.append(fp)
         depth += 1
 
     return {"external": suggestions}
