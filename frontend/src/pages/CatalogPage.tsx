@@ -475,7 +475,7 @@ export function CatalogRow({
   return (
     <li
       onClick={handlePlay}
-      className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition group ${
+      className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2.5 sm:py-3 cursor-pointer transition group ${
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       }`}
     >
@@ -510,9 +510,9 @@ export function CatalogRow({
         <div className="font-sans text-sm font-medium text-ink-hi leading-snug line-clamp-2">
           {item.title ?? item.video_id}
         </div>
-        <div className="text-sm text-ink-lo truncate mt-0.5">
+        <div className="text-sm text-ink-mid truncate mt-0.5">
           {item.artist ?? '—'}
-          {item.album ? <span className="text-ink-lo/70"> · {item.album}</span> : null}
+          {item.album ? <span className="text-ink-mid/70"> · {item.album}</span> : null}
         </div>
       </div>
 
@@ -528,7 +528,7 @@ export function CatalogRow({
             ? 'remove from your library'
             : 'save to your library — no re-download'
         }
-        className={`font-pixel text-sm flex items-center gap-1 px-2 py-1 border rounded-xs transition disabled:opacity-30 ${
+        className={`font-pixel text-base flex items-center gap-1 px-2.5 py-2 border rounded-xs transition disabled:opacity-30 ${
           item.is_owned
             ? 'border-hot text-hot bg-hot/10 shadow-[var(--shadow-glow-hot)]'
             : 'border-border text-ink-lo hover:text-hot hover:border-hot/60'
@@ -554,7 +554,7 @@ export function CatalogRow({
               open()
             }}
             title="add to playlist"
-            className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-border text-ink-lo hover:text-cool hover:border-cool/60 transition rounded-xs"
+            className="font-pixel text-base w-10 h-10 flex items-center justify-center border border-border text-ink-mid hover:text-cool hover:border-cool/60 transition rounded-xs"
           >
             ≣+
           </button>

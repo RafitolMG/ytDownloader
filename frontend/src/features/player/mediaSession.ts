@@ -30,6 +30,24 @@ function artworkOf(url?: string | null) {
   return url ? [{ src: url, sizes: '1080x1080', type: 'image/jpeg' }] : []
 }
 
+/**
+ * Artwork that the @jofr plugin's NATIVE bitmap loader can handle without ever
+ * touching the network — which means a `data:` URL, or nothing.
+ *
+ * That loader does a blocking `HttpURLConnection.connect()` on any http(s) URL
+ * with NO error handling, so the moment a fetch fails it throws on the bridge
+ * thread and crashes the whole app. "Fails" includes: a downloaded cover's
+ * `https://localhost/_capacitor_file_/…` (no native server on :443), any remote
+ * URL when truly offline, AND remote URLs on WiFi-without-internet (where
+ * `navigator.onLine` is still true). There's no reliable way to know a URL is
+ * reachable, so we never hand the plugin one. The WebView's own
+ * navigator.mediaSession — which is what actually renders the notification
+ * artwork — still gets the full URL and loads it via Chromium when it can.
+ */
+function nativeSafeArtwork(url?: string | null): string | null {
+  return url && url.startsWith('data:') ? url : null
+}
+
 // On native we feed BOTH sessions: the WebView's automatic navigator.mediaSession
 // (the one Android's notification actually renders its artwork from) AND the
 // plugin (whose foreground service enables background playback). Setting only
@@ -54,7 +72,7 @@ export function msSetMetadata(m: Meta | null): void {
       title: m.title,
       artist: m.artist,
       album: m.album,
-      artwork: artworkOf(m.artworkUrl),
+      artwork: artworkOf(nativeSafeArtwork(m.artworkUrl)),
     })
   }
 }
@@ -74,7 +92,13 @@ export function msSetActionHandler(action: Action, handler: (() => void) | null)
 export function msSetPosition(durationSec: number, positionSec: number, playing: boolean): void {
   if (!Number.isFinite(durationSec) || durationSec <= 0) return
   const position = Math.max(0, Math.min(positionSec, durationSec))
-  const state = { duration: durationSec, position, playbackRate: playing ? 1 : 0 }
+  // playbackRate MUST be non-zero: the Web MediaSession spec rejects 0 and
+  // throws synchronously, and this runs inside a React effect that sits above
+  // the ErrorBoundary — a single throw on pause / track-end unmounts the whole
+  // app to a blank page. Paused state is conveyed via setPlaybackState('paused'),
+  // not via a zero rate, so we always report the real (positive) rate.
+  void playing
+  const state = { duration: durationSec, position, playbackRate: 1 }
   if (hasWebMS && navigator.mediaSession.setPositionState) {
     navigator.mediaSession.setPositionState(state)
   }

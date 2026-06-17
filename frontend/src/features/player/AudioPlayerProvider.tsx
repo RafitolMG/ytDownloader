@@ -19,6 +19,7 @@ import {
   msSetPosition,
 } from './mediaSession'
 import { resolveArtworkUrl } from '@/shared/lib/thumbnail'
+import { offlineIndex } from '@/features/offline/offlineIndex'
 
 const PLAYER_SNAPSHOT_KEY = 'ytdl.player.v1'
 const PLAYER_POSITION_KEY = 'ytdl.player.position'
@@ -197,10 +198,17 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     playRecordedRef.current = false
     listenedMsRef.current = 0
     // codec 'preview' = a not-yet-downloaded track proxy-streamed from YouTube.
-    el.src =
+    // Offline-first: if this track has been downloaded to the device, play the
+    // local file (faster, no data, works with no connection) regardless of net.
+    const localUrl =
       current.codec === 'preview'
+        ? null
+        : offlineIndex.get(current.video_id, current.codec, current.bitrate)
+    el.src =
+      localUrl ??
+      (current.codec === 'preview'
         ? api.previewUrl(current.video_id)
-        : api.trackStreamUrl(current.video_id, current.codec, current.bitrate)
+        : api.trackStreamUrl(current.video_id, current.codec, current.bitrate))
     el.currentTime = 0
     setPosition(0)
     setDuration(NaN)
@@ -649,11 +657,15 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     // in the notification). Fall back to a verified hi-res video frame when YT
     // Music has none.
     void (async () => {
-      let art: string | null | undefined = null
-      try {
-        art = (await api.trackCover(vid)).cover_url
-      } catch {
-        /* ignore */
+      // Prefer the cover saved alongside an offline download — no network, and
+      // it's the same square art we'd otherwise fetch.
+      let art: string | null | undefined = offlineIndex.getCover(vid)
+      if (!art) {
+        try {
+          art = (await api.trackCover(vid)).cover_url
+        } catch {
+          /* ignore */
+        }
       }
       if (!art) art = await resolveArtworkUrl(current.thumbnail_url)
       if (cancelled) return
