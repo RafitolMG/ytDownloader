@@ -3,9 +3,9 @@ import { NavLink } from 'react-router-dom'
 import { useAuth } from '@/features/auth/AuthProvider'
 import { useBackClose } from '@/shared/lib/backStack'
 
-/** Left slide-over for secondary destinations — stats, admin, settings — kept
- *  out of the primary nav so the header / bottom bar stay focused on the music
- *  flow. Also holds the account row + logout. */
+/** Left slide-over for secondary destinations — import, stats, admin, settings —
+ *  kept out of the primary nav so the header / bottom bar stay focused on the
+ *  music flow. Also holds the account row + logout. */
 export function SideMenu({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { user, logout } = useAuth()
   useBackClose(open, onClose)
@@ -20,6 +20,7 @@ export function SideMenu({ open, onClose }: { open: boolean; onClose: () => void
   }, [open, onClose])
 
   const items = [
+    { to: '/import', icon: '⬇', label: 'import' },
     { to: '/stats', icon: '★', label: 'stats' },
     ...(user?.role === 'ADMIN' ? [{ to: '/admin', icon: '◈', label: 'admin' }] : []),
     { to: '/settings', icon: '⚙', label: 'configuración' },

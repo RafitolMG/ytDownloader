@@ -29,7 +29,7 @@ function LikedSongsCard({ count }: { count: number }) {
       </div>
       <div className="p-3 flex-1">
         <div className="font-sans text-sm font-semibold text-ink-hi">Liked Songs</div>
-        <div className="font-pixel text-xs text-ink-lo uppercase tracking-widest mt-1">
+        <div className="font-pixel text-sm text-ink-mid uppercase tracking-widest mt-1">
           {count} track{count === 1 ? '' : 's'}
         </div>
       </div>
@@ -69,7 +69,7 @@ export default function PlaylistsPage() {
         <AppHeader queueCount={activeCount} />
 
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-          <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
+          <div className="font-pixel text-sm text-ink-mid uppercase tracking-[0.2em]">
             ░▒▓ playlists ▓▒░
           </div>
           <div className="flex items-center gap-2">
@@ -256,7 +256,7 @@ function PlaylistCard({ playlist }: { playlist: PlaylistSummary }) {
         <div className="font-sans text-sm font-semibold text-ink-hi line-clamp-2 leading-snug">
           {playlist.name}
         </div>
-        <div className="font-pixel text-xs text-ink-lo uppercase tracking-widest mt-1">
+        <div className="font-pixel text-sm text-ink-mid uppercase tracking-widest mt-1">
           {playlist.track_count} track{playlist.track_count === 1 ? '' : 's'}
         </div>
       </div>
