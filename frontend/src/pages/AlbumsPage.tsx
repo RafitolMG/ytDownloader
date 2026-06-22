@@ -79,7 +79,7 @@ export default function AlbumsPage() {
 
   const libraryQuery = useQuery({
     queryKey: ['library'],
-    queryFn: () => api.library(500),
+    queryFn: () => api.library(),
     staleTime: 10_000,
   })
   const libraryAlbums = useMemo(

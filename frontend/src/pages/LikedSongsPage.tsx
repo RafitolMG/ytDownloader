@@ -35,7 +35,7 @@ export default function LikedSongsPage() {
 
   const libraryQuery = useQuery({
     queryKey: ['library'],
-    queryFn: () => api.library(500),
+    queryFn: () => api.library(),
     staleTime: 10_000,
   })
 

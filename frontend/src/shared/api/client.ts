@@ -256,7 +256,10 @@ export const api = {
     }>(`/api/admin/tracks/refetch-artists`, { method: 'POST' }),
 
   // ── music library ──
-  library: (limit = 500) =>
+  // Default high so the whole library loads — the Liked/Playlists/Albums views
+  // sort, search and "play all" over the full set client-side. Backend caps at
+  // the same ceiling; 500 used to silently truncate larger libraries.
+  library: (limit = 10000) =>
     json<LibraryResponse>(`/api/library?limit=${limit}`),
 
   removeFromLibrary: (videoId: string, codec: string, bitrate: string) =>
