@@ -1184,9 +1184,14 @@ _AUDIO_MEDIA_TYPES = {
 
 
 @app.get("/api/library")
-def list_library(limit: int = 500, user: CurrentUser = Depends(current_user)):
-    """Return the caller's music library — every track they own."""
-    limit = max(1, min(limit, 500))
+def list_library(limit: int = 10000, user: CurrentUser = Depends(current_user)):
+    """Return the caller's music library — every track they own.
+
+    Loaded whole: the Liked Songs / Playlists / Albums views sort, search and
+    "play all" over the full set client-side, so they need the complete library
+    rather than a page. The cap is a high safety ceiling, not a feature limit —
+    the old 500 silently hid tracks from anyone with a larger library."""
+    limit = max(1, min(limit, 10000))
     return {"items": db.list_library(user.user_id, limit=limit)}
 
 
@@ -1427,12 +1432,11 @@ def _discover_feed(
         # upload of a song already in the library (the music video of an
         # audio-only rip we own, etc.), which carries a different video_id and so
         # sails past the id filter above. Discover exists to surface songs NOT in
-        # the library, so drop these. Signatures come from the whole catalog, not
-        # just the query-matched rows — the owned copy's stored title/artist may
-        # not textually match q yet still be the same song.
-        owned_sigs = _owned_signatures(
-            db.list_catalog(user_id, sort="popular", limit=500, offset=0)
-        )
+        # the library, so drop these. Signatures come from the whole registry,
+        # not just the query-matched rows (the owned copy's stored title/artist
+        # may not textually match q) nor a popular top-N (a stored song beyond
+        # that window would slip through as an external candidate).
+        owned_sigs = _owned_signatures(db.all_track_signatures())
         # Collapse different uploads of the same song *within this feed* too —
         # otherwise a category shows both the audio rip and the "official video"
         # of one track, and a user adding both downloads the same song twice.
@@ -1511,16 +1515,19 @@ def catalog_suggestions(
     """
     limit = max(1, min(limit, 40))
 
-    # One generous read does double duty: pick popular seeds AND build the
-    # dedup set of everything already in the shared library.
+    # Popular seeds drive the YouTube Mixes; a top-N read is the right shape here.
     catalog = db.list_catalog(user.user_id, sort="popular", limit=500, offset=0)
     if not catalog:
         return {"external": []}
 
-    known_ids = {it["video_id"] for it in catalog}
+    # Dedup against the *entire* registry, not just the popular seeds — anything
+    # stored on the server beyond the top-500 would otherwise resurface as a
+    # suggestion. This feed exists only to surface songs NOT yet on the server.
+    dedup_index = db.all_track_signatures()
+    known_ids = {it["video_id"] for it in dedup_index}
     # Fuzzy title/artist signatures so we also skip a *different* upload of a
     # song already in the library (same song, different video_id).
-    owned_sigs = _owned_signatures(catalog)
+    owned_sigs = _owned_signatures(dedup_index)
 
     # A few seeds is plenty — each Mix returns ~12 related videos and fetching
     # them is the slow part (one yt-dlp call each, cached 15min after). Fetched
@@ -1863,7 +1870,6 @@ def daily_mixes(
         return {"mixes": [], "personalized": False}
 
     pool_keys = {key(t) for t in pool}
-    catalog_ids = {t["video_id"] for t in pool}
     max_owner = max((t.get("owner_count") or 0) for t in pool) or 1
 
     # Co-credit adjacency from the pool: artists that share a credit row are
@@ -1993,6 +1999,13 @@ def daily_mixes(
     all_seeds = list({s for b in built for s in b["seeds"]})
     rel_map = search_mod.related_many(all_seeds, limit=18)
 
+    # Exclude *every* stored track, not just the popular-400 pool — a song on the
+    # server beyond that window would otherwise resurface here as a "download"
+    # sprinkle. Fuzzy signatures also drop a different upload of a stored song.
+    dedup_index = db.all_track_signatures()
+    known_ids = {it["video_id"] for it in dedup_index}
+    owned_sigs = _owned_signatures(dedup_index)
+
     mixes: list[dict] = []
     for b in built:
         i = b["i"]
@@ -2009,12 +2022,14 @@ def daily_mixes(
                     continue
                 entry = L[depth]
                 vid = entry.get("id")
-                if not vid or vid in catalog_ids or vid in seen_e:
+                if not vid or vid in known_ids or vid in seen_e:
                     continue
                 seen_e.add(vid)
                 item = _external_item(entry)
                 if not _is_music_candidate(item, strict=False):
                     continue
+                if _matches_owned(item, owned_sigs):
+                    continue  # a different upload of a song already on the server
                 externals.append(item)
             depth += 1
 
