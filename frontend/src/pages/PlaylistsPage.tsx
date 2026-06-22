@@ -52,7 +52,7 @@ export default function PlaylistsPage() {
   })
   const libraryQuery = useQuery({
     queryKey: ['library'],
-    queryFn: () => api.library(500),
+    queryFn: () => api.library(),
     enabled: tab === 'mine',
     staleTime: 10_000,
   })
