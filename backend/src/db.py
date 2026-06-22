@@ -865,6 +865,29 @@ def list_catalog_by_video_ids(
     return [dict(r) for r in rows]
 
 
+def all_track_signatures() -> list[dict[str, Any]]:
+    """Lightweight dedup index: one row per distinct video_id in the shared
+    registry, with its title/artist.
+
+    Discovery feeds (suggestions/discover) must exclude *every* track already on
+    the server, not just a popular top-N — otherwise anything stored beyond that
+    window resurfaces as a suggestion. This is the cheap full-coverage source for
+    that filter: no owner join, no codec/bitrate fan-out (title/artist are stable
+    across a video's encodings, so MAX collapses them to one row per video_id).
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT video_id,
+               MAX(title)  AS title,
+               MAX(artist) AS artist
+          FROM tracks
+         GROUP BY video_id
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ── Play history ───────────────────────────────────────────────────────────────
 
 # Reused SELECT for catalog-item-shaped rows. The single `?` is the viewer for
