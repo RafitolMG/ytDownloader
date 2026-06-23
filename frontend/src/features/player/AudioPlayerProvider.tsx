@@ -10,7 +10,7 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
-import type { CatalogItem, LibraryItem } from '@/shared/api/types'
+import type { LibraryItem } from '@/shared/api/types'
 import { useAuth } from '@/features/auth/AuthProvider'
 import {
   msSetActionHandler,
@@ -20,31 +20,12 @@ import {
 } from './mediaSession'
 import { resolveArtworkUrl } from '@/shared/lib/thumbnail'
 import { offlineIndex } from '@/features/offline/offlineIndex'
+import { getPlaybackTime, setPlaybackTime } from './playbackStore'
+import { catalogToLibrary } from '@/shared/lib/libraryItem'
 
 const PLAYER_SNAPSHOT_KEY = 'ytdl.player.v1'
 const PLAYER_POSITION_KEY = 'ytdl.player.position'
 const PLAYER_VOLUME_KEY = 'ytdl.player.volume'
-
-/** Map a catalog row (radio db hit) to a player item. Kept local to avoid a
- * provider↔CatalogPage import cycle. */
-function catalogToLibrary(c: CatalogItem): LibraryItem {
-  return {
-    video_id: c.video_id,
-    codec: c.codec,
-    bitrate: c.bitrate,
-    title: c.title,
-    artist: c.artist,
-    album: c.album,
-    album_artist: c.album_artist,
-    release_year: c.release_year,
-    duration_sec: c.duration_sec,
-    thumbnail_url: c.thumbnail_url,
-    source_url: c.source_url,
-    file_size: c.file_size,
-    added_at: c.downloaded_at,
-    source_playlist_title: null,
-  }
-}
 
 export type RepeatMode = 'off' | 'one' | 'all'
 
@@ -70,10 +51,8 @@ type PlayerCtx = {
    * the current one). */
   canGoPrev: boolean
   isPlaying: boolean
-  /** Live playback position in seconds. */
-  position: number
-  /** Track duration in seconds (from the audio element, may be NaN early). */
-  duration: number
+  // Live position/duration are NOT here — they tick many times a second and
+  // would re-render every consumer. Read them from `usePlaybackTime()` instead.
   shuffle: boolean
   repeat: RepeatMode
   /** Output volume, 0..1. */
@@ -147,8 +126,9 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   /** Position within `order`. -1 when nothing is loaded. */
   const [pos, setPos] = useState(-1)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [position, setPosition] = useState(0)
-  const [duration, setDuration] = useState(NaN)
+  // position/duration live in the external playbackStore, not React state — see
+  // playbackStore.ts. The <audio> element itself remains the source of truth and
+  // is read directly where a precise current value is needed (seek, mediaSession).
   const [shuffle, setShuffle] = useState(false)
   const [repeat, setRepeat] = useState<RepeatMode>('off')
   const [volume, setVolumeState] = useState(1)
@@ -171,6 +151,20 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
 
   const index = pos >= 0 && pos < order.length ? order[pos] : -1
   const current = index >= 0 && index < queue.length ? queue[index] : null
+
+  // Live mirrors of the queue state, refreshed every render. triggerAutoRadio is
+  // async: between awaiting the radio feed and committing the new queue, the user
+  // may have edited it. Reading these refs *after* the await sees the latest
+  // state instead of the snapshot captured when the call started, so concurrent
+  // edits aren't clobbered.
+  const queueRef = useRef(queue)
+  const orderRef = useRef(order)
+  const posRef = useRef(pos)
+  const currentRef = useRef(current)
+  queueRef.current = queue
+  orderRef.current = order
+  posRef.current = pos
+  currentRef.current = current
   // canGoNext mirrors advanceOrReshuffle's branches: there is a next track
   // when we haven't hit the tail of `order` yet, OR we're in shuffle with
   // >1 track (reshuffle will produce one), OR repeat='all' loops back.
@@ -210,8 +204,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         ? api.previewUrl(current.video_id)
         : api.trackStreamUrl(current.video_id, current.codec, current.bitrate))
     el.currentTime = 0
-    setPosition(0)
-    setDuration(NaN)
+    setPlaybackTime({ position: 0, duration: NaN })
     // Ignore the AbortError from a play() that a rapid track switch interrupts:
     // only flip isPlaying off if this load is still the active one. Otherwise a
     // stale rejection desyncs the UI after the next track has already started.
@@ -399,8 +392,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     setOrder([])
     setPos(-1)
     setIsPlaying(false)
-    setPosition(0)
-    setDuration(NaN)
+    setPlaybackTime({ position: 0, duration: NaN })
     // Tear down any armed sleep timer along with playback.
     setSleepFireAt(null)
     setSleepRemainingMs(null)
@@ -420,7 +412,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     const el = audioRef.current
     if (!el || Number.isNaN(el.duration)) return
     el.currentTime = Math.max(0, Math.min(seconds, el.duration))
-    setPosition(el.currentTime)
+    setPlaybackTime({ position: el.currentTime })
+    msSetPosition(el.duration, el.currentTime, !el.paused)
   }, [])
 
   const toggleShuffle = useCallback(() => {
@@ -574,18 +567,22 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(id)
   }, [queue, order, pos, shuffle, repeat])
 
-  // Position is tiny and changes ~1/s — persist it on its own slow debounce.
+  // Position lives in the external store now (not React state), so we can't key
+  // an effect off it. Persist a coarse resume point on a slow interval while a
+  // queue exists, reading the store directly. Writing every 2s even when paused
+  // is harmless.
   useEffect(() => {
-    if (!hydratedRef.current || queue.length === 0) return
-    const id = setTimeout(() => {
+    if (queue.length === 0) return
+    const id = setInterval(() => {
+      if (!hydratedRef.current) return
       try {
-        localStorage.setItem(PLAYER_POSITION_KEY, String(Math.floor(position)))
+        localStorage.setItem(PLAYER_POSITION_KEY, String(Math.floor(getPlaybackTime().position)))
       } catch {
         /* ignore */
       }
     }, 2000)
-    return () => clearTimeout(id)
-  }, [position, queue.length])
+    return () => clearInterval(id)
+  }, [queue.length])
 
   useEffect(() => {
     if (!hydratedRef.current) return
@@ -601,11 +598,16 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   // externals — so nothing downloads silently. Deduped against the queue and a
   // session "seen" set so it can't loop on the same tail.
   async function triggerAutoRadio() {
-    if (autoRadioBusyRef.current || !current) return
+    const cur = currentRef.current
+    if (autoRadioBusyRef.current || !cur) return
     autoRadioBusyRef.current = true
     try {
-      const feed = await api.radio(current.video_id, { external_limit: 0 })
-      const existing = new Set(queue.map(trackKey))
+      const feed = await api.radio(cur.video_id, { external_limit: 0 })
+      // Read the LATEST queue/order after the await via refs — not the snapshot
+      // captured when this started — so a user edit during the fetch isn't lost.
+      const curQueue = queueRef.current
+      const curOrder = orderRef.current
+      const existing = new Set(curQueue.map(trackKey))
       const seen = autoRadioSeenRef.current
       const fresh = (feed.db ?? [])
         .map(catalogToLibrary)
@@ -613,10 +615,10 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         .slice(0, 20)
       if (fresh.length > 0) {
         fresh.forEach((t) => seen.add(t.video_id))
-        const startIdx = queue.length
-        setQueue([...queue, ...fresh])
-        setOrder([...order, ...fresh.map((_, i) => startIdx + i)])
-        setPos(order.length) // first newly-appended track's order position
+        const startIdx = curQueue.length
+        setQueue([...curQueue, ...fresh])
+        setOrder([...curOrder, ...fresh.map((_, i) => startIdx + i)])
+        setPos(curOrder.length) // first newly-appended track's order position
       }
     } catch {
       /* best-effort — radio is non-critical */
@@ -683,11 +685,13 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   }, [isPlaying, current])
 
   // Keep the notification scrubber roughly in sync (the OS extrapolates while
-  // playing, so a refresh on track change / play-pause / seek is enough).
+  // playing, so a refresh on track change / play-pause is enough; seek() and
+  // onLoadedMetadata push their own update). Read time straight off the element.
   useEffect(() => {
-    msSetPosition(duration, position, isPlaying)
+    const el = audioRef.current
+    if (el) msSetPosition(el.duration, el.currentTime, isPlaying)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current && trackKey(current), duration, isPlaying])
+  }, [current && trackKey(current), isPlaying])
 
   useEffect(() => {
     msSetActionHandler('play', () => togglePlay())
@@ -712,8 +716,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       canGoNext,
       canGoPrev,
       isPlaying,
-      position,
-      duration,
       shuffle,
       repeat,
       volume,
@@ -736,7 +738,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       orderedQueue,
     }),
     [
-      current, coverUrl, queue, index, pos, canGoNext, canGoPrev, isPlaying, position, duration,
+      current, coverUrl, queue, index, pos, canGoNext, canGoPrev, isPlaying,
       shuffle, repeat, volume, setVolume,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
       sleepRemainingMs, sleepEndOfTrack, setSleepTimer,
@@ -751,10 +753,10 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         ref={audioRef}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
-        onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
+        onTimeUpdate={(e) => setPlaybackTime({ position: e.currentTarget.currentTime })}
         onLoadedMetadata={(e) => {
           const el = e.currentTarget
-          setDuration(el.duration)
+          setPlaybackTime({ duration: el.duration })
           // Resume to the persisted position once metadata (and thus duration)
           // is known. Clamp just shy of the end so it doesn't instantly 'ended'.
           if (pendingSeekRef.current != null) {
@@ -762,9 +764,11 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
             pendingSeekRef.current = null
             if (Number.isFinite(el.duration) && target < el.duration) {
               el.currentTime = target
-              setPosition(target)
+              setPlaybackTime({ position: target })
             }
           }
+          // Push the now-known duration to the media notification scrubber.
+          msSetPosition(el.duration, el.currentTime, !el.paused)
         }}
         onEnded={() => {
           // End-of-track sleep: stop here, leaving the queue intact.

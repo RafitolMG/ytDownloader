@@ -1,4 +1,5 @@
 import type { FormatInfo } from '@/shared/api/types'
+import { fmtDuration } from '@/shared/lib/format'
 import type { CaptureMetadata } from './useCapture'
 
 type Props = {
@@ -177,10 +178,4 @@ export function VideoMetadata({
       </div>
     </section>
   )
-}
-
-function fmtDuration(sec: number): string {
-  const m = Math.floor(sec / 60)
-  const s = sec % 60
-  return `${m}:${String(s).padStart(2, '0')}`
 }

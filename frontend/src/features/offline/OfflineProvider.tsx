@@ -65,6 +65,21 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
     )
   }, [])
 
+  // Serialize every manifest read-modify-write. download/remove both mutate
+  // manifestRef and then writeManifest; running two at once let their writes
+  // race so the last writer clobbered the other's entries. A promise-chain mutex
+  // makes them run one at a time (the chain survives a failed op via the dual
+  // .then handlers).
+  const opChainRef = useRef<Promise<unknown>>(Promise.resolve())
+  const runExclusive = useCallback(<T,>(fn: () => Promise<T>): Promise<T> => {
+    const result = opChainRef.current.then(fn, fn)
+    opChainRef.current = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }, [])
+
   // Hydrate the index from disk once on native.
   useEffect(() => {
     if (!supported) return
@@ -87,11 +102,15 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       if (cancelled) return
       recomputeBytes()
       setReady(true)
+      // Reclaim files left behind by a download the app was killed mid-way
+      // through (written to disk but never recorded in the manifest). Through
+      // the mutex so it can't race a download started the instant we're ready.
+      void runExclusive(() => storage.reconcileOrphans(manifestRef.current))
     })()
     return () => {
       cancelled = true
     }
-  }, [supported, recomputeBytes])
+  }, [supported, recomputeBytes, runExclusive])
 
   const isDownloaded = useCallback(
     (videoId: string, codec: string, bitrate: string) =>
@@ -105,11 +124,11 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
   )
 
   const downloadPlaylist = useCallback(
-    async (
+    (
       playlistId: string,
       playlistName: string,
       tracks: PlaylistTrackRow[],
-    ) => {
+    ) => runExclusive(async () => {
       if (!supported) return
       await ensureMediaToken() // so trackStreamUrl carries the media token
       manifestRef.current.playlists[playlistId] = { name: playlistName }
@@ -177,12 +196,12 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
         delete next[playlistId]
         return next
       })
-    },
-    [supported, recomputeBytes],
+    }),
+    [supported, recomputeBytes, runExclusive],
   )
 
   const removePlaylist = useCallback(
-    async (playlistId: string) => {
+    (playlistId: string) => runExclusive(async () => {
       if (!supported) return
       const next: ManifestEntry[] = []
       for (const e of manifestRef.current.tracks) {
@@ -198,8 +217,8 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       delete manifestRef.current.playlists[playlistId]
       await storage.writeManifest(manifestRef.current)
       recomputeBytes()
-    },
-    [supported, recomputeBytes],
+    }),
+    [supported, recomputeBytes, runExclusive],
   )
 
   const offlineTracksFor = useCallback(

@@ -4,11 +4,11 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
   frontend:
-    name: frontend · vite build
+    name: frontend · type-check + build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -26,11 +26,12 @@ jobs:
       - name: npm ci
         run: npm ci
 
+      # `npm run build` runs `tsc -b && vite build`, so this is the type-check too.
       - name: vite build
         run: npm run build
 
   backend:
-    name: backend · python deps
+    name: backend · lint + import smoke
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -48,9 +49,44 @@ jobs:
       - name: pip install
         run: pip install -r requirements.txt
 
+      # High-signal lint only: syntax errors (E9) and undefined/unused names (F).
+      # Catches exactly the breakage a refactor introduces, without enforcing
+      # style on the existing tree.
+      - name: ruff (errors only)
+        run: |
+          pip install ruff
+          ruff check --select=E9,F src
+
+      # Import the whole app graph + boot it through a TestClient so the lifespan
+      # (db.init, reaper) runs and a couple of endpoints answer — a real smoke,
+      # not just "deps install".
+      - name: app import + smoke
+        env:
+          DEV_AUTH_BYPASS: '1'
+          YTMUSIC_ENABLED: 'false'
+        run: |
+          python - <<'PY'
+          from starlette.testclient import TestClient
+          import src.api.routes as r
+          with TestClient(r.app) as c:
+              for p in ("/api/health", "/api/auth/config"):
+                  assert c.get(p).status_code == 200, p
+          print("smoke OK:", len(r.app.routes), "routes")
+          PY
+
+  docker:
+    name: docker · build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build the production image so a broken Dockerfile fails CI here instead
+      # of mid-deploy on Coolify. No push.
+      - name: build image
+        run: docker build -t ytdl:ci .
+
   deploy:
     name: deploy · coolify
-    needs: [frontend, backend]
+    needs: [frontend, backend, docker]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -62,3 +98,18 @@ jobs:
         env:
           COOLIFY_WEBHOOK_URL: ${{ secrets.COOLIFY_WEBHOOK_URL }}
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+
+      # Best-effort post-deploy health check: poll the public health endpoint
+      # until it answers (Coolify takes a bit to roll over). Skipped when the
+      # PUBLIC_BASE_URL repo variable isn't set, so it never blocks a deploy it
+      # can't verify.
+      - name: post-deploy smoke
+        if: ${{ vars.PUBLIC_BASE_URL != '' }}
+        run: |
+          base="${{ vars.PUBLIC_BASE_URL }}"
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$base/api/health" || true)
+            if [ "$code" = "200" ]; then echo "healthy after ${i} tries"; exit 0; fi
+            echo "try $i: $code — waiting"; sleep 10
+          done
+          echo "health never returned 200"; exit 1

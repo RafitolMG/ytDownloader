@@ -30,6 +30,8 @@ import type {
   SuggestionsResponse,
   SuggestResponse,
 } from './types'
+import type { ZodType } from 'zod'
+import { mediaTokenSchema, whoamiSchema } from './schemas'
 
 /**
  * Absolute base URL for the API. Empty on the web build — the SPA is served
@@ -60,22 +62,31 @@ export function wsUrl(path: string): string {
 // ── media token (native only) ────────────────────────────────────────────────
 // <audio>/download requests are issued by the element, not by JS, so in the
 // native build they can't carry the httponly session cookie cross-origin. We
-// fetch the session id once (over a normal cookie-authed request) and append it
-// as `mt`. No-op on the web, where the cookie rides along same-origin.
+// fetch a short-lived, signed, media-scoped token (over a normal cookie-authed
+// request) and append it as `mt`. It expires, so we re-fetch ahead of expiry
+// (AuthProvider also polls this while signed in). No-op on the web.
 let mediaToken: string | null = null
+let mediaTokenExpiresAt = 0 // epoch ms; 0 = none
+// Refresh this far before expiry so a long listen never streams with a dead
+// token (the synchronous URL builder reads whatever is cached at play time).
+const MEDIA_TOKEN_REFRESH_MARGIN_MS = 30 * 60_000
 
 /** Per-session cache of square album-cover URLs (null = looked up, none found). */
 const coverCache = new Map<string, string | null>()
 
-/** Fetch + cache the media token. Returns null (and does nothing) on the web. */
+/** Fetch + cache the media token, refreshing when near expiry. Returns null
+ *  (and does nothing) on the web, where the cookie rides along same-origin. */
 export async function ensureMediaToken(force = false): Promise<string | null> {
   if (!IS_REMOTE) return null
-  if (mediaToken && !force) return mediaToken
+  const fresh = mediaToken && Date.now() < mediaTokenExpiresAt - MEDIA_TOKEN_REFRESH_MARGIN_MS
+  if (fresh && !force) return mediaToken
   try {
-    const r = await json<{ token: string }>('/api/auth/media-token')
+    const r = await json('/api/auth/media-token', undefined, mediaTokenSchema)
     mediaToken = r.token
+    mediaTokenExpiresAt = Date.now() + (r.expires_in ?? 3600) * 1000
   } catch {
     mediaToken = null
+    mediaTokenExpiresAt = 0
   }
   return mediaToken
 }
@@ -83,6 +94,7 @@ export async function ensureMediaToken(force = false): Promise<string | null> {
 /** Drop the cached media token (call on logout). */
 export function clearMediaToken(): void {
   mediaToken = null
+  mediaTokenExpiresAt = 0
 }
 
 /** Append the media token to a media URL in the native build. */
@@ -107,7 +119,11 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
   onUnauthorized = fn
 }
 
-async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
+async function json<T>(
+  input: RequestInfo,
+  init?: RequestInit,
+  schema?: ZodType<T>,
+): Promise<T> {
   const res = await fetch(typeof input === 'string' ? apiUrl(input) : input, {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -126,7 +142,18 @@ async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(res.status, `${res.status}: ${detail}`)
   }
-  return res.json() as Promise<T>
+  const data = await res.json()
+  // Validate at the boundary when a schema is supplied — a contract drift then
+  // surfaces as a clear error here instead of a bad type deep in a component.
+  if (schema) {
+    const parsed = schema.safeParse(data)
+    if (!parsed.success) {
+      const where = typeof input === 'string' ? input : 'response'
+      throw new ApiError(res.status, `unexpected response shape from ${where}`)
+    }
+    return parsed.data
+  }
+  return data as T
 }
 
 export const api = {
@@ -187,16 +214,16 @@ export const api = {
 
   // ── auth ──
   login: (usernameOrEmail: string, password: string) =>
-    json<{ user_id: string; username: string; role: string }>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ usernameOrEmail, password }),
-    }),
+    json(
+      '/api/auth/login',
+      { method: 'POST', body: JSON.stringify({ usernameOrEmail, password }) },
+      whoamiSchema,
+    ),
 
   logout: () =>
     fetch(apiUrl('/api/auth/logout'), { method: 'POST', credentials: 'include' }),
 
-  whoami: () =>
-    json<{ user_id: string; username: string; role: string }>('/api/auth/whoami'),
+  whoami: () => json('/api/auth/whoami', undefined, whoamiSchema),
 
   authConfig: () =>
     json<{ homeauth_base_url: string; register_url: string }>('/api/auth/config'),
@@ -432,6 +459,16 @@ export const api = {
     json<{ ok: true; added: boolean }>(
       `/api/playlists/${encodeURIComponent(id)}/tracks`,
       { method: 'POST', body: JSON.stringify(key) },
+    ),
+
+  /** Append many tracks in one request (vs. N sequential addToPlaylist calls). */
+  addTracksToPlaylist: (
+    id: string,
+    tracks: { video_id: string; codec: string; bitrate: string }[],
+  ) =>
+    json<{ ok: true; added: number }>(
+      `/api/playlists/${encodeURIComponent(id)}/tracks/bulk`,
+      { method: 'POST', body: JSON.stringify({ tracks }) },
     ),
 
   removeFromPlaylist: (

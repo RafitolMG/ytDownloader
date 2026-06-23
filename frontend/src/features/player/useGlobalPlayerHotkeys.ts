@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useAudioPlayer } from './AudioPlayerProvider'
+import { getPlaybackTime } from './playbackStore'
 
 /**
  * Global playback keyboard shortcuts, mounted once (from PlayerBar). Pure
@@ -37,11 +38,11 @@ export function useGlobalPlayerHotkeys() {
           break
         case 'ArrowLeft':
           if (e.shiftKey) p.prev()
-          else p.seek(Math.max(0, p.position - 5))
+          else p.seek(Math.max(0, getPlaybackTime().position - 5))
           break
         case 'ArrowRight':
           if (e.shiftKey) p.next()
-          else p.seek(p.position + 5)
+          else p.seek(getPlaybackTime().position + 5)
           break
         case 'ArrowUp':
           e.preventDefault()
