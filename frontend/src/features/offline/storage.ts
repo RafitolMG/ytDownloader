@@ -125,6 +125,41 @@ export async function removeFiles(
   }
 }
 
+function basename(relPath: string): string {
+  return relPath.split('/').pop() ?? relPath
+}
+
+/** Delete files under the offline dir that no manifest entry references. A
+ *  download interrupted between writing a track's file and persisting the
+ *  manifest (app killed mid-download) leaves the file orphaned with no way to
+ *  reach it — this reclaims that space. Called once on hydrate. Returns how many
+ *  files were removed. */
+export async function reconcileOrphans(manifest: Manifest): Promise<number> {
+  let removed = 0
+  try {
+    const { files } = await Filesystem.readdir({ path: ROOT, directory: DIR })
+    const keep = new Set<string>([basename(MANIFEST)])
+    for (const e of manifest.tracks) {
+      keep.add(basename(e.audioFile))
+      if (e.coverFile) keep.add(basename(e.coverFile))
+    }
+    for (const f of files) {
+      // capacitor returns FileInfo objects; tolerate a plain-string shape too.
+      const name = typeof f === 'string' ? f : f.name
+      if (keep.has(name)) continue
+      try {
+        await Filesystem.deleteFile({ path: `${ROOT}/${name}`, directory: DIR })
+        removed++
+      } catch {
+        // best-effort
+      }
+    }
+  } catch {
+    // dir doesn't exist yet → nothing to reconcile
+  }
+  return removed
+}
+
 export async function readManifest(): Promise<Manifest> {
   try {
     const { data } = await Filesystem.readFile({
