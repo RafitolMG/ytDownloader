@@ -308,8 +308,7 @@ export type PlaylistSummary = {
   created_at: string
   updated_at: string
   track_count: number
-  /** 0/1 from SQLite — treat as boolean. */
-  is_owner: 0 | 1
+  is_owner: boolean
 }
 
 export type PlaylistTrackRow = {

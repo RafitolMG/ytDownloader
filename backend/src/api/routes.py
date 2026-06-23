@@ -2196,6 +2196,10 @@ def list_playlists(
         owner_id = user.user_id
     limit = max(1, min(limit, 500))
     items = db.list_playlists(user.user_id, owner_id=owner_id, limit=limit)
+    # SQLite returns is_owner as 0/1; coerce to a real bool so the JSON matches
+    # the playlist *detail* endpoint (and the client's PlaylistSummary type).
+    for it in items:
+        it["is_owner"] = bool(it["is_owner"])
     return {"items": items}
 
 
