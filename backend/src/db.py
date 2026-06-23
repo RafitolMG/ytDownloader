@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
@@ -899,6 +900,59 @@ def all_track_signatures() -> list[dict[str, Any]]:
         """
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Discovery read cache ────────────────────────────────────────────────────────
+# Loading the home fires several discovery feeds at once (suggestions, daily-
+# mixes, radio, albums), and each re-reads the same two heavy sources: the
+# popular catalog top-N (a LEFT JOIN + GROUP BY over all of track_owners) and the
+# full-table signature index. A short TTL collapses that burst — and back-to-back
+# reloads within the window — to one query each. Staleness only delays a freshly
+# added track showing up in *discovery* surfaces by up to the TTL; the catalog
+# browse / "mine" view stay uncached and immediately fresh.
+#
+# Returned lists/rows are shared — callers MUST treat them as read-only.
+_DISCOVERY_CACHE_TTL = 30.0
+
+_popular_cache: dict[tuple[str, int], tuple[float, list[dict[str, Any]]]] = {}
+_popular_lock = threading.Lock()
+
+
+def popular_catalog(viewer_id: str, limit: int) -> list[dict[str, Any]]:
+    """`list_catalog(sort='popular')` with a short per-viewer TTL cache. Per
+    viewer because `is_owned` differs; the heavy owner aggregation is the shared
+    cost the cache eliminates."""
+    key = (viewer_id, limit)
+    now = time.monotonic()
+    with _popular_lock:
+        hit = _popular_cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+    rows = list_catalog(viewer_id, sort="popular", limit=limit, offset=0)
+    with _popular_lock:
+        _popular_cache[key] = (now + _DISCOVERY_CACHE_TTL, rows)
+        if len(_popular_cache) > 256:
+            for k in [k for k, v in _popular_cache.items() if v[0] <= now]:
+                _popular_cache.pop(k, None)
+    return rows
+
+
+_signatures_cache: tuple[float, list[dict[str, Any]]] | None = None
+_signatures_lock = threading.Lock()
+
+
+def all_track_signatures_cached() -> list[dict[str, Any]]:
+    """`all_track_signatures()` (global, viewer-independent) with a short TTL —
+    it's a full-table scan that every home load otherwise repeats."""
+    global _signatures_cache
+    now = time.monotonic()
+    with _signatures_lock:
+        if _signatures_cache and _signatures_cache[0] > now:
+            return _signatures_cache[1]
+    rows = all_track_signatures()
+    with _signatures_lock:
+        _signatures_cache = (now + _DISCOVERY_CACHE_TTL, rows)
+    return rows
 
 
 # ── Play history ───────────────────────────────────────────────────────────────
