@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 
-from src import config, db, homeauth
+from src import config, db, homeauth, media_token as media_token_mod
 from src.auth import CurrentUser, current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -122,15 +122,18 @@ def whoami(user: CurrentUser = Depends(current_user)):
 
 @router.get("/media-token")
 def media_token(user: CurrentUser = Depends(current_user)):
-    """Hand the authenticated client a token it can append to media URLs.
+    """Hand the authenticated client a short-lived, signed, media-scoped token to
+    append to media URLs.
 
-    Native (Capacitor) builds serve the SPA from a different origin than the
-    API, so the <audio>/download requests can't carry the httponly session
-    cookie. JS can't read the cookie either, so it asks here — over a normal
-    cookie-authed request — for a token to put in the `mt` query param. The
-    token is simply this session's id (the same credential the cookie holds);
-    the web app never calls this (it relies on the cookie)."""
-    return {"token": user.session_id}
+    Native (Capacitor) builds serve the SPA from a different origin than the API,
+    so the <audio>/download requests can't carry the httponly session cookie. JS
+    can't read the cookie either, so it asks here — over a normal cookie-authed
+    request — for a token to put in the `mt` query param. The token is NOT the
+    session id: it's HMAC-signed, carries only user/role + an expiry, and dies on
+    its own, so a leaked media URL can't be replayed as a session. The client
+    re-fetches before it expires. The web app never calls this (cookie suffices)."""
+    token, expires_in = media_token_mod.mint(user.user_id, user.username, user.role)
+    return {"token": token, "expires_in": expires_in}
 
 
 @router.get("/config")
