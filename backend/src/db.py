@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     progress_pct    REAL NOT NULL DEFAULT 0,
     error_message   TEXT,
     is_playlist     INTEGER NOT NULL DEFAULT 0,
+    as_file         INTEGER NOT NULL DEFAULT 0,
     playlist_title  TEXT,
     playlist_count  INTEGER,
     created_at      TEXT NOT NULL,
@@ -261,11 +262,21 @@ def _migrate_drop_track_likes(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE IF EXISTS track_likes")
 
 
+def _migrate_jobs_as_file(conn: sqlite3.Connection) -> None:
+    # `as_file` records whether a job downloaded to device (file / zip) vs.
+    # imported into the library. Persisted so retry can reproduce the original
+    # flow instead of defaulting every audio/playlist retry to a library import.
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "as_file" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN as_file INTEGER NOT NULL DEFAULT 0")
+
+
 # (version, migration_fn) in apply order. Bump past `current` runs only the new ones.
 _MIGRATIONS: list[tuple[int, Any]] = [
     (1, _migrate_jobs_owner_id),
     (2, _migrate_tracks_album),
     (3, _migrate_drop_track_likes),
+    (4, _migrate_jobs_as_file),
 ]
 
 
@@ -315,6 +326,7 @@ def create_job(
     url: str,
     format_code: str,
     is_playlist: bool = False,
+    as_file: bool = False,
     resolution: str | None = None,
     ext: str | None = None,
     owner_id: str | None = None,
@@ -324,8 +336,8 @@ def create_job(
             """
             INSERT INTO jobs (
                 id, url, format_code, status, progress_pct,
-                is_playlist, resolution, ext, owner_id, created_at
-            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                is_playlist, as_file, resolution, ext, owner_id, created_at
+            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -333,6 +345,7 @@ def create_job(
                 format_code,
                 QUEUED,
                 1 if is_playlist else 0,
+                1 if as_file else 0,
                 resolution,
                 ext,
                 owner_id,

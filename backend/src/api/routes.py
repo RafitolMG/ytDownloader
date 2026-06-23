@@ -12,7 +12,9 @@ import time
 import traceback
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -127,6 +129,31 @@ def _init_db():
 # job_id -> {"queue": Queue, "file_path": str | None, "tmp_dir": str}
 _jobs: dict[str, dict] = {}
 _cancelled: set[str] = set()
+
+# Bounded pool for background download jobs. Each job is a seconds-to-minutes
+# yt-dlp + ffmpeg pipeline; spawning one thread per request let a single user
+# saturate CPU/disk/network and the shared YouTube cookies. With the pool, work
+# beyond MAX_CONCURRENT_DOWNLOADS queues (the job stays in its created/pending
+# state) until a slot frees, and the live thread count is capped regardless of
+# how many jobs are submitted.
+_download_pool = ThreadPoolExecutor(
+    max_workers=config.MAX_CONCURRENT_DOWNLOADS,
+    thread_name_prefix="ytdl-download",
+)
+
+
+def _submit_job(target: Callable[[], None]) -> None:
+    """Queue a download job body onto the bounded download pool. The targets
+    already catch and report their own failures; the guard is belt-and-suspenders
+    so an unexpected raise still surfaces in logs instead of vanishing into the
+    discarded Future."""
+    def guarded() -> None:
+        try:
+            target()
+        except Exception:
+            traceback.print_exc()
+
+    _download_pool.submit(guarded)
 
 
 class _Cancelled(Exception):
@@ -330,7 +357,11 @@ def _throttled_progress(job_id: str, progress_queue: queue.Queue):
 
 
 @app.post("/api/download")
-def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_user)):
+def start_download(
+    body: DownloadRequest,
+    user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
+):
     """
     Start a download in a background thread.
 
@@ -360,6 +391,7 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
         job_id=job_id,
         url=body.url,
         format_code=body.format_code,
+        as_file=body.as_file,
         resolution=body.resolution,
         ext=body.ext,
         owner_id=user.user_id,
@@ -579,7 +611,7 @@ def start_download(body: DownloadRequest, user: CurrentUser = Depends(current_us
         target = run_audio_file
     else:
         target = run
-    threading.Thread(target=target, daemon=True).start()
+    _submit_job(target)
     return {"job_id": job_id}
 
 
@@ -596,7 +628,11 @@ def _library_path(video_id: str, codec: str, bitrate: str, ext: str) -> str:
 
 
 @app.post("/api/download-playlist")
-def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = Depends(current_user)):
+def start_playlist_download(
+    body: PlaylistDownloadRequest,
+    user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
+):
     """
     Two flows depending on `as_file`:
 
@@ -638,6 +674,7 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
         url=body.url,
         format_code=effective_quality,
         is_playlist=True,
+        as_file=body.as_file,
         owner_id=user.user_id,
     )
 
@@ -923,7 +960,7 @@ def start_playlist_download(body: PlaylistDownloadRequest, user: CurrentUser = D
             progress_queue.put({"type": "error", "message": str(e)})
 
     target = run_zip if body.as_file else run
-    threading.Thread(target=target, daemon=True).start()
+    _submit_job(target)
     return {"job_id": job_id}
 
 
@@ -934,7 +971,11 @@ class TrackImportRequest(BaseModel):
 
 
 @app.post("/api/import/tracklist")
-def start_tracklist_import(body: TrackImportRequest, user: CurrentUser = Depends(current_user)):
+def start_tracklist_import(
+    body: TrackImportRequest,
+    user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
+):
     """Bulk-import a wishlist into the library. Each wanted track is re-found on
     YouTube Music and downloaded; tracks with no confident match are reported
     rather than guessed. Mirrors the in-app playlist import (mp3-320, shared
@@ -1085,7 +1126,7 @@ def start_tracklist_import(body: TrackImportRequest, user: CurrentUser = Depends
             db.fail(job_id, str(e))
             progress_queue.put({"type": "error", "message": str(e)})
 
-    threading.Thread(target=run, daemon=True).start()
+    _submit_job(run)
     return {"job_id": job_id}
 
 
@@ -1494,7 +1535,7 @@ async def catalog_discover(
 
 
 @app.get("/api/catalog/suggestions")
-def catalog_suggestions(
+async def catalog_suggestions(
     limit: int = 18,
     user: CurrentUser = Depends(current_user),
 ):
@@ -1510,68 +1551,77 @@ def catalog_suggestions(
       - Dedup is against the *entire* catalog (everything downloaded), not just
         the seeds, so we never suggest something already owned.
 
+    Runs on the extraction pool: it mixes db reads with several yt-dlp Mix
+    fetches (related_many), so it must stay off both the event loop and the
+    default request threadpool the cheap db endpoints share.
+
     Best-effort: an empty/cold catalog or a failing mix yields fewer (or zero)
     suggestions rather than an error.
     """
-    limit = max(1, min(limit, 40))
+    n = max(1, min(limit, 40))
 
-    # Popular seeds drive the YouTube Mixes; a top-N read is the right shape here.
-    catalog = db.list_catalog(user.user_id, sort="popular", limit=500, offset=0)
-    if not catalog:
-        return {"external": []}
+    def work():
+        # Popular seeds drive the YouTube Mixes; a top-N read is the right shape.
+        catalog = db.list_catalog(user.user_id, sort="popular", limit=500, offset=0)
+        if not catalog:
+            return {"external": []}
 
-    # Dedup against the *entire* registry, not just the popular seeds — anything
-    # stored on the server beyond the top-500 would otherwise resurface as a
-    # suggestion. This feed exists only to surface songs NOT yet on the server.
-    dedup_index = db.all_track_signatures()
-    known_ids = {it["video_id"] for it in dedup_index}
-    # Fuzzy title/artist signatures so we also skip a *different* upload of a
-    # song already in the library (same song, different video_id).
-    owned_sigs = _owned_signatures(dedup_index)
+        # Dedup against the *entire* registry, not just the popular seeds —
+        # anything stored on the server beyond the top-500 would otherwise
+        # resurface. This feed exists only to surface songs NOT yet on the server.
+        dedup_index = db.all_track_signatures()
+        known_ids = {it["video_id"] for it in dedup_index}
+        # Fuzzy title/artist signatures so we also skip a *different* upload of a
+        # song already in the library (same song, different video_id).
+        owned_sigs = _owned_signatures(dedup_index)
 
-    # A few seeds is plenty — each Mix returns ~12 related videos and fetching
-    # them is the slow part (one yt-dlp call each, cached 15min after). Fetched
-    # concurrently so a cold request overlaps the round-trips instead of paying
-    # them serially.
-    seed_ids = [seed["video_id"] for seed in catalog[:4]]
-    rel_map = search_mod.related_many(seed_ids, limit=12)
-    mixes: list[list[dict]] = [rel_map.get(vid, []) for vid in seed_ids]
+        # A few seeds is plenty — each Mix returns ~12 related videos and fetching
+        # them is the slow part (one yt-dlp call each, cached 15min after).
+        # Fetched concurrently so a cold request overlaps the round-trips.
+        seed_ids = [seed["video_id"] for seed in catalog[:4]]
+        rel_map = search_mod.related_many(seed_ids, limit=12)
+        mixes: list[list[dict]] = [rel_map.get(vid, []) for vid in seed_ids]
 
-    seen: set[str] = set()
-    # Fingerprints of songs already suggested, to collapse different uploads of
-    # the same song (audio rip vs "official video") — otherwise the same track
-    # shows twice and a user adding both downloads it twice.
-    kept_fps: list[frozenset] = []
-    suggestions: list[dict] = []
-    depth = 0
-    # Round-robin: take the i-th entry from every mix before the (i+1)-th, so
-    # the head of the list is a spread across seeds rather than one full mix.
-    while len(suggestions) < limit and any(depth < len(m) for m in mixes):
-        for mix in mixes:
-            if depth >= len(mix) or len(suggestions) >= limit:
-                continue
-            entry = mix[depth]
-            vid = entry.get("id")
-            if not vid or vid in known_ids or vid in seen:
-                continue
-            item = _external_item(entry)
-            # Radio Mixes are music-seeded; the lenient filter only trims the
-            # odd hour-long upload or sub-minute clip that sneaks in.
-            if not _is_music_candidate(item, strict=False):
-                continue
-            # Skip a different upload of a song we already own (the video_id
-            # filter above only catches the exact same upload).
-            seen.add(vid)
-            if _matches_owned(item, owned_sigs):
-                continue
-            fp = _song_fingerprint(item)
-            if any(_same_song(fp, k) for k in kept_fps):
-                continue  # another upload of a song already suggested
-            suggestions.append(item)
-            kept_fps.append(fp)
-        depth += 1
+        seen: set[str] = set()
+        # Fingerprints of songs already suggested, to collapse different uploads
+        # of the same song (audio rip vs "official video") — otherwise the same
+        # track shows twice and a user adding both downloads it twice.
+        kept_fps: list[frozenset] = []
+        suggestions: list[dict] = []
+        depth = 0
+        # Round-robin: take the i-th entry from every mix before the (i+1)-th, so
+        # the head of the list is a spread across seeds rather than one full mix.
+        while len(suggestions) < n and any(depth < len(m) for m in mixes):
+            for mix in mixes:
+                if depth >= len(mix) or len(suggestions) >= n:
+                    continue
+                entry = mix[depth]
+                vid = entry.get("id")
+                if not vid or vid in known_ids or vid in seen:
+                    continue
+                item = _external_item(entry)
+                # Radio Mixes are music-seeded; the lenient filter only trims the
+                # odd hour-long upload or sub-minute clip that sneaks in.
+                if not _is_music_candidate(item, strict=False):
+                    continue
+                # Skip a different upload of a song we already own (the video_id
+                # filter above only catches the exact same upload).
+                seen.add(vid)
+                if _matches_owned(item, owned_sigs):
+                    continue
+                fp = _song_fingerprint(item)
+                if any(_same_song(fp, k) for k in kept_fps):
+                    continue  # another upload of a song already suggested
+                suggestions.append(item)
+                kept_fps.append(fp)
+            depth += 1
 
-    return {"external": suggestions}
+        return {"external": suggestions}
+
+    try:
+        return await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="suggestions timed out")
 
 
 # ── Play history ───────────────────────────────────────────────────────────────
@@ -1827,7 +1877,7 @@ def _jitter(day_seed: int, mix_i: int, video_id: str) -> float:
 
 
 @app.get("/api/catalog/daily-mixes")
-def daily_mixes(
+async def daily_mixes(
     count: int = 4,
     size: int = 40,
     user: CurrentUser = Depends(current_user),
@@ -1844,7 +1894,20 @@ def daily_mixes(
     popularity) and selected with a per-artist round-robin under a hard
     per-artist share cap, so the anchor leads the mix's identity without
     dominating it. Mix length is bounded by how much music has been downloaded.
+
+    Runs the (db-heavy + concurrent yt-dlp related()) work on the extraction
+    pool so it stays off the event loop and the shared request threadpool.
     """
+    try:
+        return await run_extraction(
+            lambda: _daily_mixes_impl(count, size, user),
+            timeout=config.EXTRACTION_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="daily mixes timed out")
+
+
+def _daily_mixes_impl(count: int, size: int, user: CurrentUser):
     count = max(1, min(count, 6))
     size = max(5, min(size, 60))
     day_seed = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
@@ -2255,10 +2318,22 @@ def reorder_playlist(
 
 
 _cover_cache: dict[str, str | None] = {}
+_COVER_CACHE_MAX = 2048
+
+
+def _cover_cache_put(video_id: str, url: str | None) -> None:
+    """Cache a cover URL with a size cap so this long-lived process can't grow
+    the dict without bound (one entry per distinct video ever played). FIFO
+    eviction on insertion order — the art URL is stable, so which we drop is
+    immaterial; an evicted entry just re-fetches next time."""
+    if len(_cover_cache) >= _COVER_CACHE_MAX:
+        for k in list(_cover_cache.keys())[: _COVER_CACHE_MAX // 8]:
+            _cover_cache.pop(k, None)
+    _cover_cache[video_id] = url
 
 
 @app.get("/api/track/{video_id}/cover")
-def track_cover(video_id: str, user: CurrentUser = Depends(current_user)):
+async def track_cover(video_id: str, user: CurrentUser = Depends(current_user)):
     """Square album-cover URL for a track (YT Music), for the now-playing screen
     and the media notification — the stored thumbnail is a 16:9 video frame that
     crops badly into a square slot. Cached per process (the art URL is stable);
@@ -2266,8 +2341,16 @@ def track_cover(video_id: str, user: CurrentUser = Depends(current_user)):
     if not _VIDEO_ID_RE.match(video_id):
         raise HTTPException(status_code=422, detail="invalid video id")
     if video_id not in _cover_cache:
-        _cover_cache[video_id] = ytmusic.square_cover(video_id)
-    return {"cover_url": _cover_cache[video_id]}
+        # square_cover hits YT Music over the network — keep it off the event loop.
+        try:
+            cover = await run_extraction(
+                lambda: ytmusic.square_cover(video_id),
+                timeout=config.EXTRACTION_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            return {"cover_url": None}
+        _cover_cache_put(video_id, cover)
+    return {"cover_url": _cover_cache.get(video_id)}
 
 
 @app.get("/api/track/{video_id}/stream")
@@ -2420,7 +2503,7 @@ def _open_preview_upstream(direct: str, range_header: str | None):
 
 
 @app.get("/api/preview/{video_id}")
-def preview_track(
+async def preview_track(
     video_id: str,
     request: Request,
     user: CurrentUser = Depends(media_user),
@@ -2430,26 +2513,17 @@ def preview_track(
     previewed before downloading. YouTube media URLs are IP-locked and expire,
     so we relay the bytes here rather than redirecting the browser. Honors Range
     for seeking, and retries once with a fresh URL if the cached one 403s.
+
+    The yt-dlp resolution + upstream open are blocking and network-bound, so they
+    run on the extraction pool; only the lazy byte relay rides the response.
     """
     if not _VIDEO_ID_RE.match(video_id):
         raise HTTPException(status_code=400, detail="invalid video id")
-    resolved = _resolve_preview(video_id)
-    if resolved is None:
-        raise HTTPException(status_code=502, detail="could not resolve audio")
-    direct, content_type = resolved
     range_header = request.headers.get("range") or request.headers.get("Range")
 
-    try:
-        client, upstream = _open_preview_upstream(direct, range_header)
-    except Exception:
-        traceback.print_exc()
-        raise HTTPException(status_code=502, detail="upstream fetch failed")
-
-    # A 403 usually means the cached URL went stale — re-resolve once.
-    if upstream.status_code == 403:
-        upstream.close()
-        client.close()
-        _preview_cache.pop(video_id, None)
+    def setup():
+        """Resolve the audio URL and open the upstream connection (with one
+        re-resolve on a stale-URL 403). Returns (client, upstream, content_type)."""
         resolved = _resolve_preview(video_id)
         if resolved is None:
             raise HTTPException(status_code=502, detail="could not resolve audio")
@@ -2459,6 +2533,29 @@ def preview_track(
         except Exception:
             traceback.print_exc()
             raise HTTPException(status_code=502, detail="upstream fetch failed")
+
+        # A 403 usually means the cached URL went stale — re-resolve once.
+        if upstream.status_code == 403:
+            upstream.close()
+            client.close()
+            _preview_cache.pop(video_id, None)
+            resolved = _resolve_preview(video_id)
+            if resolved is None:
+                raise HTTPException(status_code=502, detail="could not resolve audio")
+            direct, content_type = resolved
+            try:
+                client, upstream = _open_preview_upstream(direct, range_header)
+            except Exception:
+                traceback.print_exc()
+                raise HTTPException(status_code=502, detail="upstream fetch failed")
+        return client, upstream, content_type
+
+    try:
+        client, upstream, content_type = await run_extraction(
+            setup, timeout=config.EXTRACTION_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="preview resolve timed out")
 
     headers = {"Accept-Ranges": "bytes"}
     for h in ("Content-Range", "Content-Length"):
@@ -2521,9 +2618,12 @@ def retry_job(job_id: str, user: CurrentUser = Depends(current_user)):
     if row["status"] in db.ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="Job is still active.")
 
+    as_file = bool(row["as_file"])
     if row["is_playlist"]:
         return start_playlist_download(
-            PlaylistDownloadRequest(url=row["url"], quality=row["format_code"]),
+            PlaylistDownloadRequest(
+                url=row["url"], quality=row["format_code"], as_file=as_file,
+            ),
             user=user,
         )
     return start_download(
@@ -2532,6 +2632,7 @@ def retry_job(job_id: str, user: CurrentUser = Depends(current_user)):
             format_code=row["format_code"],
             resolution=row["resolution"],
             ext=row["ext"],
+            as_file=as_file,
         ),
         user=user,
     )
@@ -2552,13 +2653,21 @@ def delete_job(job_id: str, user: CurrentUser = Depends(current_user)):
 # ── Search ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/search/suggest")
-def search_suggest(
+async def search_suggest(
     q: str = "",
     hl: str = "es",
     user: CurrentUser = Depends(current_user),
 ):
-    """Autocomplete strings for the search bar dropdown. Cached 60s."""
-    return {"suggestions": search_mod.suggest(q, hl=hl)}
+    """Autocomplete strings for the search bar dropdown. Cached 60s. The cache
+    miss does a blocking httpx call, so resolve it on the extraction pool."""
+    try:
+        suggestions = await run_extraction(
+            lambda: search_mod.suggest(q, hl=hl),
+            timeout=config.EXTRACTION_TIMEOUT_SEC,
+        )
+        return {"suggestions": suggestions}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="suggest timed out")
 
 
 @app.get("/api/search")

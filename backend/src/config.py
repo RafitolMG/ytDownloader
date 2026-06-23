@@ -108,3 +108,16 @@ RATELIMIT_WINDOW_SEC: int = int(_env("YTDL_RATELIMIT_WINDOW_SEC", "60"))
 # core count by default. EXTRACTION_TIMEOUT_SEC bounds a single request → 504.
 EXTRACTION_WORKERS: int = int(_env("YTDL_EXTRACTION_WORKERS", "0")) or min(4, (os.cpu_count() or 4))
 EXTRACTION_TIMEOUT_SEC: float = float(_env("YTDL_EXTRACTION_TIMEOUT_SEC", "45"))
+
+# Max background download jobs (single video / playlist / tracklist import) that
+# run concurrently. Each is a long-running yt-dlp + ffmpeg pipeline that eats
+# CPU/disk/network and the shared YouTube cookies, so we bound them with a pool:
+# jobs beyond this stay queued (in their created state) until a slot frees,
+# instead of spawning an unbounded thread per request. Sized small for the ARM
+# box. Endpoint rate limiting caps how fast jobs can be created in the meantime.
+MAX_CONCURRENT_DOWNLOADS: int = int(_env("YTDL_MAX_CONCURRENT_DOWNLOADS", "0")) or min(3, (os.cpu_count() or 3))
+
+# Hard ceiling on a single ffmpeg merge/transcode pass. A hung ffmpeg (rare, but
+# it can wedge on a corrupt stream) would otherwise block its download worker
+# forever, permanently consuming one of the MAX_CONCURRENT_DOWNLOADS slots.
+FFMPEG_TIMEOUT_SEC: float = float(_env("YTDL_FFMPEG_TIMEOUT_SEC", "1800"))

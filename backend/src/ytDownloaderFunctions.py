@@ -1,10 +1,13 @@
 import shutil
+import threading
 import yt_dlp
 import os
 import json
 import subprocess
 import re
 from urllib.parse import urlparse, parse_qs
+
+from src import config
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOCAL_FFMPEG = os.path.join(_PROJECT_ROOT, 'bin', 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg')
@@ -377,6 +380,49 @@ def read_file_tags(path: str) -> dict | None:
     }
 
 
+_FFMPEG_PROGRESS_RE = re.compile(r"frame=(\s*\d+)")
+
+
+def _run_ffmpeg_with_progress(cmd, video_frames, on_progress, *, op_name):
+    """Run an ffmpeg command, streaming frame= progress to `on_progress`, with a
+    wall-clock timeout. A wedged ffmpeg (e.g. a corrupt input stream) would
+    otherwise block readline() forever and permanently consume one of the bounded
+    download-worker slots, so a watchdog kills it past FFMPEG_TIMEOUT_SEC."""
+    try:
+        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True)
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg not found. Place ffmpeg.exe in the bin/ folder or add it to your PATH.")
+
+    timed_out = {"v": False}
+
+    def _kill_on_timeout():
+        timed_out["v"] = True
+        process.kill()
+
+    watchdog = threading.Timer(config.FFMPEG_TIMEOUT_SEC, _kill_on_timeout)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        while True:
+            line = process.stderr.readline()
+            if not line:
+                break
+            match = _FFMPEG_PROGRESS_RE.search(line)
+            if match and on_progress and video_frames:
+                frame_number = int(match.group(1))
+                on_progress(min(100.0, frame_number / video_frames * 100))
+        process.communicate()
+    finally:
+        watchdog.cancel()
+
+    if timed_out["v"]:
+        raise RuntimeError(
+            f"FFmpeg {op_name} timed out after {int(config.FFMPEG_TIMEOUT_SEC)}s and was killed."
+        )
+    if process.returncode != 0:
+        raise RuntimeError(f"FFmpeg {op_name} returned a non-zero exit code.")
+
+
 def transcode_video_to_h264(input_file, output_file, video_frames, on_progress=None):
     """
     Re-encode the video stream of `input_file` to H.264, copying the audio.
@@ -397,24 +443,7 @@ def transcode_video_to_h264(input_file, output_file, video_frames, on_progress=N
         '-movflags', '+faststart',
         output_file,
     ]
-    try:
-        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True)
-    except FileNotFoundError:
-        raise RuntimeError("FFmpeg not found. Place ffmpeg.exe in the bin/ folder or add it to your PATH.")
-
-    progress_pattern = re.compile(r"frame=(\s*\d+)")
-    while True:
-        line = process.stderr.readline()
-        if not line:
-            break
-        match = progress_pattern.search(line)
-        if match and on_progress and video_frames:
-            frame_number = int(match.group(1))
-            on_progress(min(100.0, frame_number / video_frames * 100))
-
-    process.communicate()
-    if process.returncode != 0:
-        raise RuntimeError("FFmpeg transcode returned a non-zero exit code.")
+    _run_ffmpeg_with_progress(cmd, video_frames, on_progress, op_name="transcode")
 
 
 def merge_audio_video(video_file, audio_file, output_file, video_frames, on_progress=None):
@@ -432,27 +461,7 @@ def merge_audio_video(video_file, audio_file, output_file, video_frames, on_prog
         '-strict', 'experimental',
         output_file
     ]
-
-    try:
-        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True)
-    except FileNotFoundError:
-        raise RuntimeError("FFmpeg not found. Place ffmpeg.exe in the bin/ folder or add it to your PATH.")
-
-    progress_pattern = re.compile(r"frame=(\s*\d+)")
-
-    while True:
-        line = process.stderr.readline()
-        if not line:
-            break
-        match = progress_pattern.search(line)
-        if match and on_progress:
-            frame_number = int(match.group(1))
-            progress_percent = (frame_number / video_frames) * 100
-            on_progress(progress_percent)
-
-    process.communicate()
-    if process.returncode != 0:
-        raise RuntimeError("FFmpeg process returned a non-zero exit code.")
+    _run_ffmpeg_with_progress(cmd, video_frames, on_progress, op_name="merge")
 
 
 def get_available_resolutions(url, audio_only=False):
