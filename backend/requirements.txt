@@ -4,7 +4,7 @@ ytmusicapi==1.12.1
 fastapi==0.135.3
 uvicorn[standard]==0.44.0
 starlette==1.0.0
-pydantic==2.12.5
+pydantic==2.13.4
 python-multipart==0.0.26
 websockets==16.0
 httpx==0.28.1
