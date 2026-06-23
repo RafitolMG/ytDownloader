@@ -129,6 +129,7 @@ export default function LikedSongsPage() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="search your liked songs..."
+            aria-label="search your liked songs"
             spellCheck={false}
             autoComplete="off"
             className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo text-lg caret-cool"
@@ -258,7 +259,16 @@ function LikedRow({
 
   return (
     <div
+      role="button"
+      tabIndex={0}
+      aria-label={`play ${track.title ?? track.video_id}`}
       onClick={() => player.play(queue, index)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          player.play(queue, index)
+        }
+      }}
       className={`group flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2.5 sm:py-3 cursor-pointer transition border-b border-border ${
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       }`}

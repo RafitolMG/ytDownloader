@@ -355,7 +355,16 @@ function TrackRow({
 
   return (
     <li
+      role="button"
+      tabIndex={0}
+      aria-label={`play ${track.title ?? track.video_id}`}
       onClick={onPlay}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onPlay()
+        }
+      }}
       draggable={isOwner}
       onDragStart={(e) => {
         if (!isOwner) return

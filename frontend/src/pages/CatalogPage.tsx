@@ -203,6 +203,7 @@ export default function CatalogPage() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="search the catalog and youtube..."
+            aria-label="search the catalog and youtube"
             spellCheck={false}
             autoComplete="off"
             className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo text-lg caret-cool"
@@ -445,7 +446,16 @@ export function CatalogRow({
 
   return (
     <li
+      role="button"
+      tabIndex={0}
+      aria-label={`play ${item.title ?? item.video_id}`}
       onClick={handlePlay}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          handlePlay()
+        }
+      }}
       className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2.5 sm:py-3 cursor-pointer transition group ${
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       }`}

@@ -108,6 +108,7 @@ export default function AlbumsPage() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="search albums on youtube music..."
+          aria-label="search albums on youtube music"
           spellCheck={false}
           autoComplete="off"
           className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo text-lg caret-cool"
