@@ -10,7 +10,7 @@ import { useDebouncedValue } from '@/shared/lib/useDebouncedValue'
 import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
 import { SectionHeader } from '@/shared/ui/SectionHeader'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
-import { CatalogRow, ExternalRow } from '@/pages/CatalogPage'
+import { CatalogRow, ExternalRow } from '@/features/catalog/rows'
 
 /** A library album: the user's owned tracks grouped under one album title. */
 type LibraryAlbum = {
