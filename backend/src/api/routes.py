@@ -2310,6 +2310,27 @@ def add_track(
     return {"ok": True, "added": added}
 
 
+class PlaylistTracksBulk(BaseModel):
+    tracks: list[PlaylistTrackKey]
+
+
+@app.post("/api/playlists/{playlist_id}/tracks/bulk")
+def add_tracks(
+    playlist_id: str,
+    body: PlaylistTracksBulk,
+    user: CurrentUser = Depends(current_user),
+):
+    """Append many tracks at once (one transaction) — used when saving the play
+    queue as a playlist, instead of N single-track round-trips."""
+    playlist = db.get_playlist(playlist_id)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="playlist not found")
+    _ensure_playlist_owner(playlist, user)
+    keys = [(t.video_id, t.codec, t.bitrate) for t in body.tracks]
+    added = db.add_tracks_to_playlist(playlist_id, keys)
+    return {"ok": True, "added": added}
+
+
 @app.delete("/api/playlists/{playlist_id}/tracks/{video_id}/{codec}/{bitrate}")
 def remove_track_from_playlist(
     playlist_id: str,

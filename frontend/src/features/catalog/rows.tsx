@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
 import type { CatalogItem, ExternalCatalogItem } from '@/shared/api/types'
@@ -11,7 +11,10 @@ import { useRadio } from './RadioContext'
 import { useExternalDownload } from './useExternalDownload'
 import { toPreviewItem } from './lib'
 
-export function CatalogRow({
+// Memoized: in the 300-row full catalog, a parent re-render that doesn't change
+// a row's props (item/position/allItems are referentially stable per query)
+// skips re-rendering that row.
+export const CatalogRow = memo(function CatalogRow({
   item,
   position,
   allItems,
@@ -156,7 +159,7 @@ export function CatalogRow({
       />
     </li>
   )
-}
+})
 
 /** "Download all" for a batch of YouTube candidates (a mix / category / radio
  * tail). Fires every download at once — each call just enqueues a background
@@ -220,7 +223,7 @@ export function DownloadAllButton({
 
 /** Full-width list row for a YouTube candidate — used in the search results
  * ("found on youtube") section. */
-export function ExternalRow({
+export const ExternalRow = memo(function ExternalRow({
   item,
   position,
   own,
@@ -304,4 +307,4 @@ export function ExternalRow({
       </button>
     </li>
   )
-}
+})

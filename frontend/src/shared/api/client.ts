@@ -444,6 +444,16 @@ export const api = {
       { method: 'POST', body: JSON.stringify(key) },
     ),
 
+  /** Append many tracks in one request (vs. N sequential addToPlaylist calls). */
+  addTracksToPlaylist: (
+    id: string,
+    tracks: { video_id: string; codec: string; bitrate: string }[],
+  ) =>
+    json<{ ok: true; added: number }>(
+      `/api/playlists/${encodeURIComponent(id)}/tracks/bulk`,
+      { method: 'POST', body: JSON.stringify({ tracks }) },
+    ),
+
   removeFromPlaylist: (
     id: string,
     videoId: string,

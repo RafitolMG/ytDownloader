@@ -1331,6 +1331,55 @@ def add_track_to_playlist(
         return True
 
 
+def add_tracks_to_playlist(
+    playlist_id: str, keys: list[tuple[str, str, str]],
+) -> int:
+    """Append many tracks in one transaction (vs. N round-trips). Skips tracks
+    already in the playlist or absent from the catalog. Returns how many were
+    actually added."""
+    if not keys:
+        return 0
+    with _write() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM playlist_tracks WHERE playlist_id = ?",
+            (playlist_id,),
+        ).fetchone()
+        pos = int(row["next_pos"]) if row else 0
+        added = 0
+        for video_id, codec, bitrate in keys:
+            in_catalog = conn.execute(
+                "SELECT 1 FROM tracks WHERE video_id = ? AND codec = ? AND bitrate = ?",
+                (video_id, codec, bitrate),
+            ).fetchone()
+            if in_catalog is None:
+                continue
+            existing = conn.execute(
+                """
+                SELECT 1 FROM playlist_tracks
+                 WHERE playlist_id = ? AND video_id = ? AND codec = ? AND bitrate = ?
+                """,
+                (playlist_id, video_id, codec, bitrate),
+            ).fetchone()
+            if existing:
+                continue
+            conn.execute(
+                """
+                INSERT INTO playlist_tracks (
+                    playlist_id, video_id, codec, bitrate, position, added_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (playlist_id, video_id, codec, bitrate, pos, _now()),
+            )
+            pos += 1
+            added += 1
+        if added:
+            conn.execute(
+                "UPDATE playlists SET updated_at = ? WHERE id = ?",
+                (_now(), playlist_id),
+            )
+        return added
+
+
 def remove_track_from_playlist(
     playlist_id: str, video_id: str, codec: str, bitrate: str,
 ) -> bool:
