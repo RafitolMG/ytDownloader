@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useWindowVirtualizer } from '@tanstack/react-virtual'
 import { Link } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { EmptyState } from '@/shared/ui/EmptyState'
@@ -62,6 +63,30 @@ export default function LikedSongsPage() {
     }
     return out
   }, [trimmed, items, sort])
+
+  // Virtualize the list against the window scroll: the library can hold 10k+
+  // tracks and rendering them all as DOM nodes janks scroll on mobile. The page
+  // scrolls normally, so we feed the virtualizer the list's document offset
+  // (scrollMargin) and absolutely-position only the visible rows.
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const [listOffset, setListOffset] = useState(0)
+  useLayoutEffect(() => {
+    const measure = () => {
+      if (!listRef.current) return
+      const top = listRef.current.getBoundingClientRect().top + window.scrollY
+      // Guard the update so re-measuring (which runs every render) can't loop.
+      setListOffset((prev) => (Math.abs(prev - top) > 1 ? top : prev))
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  })
+  const virtualizer = useWindowVirtualizer({
+    count: filtered.length,
+    estimateSize: () => 76,
+    overscan: 8,
+    scrollMargin: listOffset,
+  })
 
   return (
     <div className="relative z-10 min-h-full">
@@ -153,17 +178,36 @@ export default function LikedSongsPage() {
         )}
 
         {filtered.length > 0 && (
-          <ul className="card-vapor rounded-sm divide-y divide-border">
-            {filtered.map((t, i) => (
-              <LikedRow
-                key={`${t.video_id}/${t.codec}/${t.bitrate}`}
-                track={t}
-                position={i + 1}
-                queue={filtered}
-                index={i}
-              />
-            ))}
-          </ul>
+          <div ref={listRef} className="card-vapor rounded-sm overflow-hidden">
+            <div
+              style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}
+            >
+              {virtualizer.getVirtualItems().map((vi) => {
+                const t = filtered[vi.index]
+                return (
+                  <div
+                    key={`${t.video_id}/${t.codec}/${t.bitrate}`}
+                    data-index={vi.index}
+                    ref={virtualizer.measureElement}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      transform: `translateY(${vi.start - virtualizer.options.scrollMargin}px)`,
+                    }}
+                  >
+                    <LikedRow
+                      track={t}
+                      position={vi.index + 1}
+                      queue={filtered}
+                      index={vi.index}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+          </div>
         )}
       </main>
     </div>
@@ -213,9 +257,9 @@ function LikedRow({
     player.current?.bitrate === track.bitrate
 
   return (
-    <li
+    <div
       onClick={() => player.play(queue, index)}
-      className={`group flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2.5 sm:py-3 cursor-pointer transition ${
+      className={`group flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2.5 sm:py-3 cursor-pointer transition border-b border-border ${
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       }`}
     >
@@ -283,6 +327,6 @@ function LikedRow({
       >
         ♥
       </button>
-    </li>
+    </div>
   )
 }
