@@ -1477,7 +1477,7 @@ def _discover_feed(
         # not just the query-matched rows (the owned copy's stored title/artist
         # may not textually match q) nor a popular top-N (a stored song beyond
         # that window would slip through as an external candidate).
-        owned_sigs = _owned_signatures(db.all_track_signatures())
+        owned_sigs = _owned_signatures(db.all_track_signatures_cached())
         # Collapse different uploads of the same song *within this feed* too —
         # otherwise a category shows both the audio rip and the "official video"
         # of one track, and a user adding both downloads the same song twice.
@@ -1562,14 +1562,14 @@ async def catalog_suggestions(
 
     def work():
         # Popular seeds drive the YouTube Mixes; a top-N read is the right shape.
-        catalog = db.list_catalog(user.user_id, sort="popular", limit=500, offset=0)
+        catalog = db.popular_catalog(user.user_id, 500)
         if not catalog:
             return {"external": []}
 
         # Dedup against the *entire* registry, not just the popular seeds —
         # anything stored on the server beyond the top-500 would otherwise
         # resurface. This feed exists only to surface songs NOT yet on the server.
-        dedup_index = db.all_track_signatures()
+        dedup_index = db.all_track_signatures_cached()
         known_ids = {it["video_id"] for it in dedup_index}
         # Fuzzy title/artist signatures so we also skip a *different* upload of a
         # song already in the library (same song, different video_id).
@@ -1738,7 +1738,7 @@ async def catalog_radio(
 
         by_id = {
             c["video_id"]: c
-            for c in db.list_catalog(user.user_id, sort="popular", limit=500)
+            for c in db.popular_catalog(user.user_id, 500)
         }
 
         db_items: list[dict] = []
@@ -1820,7 +1820,7 @@ async def album_detail(
         tracks = album.pop("tracks", [])
         by_id = {
             c["video_id"]: c
-            for c in db.list_catalog(user.user_id, sort="popular", limit=500)
+            for c in db.popular_catalog(user.user_id, 500)
         }
         ordered: list[dict] = []
         db_items: list[dict] = []
@@ -1928,7 +1928,7 @@ def _daily_mixes_impl(count: int, size: int, user: CurrentUser):
     )
 
     # Wide pool so mixes can be long and varied as the catalog grows.
-    pool = db.list_catalog(user.user_id, sort="popular", limit=400)
+    pool = db.popular_catalog(user.user_id, 400)
     if not pool:
         return {"mixes": [], "personalized": False}
 
@@ -2065,7 +2065,7 @@ def _daily_mixes_impl(count: int, size: int, user: CurrentUser):
     # Exclude *every* stored track, not just the popular-400 pool — a song on the
     # server beyond that window would otherwise resurface here as a "download"
     # sprinkle. Fuzzy signatures also drop a different upload of a stored song.
-    dedup_index = db.all_track_signatures()
+    dedup_index = db.all_track_signatures_cached()
     known_ids = {it["video_id"] for it in dedup_index}
     owned_sigs = _owned_signatures(dedup_index)
 
