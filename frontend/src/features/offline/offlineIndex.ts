@@ -12,6 +12,10 @@
 type Entry = { audioUrl: string; coverUrl: string | null }
 
 const byTrack = new Map<string, Entry>()
+// videoId → a downloaded cover URL for it. getCover is called per-row per-render
+// (PlayerBar/queue/rows), so keep it O(1) here instead of scanning byTrack each
+// time. The cover is per-video (same across a video's codec/bitrate copies).
+const coverByVideo = new Map<string, string>()
 const subscribers = new Set<() => void>()
 
 function key(videoId: string, codec: string, bitrate: string): string {
@@ -28,13 +32,9 @@ export const offlineIndex = {
     return byTrack.get(key(videoId, codec, bitrate))?.audioUrl ?? null
   },
 
-  /** Local cover URL for any downloaded copy of this video, or null. */
+  /** Local cover URL for any downloaded copy of this video, or null. O(1). */
   getCover(videoId: string): string | null {
-    const prefix = `${videoId}|`
-    for (const [k, v] of byTrack) {
-      if (k.startsWith(prefix) && v.coverUrl) return v.coverUrl
-    }
-    return null
+    return coverByVideo.get(videoId) ?? null
   },
 
   has(videoId: string, codec: string, bitrate: string): boolean {
@@ -49,15 +49,30 @@ export const offlineIndex = {
     coverUrl: string | null,
   ): void {
     byTrack.set(key(videoId, codec, bitrate), { audioUrl, coverUrl })
+    if (coverUrl) coverByVideo.set(videoId, coverUrl)
     emit()
   },
 
   remove(videoId: string, codec: string, bitrate: string): void {
-    if (byTrack.delete(key(videoId, codec, bitrate))) emit()
+    if (!byTrack.delete(key(videoId, codec, bitrate))) return
+    // Rebuild this video's cover from any remaining copy (remove is rare, so the
+    // scan over the few same-video entries is fine — the hot path is getCover).
+    const prefix = `${videoId}|`
+    let cover: string | null = null
+    for (const [k, v] of byTrack) {
+      if (k.startsWith(prefix) && v.coverUrl) {
+        cover = v.coverUrl
+        break
+      }
+    }
+    if (cover) coverByVideo.set(videoId, cover)
+    else coverByVideo.delete(videoId)
+    emit()
   },
 
   clear(): void {
     byTrack.clear()
+    coverByVideo.clear()
     emit()
   },
 
