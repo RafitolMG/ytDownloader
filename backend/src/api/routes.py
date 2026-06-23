@@ -1172,15 +1172,22 @@ async def progress_ws(websocket: WebSocket, job_id: str):
         return
 
     progress_queue: queue.Queue = runtime["queue"]
+    loop = asyncio.get_running_loop()
     try:
         while True:
             try:
-                event = progress_queue.get_nowait()
-                await websocket.send_json(event)
-                if event["type"] in ("done", "error", "cancelled"):
-                    break
+                # Block off the event loop until the next event instead of
+                # busy-polling every 100ms — no added latency, no idle wakeups.
+                # The periodic timeout keeps a vanished producer from pinning a
+                # worker thread forever.
+                event = await loop.run_in_executor(
+                    None, lambda: progress_queue.get(True, 30)
+                )
             except queue.Empty:
-                await asyncio.sleep(0.1)
+                continue
+            await websocket.send_json(event)
+            if event["type"] in ("done", "error", "cancelled"):
+                break
         await websocket.close()
     except WebSocketDisconnect:
         pass
@@ -1258,6 +1265,8 @@ def remove_track(
     can keep playing or adopting it — even when the caller was the last
     owner. Orphan cleanup is an admin concern.
     """
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=422, detail="invalid video id")
     unlinked = db.unlink_owner(user.user_id, video_id, codec, bitrate)
     if not unlinked:
         raise HTTPException(status_code=404, detail="track not in your library")
@@ -2126,6 +2135,8 @@ def catalog_adopt(
 ):
     """Adopt an existing catalog track into the caller's library — no download
     happens, just a new `track_owners` row."""
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=422, detail="invalid video id")
     if db.get_track(video_id, codec, bitrate) is None:
         raise HTTPException(status_code=404, detail="track not in catalog")
     db.link_owner(
@@ -2145,6 +2156,8 @@ def catalog_unown(
     """Un-adopt: remove the caller from the track's owner list. The track
     stays in the shared catalog so anyone else can keep playing or adopting
     it — that's the whole point of the catalog being eternal."""
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=422, detail="invalid video id")
     db.unlink_owner(user.user_id, video_id, codec, bitrate)
     return {"ok": True, "owned": False}
 
@@ -2382,6 +2395,8 @@ def stream_track(
     what lets users play tracks from public playlists or the catalog without
     first adopting them into their own library.
     """
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=422, detail="invalid video id")
     track = db.get_track(video_id, codec, bitrate)
     if track is None:
         raise HTTPException(status_code=404, detail="track not found")
