@@ -19,7 +19,7 @@ import {
 export type AuthedUser = {
   user_id: string
   username: string
-  role: 'ADMIN' | 'USER' | string
+  role: 'ADMIN' | 'USER'
 }
 
 type AuthState = {
