@@ -13,6 +13,7 @@ import traceback
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 from urllib.parse import urlparse
@@ -48,7 +49,22 @@ def _ensure_owner(job: dict, user: CurrentUser) -> None:
     if job.get("owner_id") != user.user_id:
         raise HTTPException(status_code=403, detail="not your job")
 
-app = FastAPI(title="YT Downloader")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown. Replaces the deprecated @app.on_event handlers: init the
+    DB + log the runtime posture, sweep stale tmp dirs, then run the tmp reaper
+    loop for the app's lifetime (cancelled on shutdown)."""
+    _startup_init()
+    await asyncio.to_thread(_reap_startup_tmpdirs)
+    reaper = asyncio.create_task(_reaper_loop())
+    try:
+        yield
+    finally:
+        reaper.cancel()
+
+
+app = FastAPI(title="YT Downloader", lifespan=lifespan)
 
 if config.FRONTEND_ORIGIN:
     app.add_middleware(
@@ -85,8 +101,7 @@ if _FRONTEND_DIST and os.path.isdir(os.path.join(_FRONTEND_DIST, "assets")):
     )
 
 
-@app.on_event("startup")
-def _init_db():
+def _startup_init():
     import logging
     log = logging.getLogger("uvicorn.error")
     db.init()
@@ -226,12 +241,6 @@ async def _reaper_loop() -> None:
             await asyncio.to_thread(_reap_jobs_once)
         except Exception:
             traceback.print_exc()
-
-
-@app.on_event("startup")
-async def _start_reaper():
-    await asyncio.to_thread(_reap_startup_tmpdirs)
-    asyncio.create_task(_reaper_loop())
 
 
 # ── Request models ────────────────────────────────────────────────────────────
