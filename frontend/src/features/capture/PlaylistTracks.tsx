@@ -1,4 +1,5 @@
 import type { PlaylistTrack } from '@/shared/api/types'
+import { fmtDuration } from '@/shared/lib/format'
 import type { CaptureMetadata } from './useCapture'
 
 type Mode = 'import' | 'zip'
@@ -199,13 +200,4 @@ function TrackRow({ track, index }: { track: PlaylistTrack; index: number }) {
       </div>
     </li>
   )
-}
-
-function fmtDuration(sec: number): string {
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  const s = sec % 60
-  const mm = String(m).padStart(h > 0 ? 2 : 1, '0')
-  const ss = String(s).padStart(2, '0')
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }

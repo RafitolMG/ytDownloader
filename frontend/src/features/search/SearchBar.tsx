@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { fmtDuration } from '@/shared/lib/format'
 import type { HistoryItem, SearchResultItem } from '@/shared/api/types'
 import { looksLikeUrl, useDropdownPreview, useHistory } from './useSearch'
 import { isCoarsePointer } from '@/shared/lib/device'
@@ -266,13 +267,4 @@ function DropdownRow({
       </div>
     </button>
   )
-}
-
-function fmtDuration(sec: number): string {
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  const s = sec % 60
-  const mm = String(m).padStart(h > 0 ? 2 : 1, '0')
-  const ss = String(s).padStart(2, '0')
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }

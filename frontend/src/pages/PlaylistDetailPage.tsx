@@ -7,30 +7,15 @@ import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
 import { useToast } from '@/shared/ui/ToastProvider'
 import { api } from '@/shared/api/client'
 import type {
-  LibraryItem,
   PlaylistTrackRow,
   PlaylistVisibility,
 } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
+import { fmtDuration } from '@/shared/lib/format'
+import { playlistRowToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { useOffline } from '@/features/offline/OfflineProvider'
 import { offlineIndex } from '@/features/offline/offlineIndex'
-
-function toLibraryItem(t: PlaylistTrackRow): LibraryItem {
-  return {
-    video_id: t.video_id,
-    codec: t.codec,
-    bitrate: t.bitrate,
-    title: t.title,
-    artist: t.artist,
-    duration_sec: t.duration_sec,
-    thumbnail_url: t.thumbnail_url,
-    source_url: t.source_url,
-    file_size: t.file_size,
-    added_at: t.added_at,
-    source_playlist_title: null,
-  }
-}
 
 export default function PlaylistDetailPage() {
   const { id = '' } = useParams<{ id: string }>()
@@ -606,15 +591,6 @@ function EditDialog({
       </form>
     </div>
   )
-}
-
-function fmtDuration(sec: number): string {
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  const s = sec % 60
-  const mm = String(m).padStart(h > 0 ? 2 : 1, '0')
-  const ss = String(s).padStart(2, '0')
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }
 
 /** Download every track of this playlist to the device for offline playback
