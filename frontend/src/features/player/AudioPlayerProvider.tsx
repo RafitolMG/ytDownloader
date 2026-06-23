@@ -10,7 +10,7 @@ import {
 } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
-import type { CatalogItem, LibraryItem } from '@/shared/api/types'
+import type { LibraryItem } from '@/shared/api/types'
 import { useAuth } from '@/features/auth/AuthProvider'
 import {
   msSetActionHandler,
@@ -21,31 +21,11 @@ import {
 import { resolveArtworkUrl } from '@/shared/lib/thumbnail'
 import { offlineIndex } from '@/features/offline/offlineIndex'
 import { getPlaybackTime, setPlaybackTime } from './playbackStore'
+import { catalogToLibrary } from '@/shared/lib/libraryItem'
 
 const PLAYER_SNAPSHOT_KEY = 'ytdl.player.v1'
 const PLAYER_POSITION_KEY = 'ytdl.player.position'
 const PLAYER_VOLUME_KEY = 'ytdl.player.volume'
-
-/** Map a catalog row (radio db hit) to a player item. Kept local to avoid a
- * provider↔CatalogPage import cycle. */
-function catalogToLibrary(c: CatalogItem): LibraryItem {
-  return {
-    video_id: c.video_id,
-    codec: c.codec,
-    bitrate: c.bitrate,
-    title: c.title,
-    artist: c.artist,
-    album: c.album,
-    album_artist: c.album_artist,
-    release_year: c.release_year,
-    duration_sec: c.duration_sec,
-    thumbnail_url: c.thumbnail_url,
-    source_url: c.source_url,
-    file_size: c.file_size,
-    added_at: c.downloaded_at,
-    source_playlist_title: null,
-  }
-}
 
 export type RepeatMode = 'off' | 'one' | 'all'
 

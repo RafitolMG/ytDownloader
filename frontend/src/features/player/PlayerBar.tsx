@@ -9,6 +9,7 @@ import { useAuth } from '@/features/auth/AuthProvider'
 import { offlineIndex } from '@/features/offline/offlineIndex'
 import { api } from '@/shared/api/client'
 import { G } from '@/shared/ui/glyphs'
+import { fmtTime } from '@/shared/lib/format'
 
 export function PlayerBar() {
   const { user } = useAuth()
@@ -350,12 +351,6 @@ function PlayQueuePanel({ onClose }: { onClose: () => void }) {
   )
 }
 
-function fmtTime(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) return '0:00'
-  const m = Math.floor(sec / 60)
-  const s = Math.floor(sec % 60)
-  return `${m}:${String(s).padStart(2, '0')}`
-}
 
 function fmtCountdown(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000))

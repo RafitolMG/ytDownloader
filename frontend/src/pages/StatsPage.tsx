@@ -6,8 +6,9 @@ import { Thumb } from '@/shared/ui/Thumb'
 import { api } from '@/shared/api/client'
 import type { CatalogItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
+import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
+import { SectionHeader } from '@/shared/ui/SectionHeader'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
-import { toLibraryItem } from '@/pages/CatalogPage'
 
 /** Listening "Wrapped" — total plays + top artists/tracks over a chosen window.
  * Pure read of /api/me/stats, which already supports any window incl. all-time
@@ -156,24 +157,6 @@ export default function StatsPage() {
           </>
         )}
       </main>
-    </div>
-  )
-}
-
-function SectionHeader({
-  title,
-  action,
-}: {
-  title: string
-  action?: React.ReactNode
-}) {
-  return (
-    <div className="mb-3 flex items-center gap-3">
-      <span className="font-pixel text-xs text-cool uppercase tracking-[0.2em] whitespace-nowrap">
-        {title}
-      </span>
-      <span className="flex-1 border-t border-border" />
-      {action}
     </div>
   )
 }

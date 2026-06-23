@@ -14,32 +14,14 @@ import type {
   LibraryItem,
 } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
+import { fmtDuration } from '@/shared/lib/format'
+import { useDebouncedValue } from '@/shared/lib/useDebouncedValue'
+import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
+import { SectionHeader } from '@/shared/ui/SectionHeader'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { useLiveJobProgress } from '@/features/queue/useLiveJobProgress'
 import { AddToPlaylistMenu } from '@/features/playlists/AddToPlaylistMenu'
 import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
-
-/** Map a catalog row to the shape the audio player expects. The two types
- * differ in metadata (catalog has like/owner counts, library has added_at)
- * but the player only cares about identity + display fields. */
-export function toLibraryItem(c: CatalogItem): LibraryItem {
-  return {
-    video_id: c.video_id,
-    codec: c.codec,
-    bitrate: c.bitrate,
-    title: c.title,
-    artist: c.artist,
-    album: c.album,
-    album_artist: c.album_artist,
-    release_year: c.release_year,
-    duration_sec: c.duration_sec,
-    thumbnail_url: c.thumbnail_url,
-    source_url: c.source_url,
-    file_size: c.file_size,
-    added_at: c.downloaded_at,
-    source_playlist_title: null,
-  }
-}
 
 /** Map an external (undownloaded) candidate to a player item that streams via
  * the preview proxy. The sentinel codec 'preview' tells the player to use
@@ -69,17 +51,6 @@ const SORT_LABELS: Record<CatalogSort, string> = {
   popular: '♥ most saved',
   title: 'title a→z',
   artist: 'artist a→z',
-}
-
-/** Tiny debounce so each keystroke doesn't trigger a ytsearch round-trip.
- * 400ms keeps typing feedback fast while letting bursts settle. */
-function useDebouncedValue<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), ms)
-    return () => clearTimeout(t)
-  }, [value, ms])
-  return debounced
 }
 
 export default function CatalogPage() {
@@ -897,18 +868,6 @@ const ACCENT: Record<
   },
 }
 
-function SectionHeader({ title, note }: { title: string; note?: string }) {
-  return (
-    <div className="mb-3 flex items-center gap-3 font-pixel text-xs text-cool uppercase tracking-[0.2em]">
-      <span className="whitespace-nowrap">{title}</span>
-      {note && (
-        <span className="text-ink-lo normal-case tracking-normal truncate">{note}</span>
-      )}
-      <span className="flex-1 border-t border-border" />
-    </div>
-  )
-}
-
 /** The browse "home" shown when idle on the full catalog. */
 function BrowseHome({
   recent,
@@ -1486,13 +1445,4 @@ function RadioView({
       )}
     </section>
   )
-}
-
-export function fmtDuration(sec: number): string {
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  const s = sec % 60
-  const mm = String(m).padStart(h > 0 ? 2 : 1, '0')
-  const ss = String(s).padStart(2, '0')
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }

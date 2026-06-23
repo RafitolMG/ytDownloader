@@ -8,7 +8,7 @@ import { AppHeader } from '@/shared/ui/AppHeader'
 import { ConfirmButton } from '@/shared/ui/ConfirmButton'
 import { api } from '@/shared/api/client'
 import { countActive, useJobs } from '@/shared/api/useJobs'
-import { fmtDuration } from '@/pages/CatalogPage'
+import { fmtDuration } from '@/shared/lib/format'
 import type {
   AdminOverview,
   AdminTrack,

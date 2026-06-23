@@ -3,15 +3,9 @@ import { createPortal } from 'react-dom'
 import { useAudioPlayer } from './AudioPlayerProvider'
 import { usePlaybackTime } from './playbackStore'
 import { G } from '@/shared/ui/glyphs'
+import { fmtTime } from '@/shared/lib/format'
 import { hiResThumbnail, thumbnailFallback } from '@/shared/lib/thumbnail'
 import { useBackClose } from '@/shared/lib/backStack'
-
-function fmtTime(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) return '0:00'
-  const m = Math.floor(sec / 60)
-  const s = Math.floor(sec % 60)
-  return `${m}:${String(s).padStart(2, '0')}`
-}
 
 /** Full-screen (mobile) / large centered (desktop) "now playing" surface:
  * big cover, full metadata, a tall seek bar, large transport, volume, and the
