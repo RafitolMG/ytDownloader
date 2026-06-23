@@ -878,7 +878,13 @@ def get_audio_stream_url(url):
         and f.get('vcodec') in (None, 'none')
     ]
     audio.sort(key=lambda f: (f.get('abr') or f.get('tbr') or 0))
-    best = audio[-1] if audio else None
+    # For a *preview* we don't need the top bitrate — pick the lowest format at
+    # or above ~96kbps to save bandwidth (the user downloads for full quality);
+    # fall back to the best available when everything is below that floor.
+    best = next(
+        (f for f in audio if (f.get('abr') or f.get('tbr') or 0) >= 96),
+        audio[-1] if audio else None,
+    )
 
     direct = best['url'] if best else info.get('url')
     ext = (best or {}).get('ext') or info.get('ext') or 'webm'
