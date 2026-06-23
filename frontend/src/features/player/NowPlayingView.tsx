@@ -1,16 +1,11 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useAudioPlayer } from './AudioPlayerProvider'
+import { usePlaybackTime } from './playbackStore'
 import { G } from '@/shared/ui/glyphs'
+import { fmtTime } from '@/shared/lib/format'
 import { hiResThumbnail, thumbnailFallback } from '@/shared/lib/thumbnail'
 import { useBackClose } from '@/shared/lib/backStack'
-
-function fmtTime(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) return '0:00'
-  const m = Math.floor(sec / 60)
-  const s = Math.floor(sec % 60)
-  return `${m}:${String(s).padStart(2, '0')}`
-}
 
 /** Full-screen (mobile) / large centered (desktop) "now playing" surface:
  * big cover, full metadata, a tall seek bar, large transport, volume, and the
@@ -19,6 +14,7 @@ function fmtTime(sec: number): string {
  * the ✕ close it; body scroll is locked while open. */
 export function NowPlayingView({ onClose }: { onClose: () => void }) {
   const p = useAudioPlayer()
+  const { position, duration } = usePlaybackTime()
   useBackClose(true, onClose)
 
   // Swipe the cover left → next, right → previous. Attached to the artwork only
@@ -56,8 +52,8 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
 
   const t = p.current
   if (!t) return null
-  const dur = Number.isFinite(p.duration) ? p.duration : t.duration_sec ?? 0
-  const pct = dur > 0 ? Math.min(100, (p.position / dur) * 100) : 0
+  const dur = Number.isFinite(duration) ? duration : t.duration_sec ?? 0
+  const pct = dur > 0 ? Math.min(100, (position / dur) * 100) : 0
   const year = t.release_year ?? null
   const subtitle = [t.artist ?? '—', t.album, year].filter(Boolean).join(' · ')
 
@@ -116,11 +112,11 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
             aria-label="seek"
             aria-valuemin={0}
             aria-valuemax={Math.floor(dur)}
-            aria-valuenow={Math.floor(p.position)}
-            aria-valuetext={`${fmtTime(p.position)} of ${fmtTime(dur)}`}
+            aria-valuenow={Math.floor(position)}
+            aria-valuetext={`${fmtTime(position)} of ${fmtTime(dur)}`}
             onKeyDown={(e) => {
-              if (e.key === 'ArrowLeft') p.seek(Math.max(0, p.position - 5))
-              else if (e.key === 'ArrowRight') p.seek(p.position + 5)
+              if (e.key === 'ArrowLeft') p.seek(Math.max(0, position - 5))
+              else if (e.key === 'ArrowRight') p.seek(position + 5)
             }}
             className="focus-vis relative h-2 rounded-xs bg-page-mid cursor-pointer group"
             onClick={(e) => {
@@ -139,7 +135,7 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
             />
           </div>
           <div className="flex justify-between font-pixel text-xs text-ink-lo tabular-nums mt-1">
-            <span>{fmtTime(p.position)}</span>
+            <span>{fmtTime(position)}</span>
             <span>{fmtTime(dur)}</span>
           </div>
         </div>
@@ -151,7 +147,7 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
           </NPToggle>
           <NPButton
             onClick={p.prev}
-            disabled={!p.canGoPrev && p.position < 3}
+            disabled={!p.canGoPrev && position < 3}
             title="previous"
           >
             {G.prev}

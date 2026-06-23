@@ -19,7 +19,7 @@ import {
 export type AuthedUser = {
   user_id: string
   username: string
-  role: 'ADMIN' | 'USER' | string
+  role: 'ADMIN' | 'USER'
 }
 
 type AuthState = {
@@ -88,6 +88,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .finally(() => setLoading(false))
   }, [setUser])
+
+  // Media tokens are short-lived; refresh while signed in so the synchronous
+  // <audio> URL builder always has a live one (ensureMediaToken only re-fetches
+  // when near expiry, so this poll is cheap). Native build only.
+  useEffect(() => {
+    if (!user) return
+    const id = setInterval(() => void ensureMediaToken(), 10 * 60_000)
+    return () => clearInterval(id)
+  }, [user])
 
   const login = useCallback(
     async (usernameOrEmail: string, password: string) => {

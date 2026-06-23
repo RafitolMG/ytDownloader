@@ -2,16 +2,21 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
 import { useAudioPlayer } from './AudioPlayerProvider'
+import { usePlaybackTime } from './playbackStore'
 import { useGlobalPlayerHotkeys } from './useGlobalPlayerHotkeys'
 import { NowPlayingView } from './NowPlayingView'
 import { useAuth } from '@/features/auth/AuthProvider'
 import { offlineIndex } from '@/features/offline/offlineIndex'
 import { api } from '@/shared/api/client'
 import { G } from '@/shared/ui/glyphs'
+import { fmtTime } from '@/shared/lib/format'
 
 export function PlayerBar() {
   const { user } = useAuth()
   const p = useAudioPlayer()
+  // Subscribes this bar to the high-frequency time store — the scrubber ticks
+  // here without re-rendering the rest of the app.
+  const { position, duration } = usePlaybackTime()
   useGlobalPlayerHotkeys()
   const [queueOpen, setQueueOpen] = useState(false)
   const [expanded, setExpanded] = useState(false)
@@ -20,8 +25,8 @@ export function PlayerBar() {
   if (!user || !p.current) return null
 
   const t = p.current
-  const dur = Number.isFinite(p.duration) ? p.duration : t.duration_sec ?? 0
-  const pct = dur > 0 ? Math.min(100, (p.position / dur) * 100) : 0
+  const dur = Number.isFinite(duration) ? duration : t.duration_sec ?? 0
+  const pct = dur > 0 ? Math.min(100, (position / dur) * 100) : 0
 
   return (
     <div className="fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] sm:bottom-0 left-0 right-0 z-40 border-t border-border bg-page-mid shadow-[0_-8px_32px_rgba(0,0,0,0.6)]">
@@ -35,11 +40,11 @@ export function PlayerBar() {
         aria-label="seek"
         aria-valuemin={0}
         aria-valuemax={Math.floor(dur)}
-        aria-valuenow={Math.floor(p.position)}
-        aria-valuetext={`${fmtTime(p.position)} of ${fmtTime(dur)}`}
+        aria-valuenow={Math.floor(position)}
+        aria-valuetext={`${fmtTime(position)} of ${fmtTime(dur)}`}
         onKeyDown={(e) => {
-          if (e.key === 'ArrowLeft') p.seek(Math.max(0, p.position - 5))
-          else if (e.key === 'ArrowRight') p.seek(p.position + 5)
+          if (e.key === 'ArrowLeft') p.seek(Math.max(0, position - 5))
+          else if (e.key === 'ArrowRight') p.seek(position + 5)
         }}
         className="focus-vis relative h-1.5 bg-page cursor-pointer group"
         onClick={(e) => {
@@ -112,7 +117,7 @@ export function PlayerBar() {
           </PlayerToggle>
           <PlayerButton
             onClick={p.prev}
-            disabled={!p.canGoPrev && p.position < 3}
+            disabled={!p.canGoPrev && position < 3}
             title="prev"
           >
             |◀
@@ -142,7 +147,7 @@ export function PlayerBar() {
         <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
           {/* Time */}
           <div className="hidden sm:block font-pixel text-sm text-ink-lo tabular-nums min-w-[5.5rem] text-right">
-            {fmtTime(p.position)} / {fmtTime(dur)}
+            {fmtTime(position)} / {fmtTime(dur)}
           </div>
 
           {/* Volume */}
@@ -346,12 +351,6 @@ function PlayQueuePanel({ onClose }: { onClose: () => void }) {
   )
 }
 
-function fmtTime(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) return '0:00'
-  const m = Math.floor(sec / 60)
-  const s = Math.floor(sec % 60)
-  return `${m}:${String(s).padStart(2, '0')}`
-}
 
 function fmtCountdown(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000))
@@ -449,17 +448,16 @@ function SaveQueueButton() {
         name: name.trim() || fallback,
         visibility: 'private',
       })
-      for (const { track } of realTracks) {
-        try {
-          await api.addToPlaylist(id, {
-            video_id: track.video_id,
-            codec: track.codec,
-            bitrate: track.bitrate,
-          })
-        } catch {
-          /* skip a track that can't be added; keep the rest */
-        }
-      }
+      // One bulk request instead of N sequential round-trips. The backend skips
+      // any track not in the catalog, so a partial queue still saves the rest.
+      await api.addTracksToPlaylist(
+        id,
+        realTracks.map(({ track }) => ({
+          video_id: track.video_id,
+          codec: track.codec,
+          bitrate: track.bitrate,
+        })),
+      )
       return id
     },
     onSuccess: (id) => {

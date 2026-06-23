@@ -1,28 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { EmptyState } from '@/shared/ui/EmptyState'
 import { api } from '@/shared/api/client'
 import type { AlbumCard, CatalogItem, LibraryItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
+import { fmtDuration } from '@/shared/lib/format'
+import { useDebouncedValue } from '@/shared/lib/useDebouncedValue'
+import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
+import { SectionHeader } from '@/shared/ui/SectionHeader'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
-import {
-  CatalogRow,
-  ExternalRow,
-  fmtDuration,
-  toLibraryItem,
-} from '@/pages/CatalogPage'
-
-/** Tiny debounce so each keystroke doesn't fire an album search (each is a slow
- * fan-out of yt-dlp calls server-side). */
-function useDebouncedValue<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), ms)
-    return () => clearTimeout(t)
-  }, [value, ms])
-  return debounced
-}
+import { CatalogRow, ExternalRow } from '@/features/catalog/rows'
 
 /** A library album: the user's owned tracks grouped under one album title. */
 type LibraryAlbum = {
@@ -120,6 +108,7 @@ export default function AlbumsPage() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="search albums on youtube music..."
+          aria-label="search albums on youtube music"
           spellCheck={false}
           autoComplete="off"
           className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo text-lg caret-cool"
@@ -206,18 +195,6 @@ function Shell({
         <AppHeader queueCount={queueCount} />
         {children}
       </main>
-    </div>
-  )
-}
-
-function SectionHeader({ title, note }: { title: string; note?: string }) {
-  return (
-    <div className="mb-4 flex items-center gap-3 font-pixel text-xs text-cool uppercase tracking-[0.2em]">
-      <span className="whitespace-nowrap">{title}</span>
-      {note && (
-        <span className="text-ink-lo normal-case tracking-normal truncate">{note}</span>
-      )}
-      <span className="flex-1 border-t border-border" />
     </div>
   )
 }

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Cookie, Depends, HTTPException, Query, status
 
-from src import config, db, homeauth
+from src import config, db, homeauth, media_token
 
 log = logging.getLogger(__name__)
 
@@ -131,11 +131,27 @@ def media_user(
     The browser carries the httponly session cookie automatically, but a native
     (Capacitor) WebView loads the SPA from a different origin than the API, so
     those media requests — issued by the <audio>/anchor element, not by JS —
-    cannot ride the cookie. The native client therefore passes the session id as
-    an `mt` query param instead. Resolution is identical to the cookie path
-    (`current_user`), so refresh/role/expiry all behave the same; the cookie
-    still wins for the web app where `mt` is absent."""
-    return current_user(ytdl_session=mt or ytdl_session)
+    cannot ride the cookie. The native client passes a short-lived, signed,
+    media-scoped token (NOT the session id) as `mt` instead: it never lets a
+    leaked URL be replayed as a session, and expires on its own. The cookie path
+    (with full refresh/role/expiry) still applies for the web app, where `mt` is
+    absent."""
+    if config.DEV_AUTH_BYPASS:
+        return _DEV_USER
+    if mt:
+        claims = media_token.verify(mt)
+        if claims is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid or expired media token",
+            )
+        return CurrentUser(
+            session_id="media-token",
+            user_id=claims["uid"],
+            username=claims.get("un", ""),
+            role=claims.get("r", db.ROLE_USER),
+        )
+    return current_user(ytdl_session=ytdl_session)
 
 
 def require_admin(user: CurrentUser = Depends(current_user)) -> CurrentUser:

@@ -37,6 +37,15 @@ SESSION_TTL_DAYS: int = int(_env("SESSION_TTL_DAYS", "7"))
 # Refresh window: try to refresh when access expires in less than this many seconds.
 ACCESS_REFRESH_LEEWAY_SEC: int = int(_env("ACCESS_REFRESH_LEEWAY_SEC", "60"))
 
+# Media tokens. Native (Capacitor) <audio>/download requests can't carry the
+# httponly cookie cross-origin, so the client appends a signed, media-scoped,
+# short-lived token as `?mt=`. Pin MEDIA_TOKEN_SECRET in production (and across
+# replicas) so tokens survive restarts and verify on every worker; when empty,
+# the backend generates a per-process secret (fine for the single-box default,
+# but a restart invalidates outstanding tokens until the client re-fetches).
+MEDIA_TOKEN_SECRET: str = _env("MEDIA_TOKEN_SECRET", "")
+MEDIA_TOKEN_TTL_SEC: int = int(_env("MEDIA_TOKEN_TTL_SEC", "21600"))  # 6h
+
 # CORS allow-list for the SPA dev server. Leave empty (or unset) in production
 # when the backend serves the SPA from the same origin — CORS is a no-op then.
 FRONTEND_ORIGIN: str = _env("FRONTEND_ORIGIN", "").rstrip("/")
@@ -108,3 +117,16 @@ RATELIMIT_WINDOW_SEC: int = int(_env("YTDL_RATELIMIT_WINDOW_SEC", "60"))
 # core count by default. EXTRACTION_TIMEOUT_SEC bounds a single request → 504.
 EXTRACTION_WORKERS: int = int(_env("YTDL_EXTRACTION_WORKERS", "0")) or min(4, (os.cpu_count() or 4))
 EXTRACTION_TIMEOUT_SEC: float = float(_env("YTDL_EXTRACTION_TIMEOUT_SEC", "45"))
+
+# Max background download jobs (single video / playlist / tracklist import) that
+# run concurrently. Each is a long-running yt-dlp + ffmpeg pipeline that eats
+# CPU/disk/network and the shared YouTube cookies, so we bound them with a pool:
+# jobs beyond this stay queued (in their created state) until a slot frees,
+# instead of spawning an unbounded thread per request. Sized small for the ARM
+# box. Endpoint rate limiting caps how fast jobs can be created in the meantime.
+MAX_CONCURRENT_DOWNLOADS: int = int(_env("YTDL_MAX_CONCURRENT_DOWNLOADS", "0")) or min(3, (os.cpu_count() or 3))
+
+# Hard ceiling on a single ffmpeg merge/transcode pass. A hung ffmpeg (rare, but
+# it can wedge on a corrupt stream) would otherwise block its download worker
+# forever, permanently consuming one of the MAX_CONCURRENT_DOWNLOADS slots.
+FFMPEG_TIMEOUT_SEC: float = float(_env("YTDL_FFMPEG_TIMEOUT_SEC", "1800"))
