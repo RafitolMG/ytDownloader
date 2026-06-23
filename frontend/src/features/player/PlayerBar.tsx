@@ -448,17 +448,16 @@ function SaveQueueButton() {
         name: name.trim() || fallback,
         visibility: 'private',
       })
-      for (const { track } of realTracks) {
-        try {
-          await api.addToPlaylist(id, {
-            video_id: track.video_id,
-            codec: track.codec,
-            bitrate: track.bitrate,
-          })
-        } catch {
-          /* skip a track that can't be added; keep the rest */
-        }
-      }
+      // One bulk request instead of N sequential round-trips. The backend skips
+      // any track not in the catalog, so a partial queue still saves the rest.
+      await api.addTracksToPlaylist(
+        id,
+        realTracks.map(({ track }) => ({
+          video_id: track.video_id,
+          codec: track.codec,
+          bitrate: track.bitrate,
+        })),
+      )
       return id
     },
     onSuccess: (id) => {
