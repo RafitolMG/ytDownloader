@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 import traceback
 from datetime import datetime, timezone
 
@@ -38,6 +39,42 @@ def _jitter(day_seed: int, mix_i: int, video_id: str) -> float:
     would make today's mixes non-reproducible within the day."""
     h = hashlib.blake2b(f"{day_seed}:{mix_i}:{video_id}".encode(), digest_size=8)
     return int.from_bytes(h.digest(), "big") / 2**64
+
+
+def _scene_clusters(neighbors: dict[str, set[str]], day_seed: int) -> list[list[str]]:
+    """Group collaborating artists into "scenes" by deterministic label
+    propagation over the co-credit graph — a genre-like clustering *without* genre
+    tags (YT Music exposes none per track, so we infer scenes from who records
+    together). Node order is rotated by the day so scenes drift day to day; ties
+    break on the label string so a given day is reproducible. Returns communities
+    of >= 3 artists, largest first — smaller ones are already the single-artist
+    mixes, so they're not worth a separate "scene" card."""
+    if not neighbors:
+        return []
+    nodes = sorted(neighbors)
+    rot = day_seed % len(nodes)
+    nodes = nodes[rot:] + nodes[:rot]
+    labels = {a: a for a in nodes}
+    for _ in range(6):  # converges fast on a sparse co-credit graph
+        changed = False
+        for a in nodes:
+            tally: dict[str, int] = {}
+            for nb in neighbors.get(a, ()):  # neighbours vote their current label
+                tally[labels[nb]] = tally.get(labels[nb], 0) + 1
+            if not tally:
+                continue
+            best = max(tally.items(), key=lambda kv: (kv[1], kv[0]))[0]
+            if labels[a] != best:
+                labels[a] = best
+                changed = True
+        if not changed:
+            break
+    comms: dict[str, list[str]] = {}
+    for a, lab in labels.items():
+        comms.setdefault(lab, []).append(a)
+    scenes = [sorted(m) for m in comms.values() if len(m) >= 3]
+    scenes.sort(key=len, reverse=True)
+    return scenes
 
 
 def _external_item(entry: dict) -> dict:
@@ -253,11 +290,35 @@ def _discover_feed(
     return {"db": db_items, "external": externals}
 
 
+_lineup_cache: dict[tuple, tuple[int, dict]] = {}
+_lineup_lock = threading.Lock()
+
+
 def _daily_mixes_impl(count: int, size: int, user: CurrentUser):
-    count = max(1, min(count, 6))
+    """Cache the assembled lineup per (user, count, size) for the current day.
+
+    The build is heavy — several YT Music radio round-trips plus scoring — and the
+    home page (plus a re-fetch after every ~20s of listening) would otherwise
+    rebuild it constantly. The day seed is the natural TTL; stale-day entries are
+    swept on the next write. Mixes are meant to be daily, so within-day stability
+    is the intended behaviour, not a regression."""
+    count = max(1, min(count, 8))
     size = max(5, min(size, 60))
     day_seed = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+    cache_key = (user.user_id, count, size)
+    with _lineup_lock:
+        hit = _lineup_cache.get(cache_key)
+        if hit is not None and hit[0] == day_seed:
+            return hit[1]
+    result = _build_daily_mixes(count, size, user, day_seed)
+    with _lineup_lock:
+        _lineup_cache[cache_key] = (day_seed, result)
+        for k in [k for k, v in _lineup_cache.items() if v[0] != day_seed]:
+            _lineup_cache.pop(k, None)
+    return result
 
+
+def _build_daily_mixes(count: int, size: int, user: CurrentUser, day_seed: int):
     def key(t: dict) -> tuple:
         return (t["video_id"], t["codec"], t["bitrate"])
 
@@ -290,46 +351,75 @@ def _daily_mixes_impl(count: int, size: int, user: CurrentUser):
         for m in members:
             neighbors.setdefault(m, set()).update(x for x in members if x != m)
 
-    # Anchors: most-played artists first (personalized), then the lead artist of
-    # the most popular catalog tracks, so there are always several mixes even
-    # with thin history. Anchor on the *first credited* name, not the whole
-    # collab string, so list-by-artist matching stays meaningful.
-    anchors = [a["artist"] for a in played]
-    seen_a: set[str] = {a.lower() for a in anchors}
-    for it in pool:
-        if len(anchors) >= max(count, 6):
-            break
-        members = _artist_members(it.get("artist"))
-        if not members:
-            continue
-        a = members[0]
-        if a.lower() not in seen_a:
-            seen_a.add(a.lower())
-            anchors.append(a)
+    # The whole-registry dedup index (for the discovery mix's external picks):
+    # exclude *every* stored track, not just the popular-400 pool, plus fuzzy
+    # signatures so a different upload of a stored song is dropped too.
+    dedup_index = db.all_track_signatures_cached()
+    known_ids = {it["video_id"] for it in dedup_index}
+    owned_sigs = _owned_signatures(dedup_index)
 
-    if not anchors:
-        return {"mixes": [], "personalized": False}
+    # Most-played tracks (for the "On Repeat" mix and to seed discovery / mark
+    # which owned tracks are "deep cuts" the user rarely plays).
+    played_tracks = db.top_played_tracks(user.user_id, limit=100)
+    played_keys = {key(t) for t in played_tracks}
 
-    rot = day_seed % len(anchors)
-    todays = (anchors[rot:] + anchors[:rot])[:count]
+    # `used` reserves a track for the FIRST mix that picks it, so the lineup stops
+    # re-showing the same few popular/collaborator tracks in every mix — the main
+    # reason the old feed looked like 4 copies. Every generator skips `used` keys
+    # and each emitted mix adds its tracks to it.
+    used: set[tuple] = set()
 
-    def build_tracks(anchor: str, i: int) -> list[dict]:
-        """Score the catalog for this mix and select a varied tracklist."""
+    # Scale each catalog mix's length to how much music there is. With strict
+    # cross-mix exclusion a fixed size=40 lets the first mix swallow a small
+    # library and leaves nothing for the rest (→ 2-3 mixes). Budgeting the pool
+    # across the catalog-drawn mixes (discovery pulls from YT Music, not the pool)
+    # yields several *distinct* mixes instead of one huge one; a large catalog
+    # keeps full-length mixes.
+    mix_size = min(size, max(8, len(pool) // max(1, count - 1)))
+
+    # ── Per-kind track selection ──────────────────────────────────────────────
+
+    def _cap_select(tracks: list[dict], mix_i: int, *, shuffle: bool) -> list[dict]:
+        """Take up to `mix_size` tracks — preserving input order, or a per-day
+        jitter order when `shuffle` (so era/deep-cut mixes rotate day to day) —
+        skipping `used` tracks and holding each primary artist under the cap."""
+        seq = tracks
+        if shuffle:
+            seq = sorted(
+                tracks,
+                key=lambda t: _jitter(day_seed, mix_i, t["video_id"]),
+                reverse=True,
+            )
+        cap = max(int(mix_size * MAX_ARTIST_SHARE), 1)
+        picked: list[dict] = []
+        counts: dict[str, int] = {}
+        for t in seq:
+            if len(picked) >= mix_size:
+                break
+            if key(t) in used:
+                continue
+            prim = (_artist_members(t.get("artist")) or [""])[0].lower()
+            if counts.get(prim, 0) >= cap:
+                continue
+            picked.append(t)
+            counts[prim] = counts.get(prim, 0) + 1
+        return picked
+
+    def build_artist_mix(anchor: str, mix_i: int) -> list[dict]:
+        """Score the catalog around one anchor artist (anchor → collaborators →
+        play affinity → popularity → jitter) and select a varied tracklist,
+        skipping tracks already claimed by an earlier mix today."""
         anchor_l = anchor.lower()
         nbrs = neighbors.get(anchor_l, set())
-
-        # Guarantee the anchor's own catalogue is a candidate even on a catalog
-        # bigger than the popular-400 pool (a top-played artist whose deep cuts
-        # didn't make the popularity cut).
         candidates = list(pool)
-        for t in db.list_tracks_by_artist(user.user_id, anchor, limit=size):
+        for t in db.list_tracks_by_artist(user.user_id, anchor, limit=mix_size):
             if key(t) not in pool_keys:
                 candidates.append(t)
 
-        # Group scored candidates by their *primary* (first-credited) artist —
-        # that's the slot the per-artist cap counts against.
         groups: dict[str, list[tuple[float, dict]]] = {}
         for t in candidates:
+            if key(t) in used:
+                continue
             members = [m.lower() for m in _artist_members(t.get("artist"))]
             prim = members[0] if members else ""
             score = (
@@ -337,32 +427,23 @@ def _daily_mixes_impl(count: int, size: int, user: CurrentUser):
                 + _NEIGHBOR_BOOST * (1.0 if set(members) & nbrs else 0.0)
                 + _AFFINITY_WEIGHT * max((affinity.get(m, 0.0) for m in members), default=0.0)
                 + _POPULARITY_WEIGHT * ((t.get("owner_count") or 0) / max_owner)
-                + _JITTER_WEIGHT * _jitter(day_seed, i, t["video_id"])
+                + _JITTER_WEIGHT * _jitter(day_seed, mix_i, t["video_id"])
             )
             groups.setdefault(prim, []).append((score, t))
+        if not groups:
+            return []
 
         for lst in groups.values():
             lst.sort(key=lambda st: st[0], reverse=True)
-        # Order groups by their best track's score — the anchor's group leads, so
-        # the mix opens on an anchor track (its identity / cover art).
         ordered = sorted(groups.items(), key=lambda kv: kv[1][0][0], reverse=True)
-
-        # Hard per-artist cap. The 35% share is the goal, but loosen it when there
-        # simply aren't enough distinct artists to fill the mix (a catalog of one
-        # or two artists can't be diversified) — ceil(size / artists) is the
-        # smallest cap that still lets the mix reach `size`. The cap is otherwise
-        # never relaxed: on a varied catalog one artist never exceeds 35%, even if
-        # that leaves the mix a touch short of `size`.
         distinct = len(groups)
-        cap = max(int(size * MAX_ARTIST_SHARE), -(-size // max(1, distinct)))
+        cap = max(int(mix_size * MAX_ARTIST_SHARE), -(-mix_size // max(1, distinct)))
 
-        # Round-robin one track per artist per pass, skipping artists at the cap.
-        # Distinct artists surface early; no artist exceeds `cap`.
         picked: list[dict] = []
         idxs = {k: 0 for k, _ in ordered}
         counts: dict[str, int] = {}
         progress = True
-        while len(picked) < size and progress:
+        while len(picked) < mix_size and progress:
             progress = False
             for k, lst in ordered:
                 if len(picked) >= size:
@@ -375,80 +456,220 @@ def _daily_mixes_impl(count: int, size: int, user: CurrentUser):
                 progress = True
         return picked
 
-    # Pass 1: build each mix's tracklist. Defer related() so all seeds fetch in
-    # one concurrent batch below rather than one blocking round-trip per mix.
-    built: list[dict] = []
-    for i, anchor in enumerate(todays):
-        tracks = build_tracks(anchor, i)
-        if len(tracks) < 4:
-            continue  # too thin to be a "mix"
-
-        # Seed external suggestions from the first track of the first few distinct
-        # artists in the mix — so the "more like this" tail spreads across the
-        # mix's artists, not just the anchor.
-        seeds: list[str] = []
-        seed_artists: set[str] = set()
-        for t in tracks:
-            members = _artist_members(t.get("artist"))
-            prim = members[0].lower() if members else ""
-            if prim in seed_artists:
+    def spread_anchors(n: int) -> list[str]:
+        """Up to `n` artist anchors spread across the co-credit graph. Rank by play
+        history then catalog popularity, rotate by the day, but skip any artist
+        that shares a credit with an already-picked anchor — so each artist mix is
+        a *different* community instead of the same clique re-anchored."""
+        ranked = [a["artist"] for a in played]
+        seen = {a.lower() for a in ranked}
+        for it in pool:
+            members = _artist_members(it.get("artist"))
+            if members and members[0].lower() not in seen:
+                seen.add(members[0].lower())
+                ranked.append(members[0])
+        if not ranked:
+            return []
+        rot = day_seed % len(ranked)
+        ranked = ranked[rot:] + ranked[:rot]
+        picked: list[str] = []
+        blocked: set[str] = set()
+        for a in ranked:
+            al = a.lower()
+            if al in blocked:
                 continue
-            seed_artists.add(prim)
-            seeds.append(t["video_id"])
-            if len(seeds) >= 3:
+            picked.append(a)
+            blocked.add(al)
+            blocked |= neighbors.get(al, set())
+            if len(picked) >= n:
                 break
+        return picked
 
-        # "<Artist> - Topic" is YouTube's auto-channel naming — show just the artist.
-        subtitle = anchor[: -len(" - Topic")] if anchor.endswith(" - Topic") else anchor
-        built.append({"i": i, "tracks": tracks, "subtitle": subtitle, "seeds": seeds})
+    def decade_bands() -> list[tuple[int, str]]:
+        """Release-year decades with enough tracks in the pool to fill a mix,
+        newest first — as (decade, "2010s")."""
+        buckets: dict[int, int] = {}
+        for t in pool:
+            y = t.get("release_year")
+            if not y:
+                continue
+            d = (int(y) // 10) * 10
+            buckets[d] = buckets.get(d, 0) + 1
+        bands = [(d, f"{d}s") for d, c in buckets.items() if c >= max(4, mix_size // 3)]
+        bands.sort(reverse=True)
+        return bands
 
-    # Sprinkle in not-yet-downloaded tracks related to each mix's seeds so the mix
-    # keeps growing beyond the catalog — playing one downloads it (to the shared
-    # catalog, without favouriting). All seeds fetched concurrently; best-effort.
-    all_seeds = list({s for b in built for s in b["seeds"]})
-    rel_map = search_mod.related_many(all_seeds, limit=18)
+    def decade_tracks(decade: int) -> list[dict]:
+        return [
+            t for t in pool
+            if t.get("release_year") and (int(t["release_year"]) // 10) * 10 == decade
+        ]
 
-    # Exclude *every* stored track, not just the popular-400 pool — a song on the
-    # server beyond that window would otherwise resurface here as a "download"
-    # sprinkle. Fuzzy signatures also drop a different upload of a stored song.
-    dedup_index = db.all_track_signatures_cached()
-    known_ids = {it["video_id"] for it in dedup_index}
-    owned_sigs = _owned_signatures(dedup_index)
+    def deep_cut_tracks() -> list[dict]:
+        """Owned tracks the user has rarely/never played — resurfaced."""
+        return [t for t in pool if t.get("is_owned") and key(t) not in played_keys]
 
-    mixes: list[dict] = []
-    for b in built:
-        i = b["i"]
-        # Round-robin across the mix's seeds so externals are artist-varied too.
-        seed_lists = [rel_map.get(s, []) for s in b["seeds"]]
-        externals: list[dict] = []
+    def cluster_tracks(members: list[str]) -> list[dict]:
+        """Pool tracks whose lead artist belongs to a scene — spread across the
+        whole community rather than anchored on one artist."""
+        ms = {m.lower() for m in members}
+        return [
+            t for t in pool
+            if (_artist_members(t.get("artist")) or [""])[0].lower() in ms
+        ]
+
+    def scene_label(members: list[str]) -> str:
+        """Name a scene by its 2-3 most-represented artists in the pool, '+N' for
+        the rest, so the card reads e.g. 'Feid · Blessd · Ryan Castro +4'."""
+        ms = {m.lower() for m in members}
+        counts: dict[str, int] = {}
+        display: dict[str, str] = {}
+        for t in pool:
+            for m in _artist_members(t.get("artist")):
+                if m.lower() in ms:
+                    counts[m.lower()] = counts.get(m.lower(), 0) + 1
+                    display.setdefault(m.lower(), m)
+        top = sorted(counts, key=lambda k: counts[k], reverse=True)[:3]
+        names = [display[k] for k in top]
+        extra = len(members) - len(names)
+        label = " · ".join(names)
+        return (label + (f" +{extra}" if extra > 0 else "")) or "mixed"
+
+    def discovery_external() -> list[dict]:
+        """New music NOT on the server, from YT Music radio seeded on the user's
+        taste (falls back to yt-dlp related). This is the variety injection — the
+        catalog can't diversify what isn't downloaded yet."""
+        seeds = [t["video_id"] for t in (played_tracks or pool)[:5] if t.get("video_id")]
+        if not seeds:
+            return []
+        radio = ytmusic.radio_many(seeds, limit=25)
+        mix_lists = [radio.get(s, []) for s in seeds]
+        if not any(mix_lists):  # YT Music unavailable — fall back to yt-dlp related
+            rel = search_mod.related_many(seeds, limit=18)
+            mix_lists = [[_external_item(e) for e in rel.get(s, [])] for s in seeds]
+
+        external: list[dict] = []
         seen_e: set[str] = set()
+        kept_fps: list[frozenset] = []
         depth = 0
-        while len(externals) < 8 and any(depth < len(L) for L in seed_lists):
-            for L in seed_lists:
-                if len(externals) >= 8:
-                    break
-                if depth >= len(L):
+        while len(external) < size and any(depth < len(L) for L in mix_lists):
+            for L in mix_lists:
+                if len(external) >= size or depth >= len(L):
                     continue
-                entry = L[depth]
-                vid = entry.get("id")
+                item = L[depth]
+                vid = item.get("video_id")
                 if not vid or vid in known_ids or vid in seen_e:
                     continue
                 seen_e.add(vid)
-                item = _external_item(entry)
                 if not _is_music_candidate(item, strict=False):
                     continue
                 if _matches_owned(item, owned_sigs):
                     continue  # a different upload of a song already on the server
-                externals.append(item)
+                fp = _song_fingerprint(item)
+                if any(_same_song(fp, k) for k in kept_fps):
+                    continue
+                external.append(item)
+                kept_fps.append(fp)
             depth += 1
+        return external
 
+    # ── Plan a varied lineup, then build it in order ──────────────────────────
+    # Interleave kinds so the carousel reads varied top to bottom. Kinds with thin
+    # data are skipped; artist mixes backfill so the lineup always reaches `count`
+    # (or as close as the catalog allows). Discovery is placed early — it's the
+    # freshest surface — but only one discovery mix.
+    anchors = spread_anchors(count)
+    bands = decade_bands()
+    scenes = _scene_clusters(neighbors, day_seed)
+    has_deep = bool(deep_cut_tracks())
+
+    plan: list[tuple[str, object]] = []
+    ai = bi = ci = 0
+    if len(played_tracks) >= 8:
+        plan.append(("on_repeat", None))
+    if ai < len(anchors):
+        plan.append(("artist", anchors[ai])); ai += 1
+    if ci < len(scenes):
+        plan.append(("cluster", scenes[ci])); ci += 1
+    if bi < len(bands):
+        plan.append(("decade", bands[bi])); bi += 1
+    plan.append(("discovery", None))
+    if ai < len(anchors):
+        plan.append(("artist", anchors[ai])); ai += 1
+    if has_deep:
+        plan.append(("deep_cuts", None))
+    if ci < len(scenes):
+        plan.append(("cluster", scenes[ci])); ci += 1
+    if bi < len(bands):
+        plan.append(("decade", bands[bi])); bi += 1
+    while ai < len(anchors):
+        plan.append(("artist", anchors[ai])); ai += 1
+
+    def _cover_urls(tracks: list[dict], external: list[dict]) -> list[str]:
+        """Up to 4 distinct thumbnails for a collage cover."""
+        urls: list[str] = []
+        for t in list(tracks) + list(external):
+            u = t.get("thumbnail_url")
+            if u and u not in urls:
+                urls.append(u)
+            if len(urls) >= 4:
+                break
+        return urls
+
+    mixes: list[dict] = []
+    artist_n = 0
+    discovered = False
+    for kind, payload in plan:
+        if len(mixes) >= count:
+            break
+
+        external: list[dict] = []
+        if kind == "artist":
+            anchor = payload  # type: ignore[assignment]
+            tracks = build_artist_mix(anchor, len(mixes))
+            artist_n += 1
+            title = f"Daily Mix {artist_n}"
+            subtitle = anchor[: -len(" - Topic")] if anchor.endswith(" - Topic") else anchor
+        elif kind == "on_repeat":
+            tracks = _cap_select(played_tracks, len(mixes), shuffle=False)
+            title, subtitle = "On Repeat", "your heavy rotation"
+        elif kind == "deep_cuts":
+            tracks = _cap_select(deep_cut_tracks(), len(mixes), shuffle=True)
+            title, subtitle = "Deep Cuts", "rarely played, back again"
+        elif kind == "decade":
+            decade, label = payload  # type: ignore[misc]
+            tracks = _cap_select(decade_tracks(decade), len(mixes), shuffle=True)
+            title, subtitle = label, "time capsule"
+        elif kind == "cluster":
+            members = payload  # type: ignore[assignment]
+            tracks = _cap_select(cluster_tracks(members), len(mixes), shuffle=True)
+            title, subtitle = "Your Scene", scene_label(members)
+        elif kind == "discovery":
+            if discovered:
+                continue
+            discovered = True
+            external = discovery_external()
+            # A few not-yet-used owned/played tracks as a playable lead-in so the
+            # card has a cover and ▶ works; the mix is otherwise all new music.
+            tracks = [t for t in played_tracks if key(t) not in used][:5]
+            title, subtitle = "Fresh Finds", "new to you"
+        else:
+            continue
+
+        if len(tracks) + len(external) < 4:
+            continue  # too thin to be a mix
+
+        for t in tracks:
+            used.add(key(t))
         mixes.append({
-            "id": f"daily-{day_seed}-{i}",
-            "title": f"Daily Mix {i + 1}",
-            "subtitle": b["subtitle"],
-            "accent": ("hot", "cool", "violet")[i % 3],
-            "tracks": b["tracks"],
-            "external": externals,
+            "id": f"daily-{day_seed}-{len(mixes)}",
+            "kind": kind,
+            "title": title,
+            "subtitle": subtitle,
+            "accent": ("hot", "cool", "violet")[len(mixes) % 3],
+            "tracks": tracks,
+            "external": external,
+            "cover_urls": _cover_urls(tracks, external),
         })
 
     return {"mixes": mixes, "personalized": personalized}

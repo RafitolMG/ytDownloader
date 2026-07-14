@@ -218,15 +218,28 @@ export type RadioFeed = {
   external: ExternalCatalogItem[]
 }
 
-/** A rotating daily mix: playable catalog tracks anchored to an artist, plus
- * related tracks not downloaded yet (playing one fetches it to the catalog). */
+/** One of the daily-mix kinds the backend blends for variety. */
+export type DailyMixKind =
+  | 'artist'
+  | 'cluster'
+  | 'decade'
+  | 'on_repeat'
+  | 'deep_cuts'
+  | 'discovery'
+
+/** A rotating daily mix. Depending on `kind` it's playable catalog tracks
+ * (anchored to an artist / era / listening history) or, for `discovery`, mostly
+ * `external` tracks not downloaded yet (playing one fetches it to the catalog). */
 export type DailyMix = {
   id: string
+  kind: DailyMixKind
   title: string
   subtitle: string
   accent: CatalogAccent
   tracks: CatalogItem[]
   external: ExternalCatalogItem[]
+  /** Up to 4 thumbnails for a collage cover. */
+  cover_urls: string[]
 }
 
 export type DailyMixesResponse = {
