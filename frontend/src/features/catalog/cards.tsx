@@ -158,7 +158,18 @@ export function RecentCard({
 export function DailyMixCard({ mix, onOpen }: { mix: DailyMix; onOpen: () => void }) {
   const player = useAudioPlayer()
   const a = ACCENT[mix.accent]
-  const cover = mix.tracks[0]?.thumbnail_url ?? null
+  const covers =
+    mix.cover_urls?.length
+      ? mix.cover_urls
+      : mix.tracks[0]?.thumbnail_url
+        ? [mix.tracks[0].thumbnail_url]
+        : []
+  const hasPlayable = mix.tracks.length > 0
+  // A `discovery` mix has no downloaded tracks — quick-play streams previews of
+  // its new-music picks through the preview proxy instead of the library.
+  const playQueue = hasPlayable
+    ? mix.tracks.map(toLibraryItem)
+    : mix.external.map(toPreviewItem)
   return (
     <div
       onClick={onOpen}
@@ -171,39 +182,58 @@ export function DailyMixCard({ mix, onOpen }: { mix: DailyMix; onOpen: () => voi
       title={`${mix.title} · ${mix.subtitle} — preview`}
     >
       <div className={`relative aspect-square bg-gradient-to-br ${a.grad}`}>
-        {cover && (
+        {covers.length >= 4 ? (
+          <div className="absolute inset-0 grid grid-cols-2 grid-rows-2">
+            {covers.slice(0, 4).map((url, i) => (
+              <img
+                key={i}
+                src={url}
+                alt=""
+                className="w-full h-full object-cover opacity-60"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+              />
+            ))}
+          </div>
+        ) : covers[0] ? (
           <img
-            src={cover}
+            src={covers[0]}
             alt=""
             className="w-full h-full object-cover opacity-60"
             loading="lazy"
             referrerPolicy="no-referrer"
           />
-        )}
+        ) : null}
         <span
           className={`absolute top-2 left-2 font-pixel text-xs uppercase tracking-widest ${a.text}`}
           style={{ textShadow: '0 0 8px currentColor' }}
         >
           {mix.title}
         </span>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation()
-            player.play(mix.tracks.map(toLibraryItem), 0)
-          }}
-          title="play this mix"
-          aria-label="play this mix"
-          className="absolute bottom-2 right-2 w-9 h-9 flex items-center justify-center rounded-full bg-hot/80 text-ink-hi shadow-[var(--shadow-glow-hot)] opacity-0 group-hover:opacity-100 transition hover:bg-hot"
-        >
-          ▶
-        </button>
+        {playQueue.length > 0 && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              player.play(playQueue, 0)
+            }}
+            title="play this mix"
+            aria-label="play this mix"
+            className="absolute bottom-2 right-2 w-9 h-9 flex items-center justify-center rounded-full bg-hot/80 text-ink-hi shadow-[var(--shadow-glow-hot)] opacity-0 group-hover:opacity-100 transition hover:bg-hot"
+          >
+            ▶
+          </button>
+        )}
       </div>
       <div className="p-2">
         <div className="font-sans text-xs font-medium text-ink-hi truncate">
           {mix.subtitle}
         </div>
-        <div className="text-xs text-ink-lo tabular-nums">{mix.tracks.length} tracks</div>
+        <div className="text-xs text-ink-lo tabular-nums">
+          {hasPlayable
+            ? `${mix.tracks.length} tracks`
+            : `${mix.external.length} to discover`}
+        </div>
       </div>
     </div>
   )
