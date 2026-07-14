@@ -6,7 +6,7 @@ import type {
 } from '@/shared/api/types'
 import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
-import { ACCENT } from './lib'
+import { ACCENT, toPreviewItem } from './lib'
 import { CatalogRow, DownloadAllButton, ExternalRow } from './rows'
 
 /** Expanded category feed: playable catalog tracks + downloadable candidates. */
@@ -99,7 +99,11 @@ export function CategoryView({
 export function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) {
   const player = useAudioPlayer()
   const a = ACCENT[mix.accent]
-  const cover = mix.tracks[0]?.thumbnail_url ?? null
+  const cover = mix.tracks[0]?.thumbnail_url ?? mix.cover_urls?.[0] ?? null
+  // Discovery mixes have no downloaded tracks — "play all" streams previews.
+  const playQueue = mix.tracks.length
+    ? mix.tracks.map(toLibraryItem)
+    : mix.external.map(toPreviewItem)
   return (
     <section>
       <div className="flex items-center gap-4 mb-5 flex-wrap">
@@ -127,16 +131,19 @@ export function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) 
             {mix.title}
           </div>
           <div className="font-sans text-sm text-ink-mid truncate">
-            {mix.subtitle} · {mix.tracks.length} tracks
+            {mix.subtitle} ·{' '}
+            {mix.tracks.length > 0
+              ? `${mix.tracks.length} tracks`
+              : `${mix.external.length} to discover`}
           </div>
         </div>
-        {mix.tracks.length > 0 && (
+        {playQueue.length > 0 && (
           <button
             type="button"
-            onClick={() => player.play(mix.tracks.map(toLibraryItem), 0)}
+            onClick={() => player.play(playQueue, 0)}
             className="font-pixel text-xs uppercase tracking-widest px-4 py-2 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
           >
-            ▶ play all
+            {mix.tracks.length ? '▶ play all' : '▶ preview all'}
           </button>
         )}
       </div>
