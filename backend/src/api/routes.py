@@ -1375,7 +1375,7 @@ async def catalog_suggestions(
     n = max(1, min(limit, 40))
 
     def work():
-        # Popular seeds drive the YouTube Mixes; a top-N read is the right shape.
+        # Popular seeds drive the radios; a top-N read is the right shape.
         catalog = db.popular_catalog(user.user_id, 500)
         if not catalog:
             return {"external": []}
@@ -1389,12 +1389,10 @@ async def catalog_suggestions(
         # song already in the library (same song, different video_id).
         owned_sigs = _owned_signatures(dedup_index)
 
-        # A few seeds is plenty — each Mix returns ~12 related videos and fetching
-        # them is the slow part (one yt-dlp call each, cached 15min after).
+        # More seeds than we strictly need: dedup attrition (owned tracks, same-
+        # song collapse) used to leave this feed at only 4-10 items off 4 seeds.
         # Fetched concurrently so a cold request overlaps the round-trips.
-        seed_ids = [seed["video_id"] for seed in catalog[:4]]
-        rel_map = search_mod.related_many(seed_ids, limit=12)
-        mixes: list[list[dict]] = [rel_map.get(vid, []) for vid in seed_ids]
+        seed_ids = [seed["video_id"] for seed in catalog[:8]]
 
         seen: set[str] = set()
         # Fingerprints of songs already suggested, to collapse different uploads
@@ -1402,33 +1400,46 @@ async def catalog_suggestions(
         # track shows twice and a user adding both downloads it twice.
         kept_fps: list[frozenset] = []
         suggestions: list[dict] = []
-        depth = 0
-        # Round-robin: take the i-th entry from every mix before the (i+1)-th, so
-        # the head of the list is a spread across seeds rather than one full mix.
-        while len(suggestions) < n and any(depth < len(m) for m in mixes):
-            for mix in mixes:
-                if depth >= len(mix) or len(suggestions) >= n:
-                    continue
-                entry = mix[depth]
-                vid = entry.get("id")
-                if not vid or vid in known_ids or vid in seen:
-                    continue
-                item = _external_item(entry)
-                # Radio Mixes are music-seeded; the lenient filter only trims the
-                # odd hour-long upload or sub-minute clip that sneaks in.
-                if not _is_music_candidate(item, strict=False):
-                    continue
-                # Skip a different upload of a song we already own (the video_id
-                # filter above only catches the exact same upload).
-                seen.add(vid)
-                if _matches_owned(item, owned_sigs):
-                    continue
-                fp = _song_fingerprint(item)
-                if any(_same_song(fp, k) for k in kept_fps):
-                    continue  # another upload of a song already suggested
-                suggestions.append(item)
-                kept_fps.append(fp)
-            depth += 1
+
+        def fill_from(mixes: list[list[dict]]) -> None:
+            """Round-robin across the seed mixes (spread artists across the head),
+            dropping known / non-music / owned / same-song items, until `n`."""
+            depth = 0
+            while len(suggestions) < n and any(depth < len(m) for m in mixes):
+                for mix in mixes:
+                    if depth >= len(mix) or len(suggestions) >= n:
+                        continue
+                    item = mix[depth]
+                    vid = item.get("video_id")
+                    if not vid or vid in known_ids or vid in seen:
+                        continue
+                    seen.add(vid)
+                    # Radios are music-seeded; the lenient filter only trims the
+                    # odd hour-long upload or sub-minute clip that sneaks in.
+                    if not _is_music_candidate(item, strict=False):
+                        continue
+                    if _matches_owned(item, owned_sigs):
+                        continue  # a different upload of a song already owned
+                    fp = _song_fingerprint(item)
+                    if any(_same_song(fp, k) for k in kept_fps):
+                        continue  # another upload of a song already suggested
+                    suggestions.append(item)
+                    kept_fps.append(fp)
+                depth += 1
+
+        # Primary source: YT Music radio → the audio (ATV) tracks, so suggestions
+        # are the music itself, not the official videoclips yt-dlp's RD mix serves.
+        ytm = ytmusic.radio_many(seed_ids, limit=25)
+        fill_from([ytm.get(vid, []) for vid in seed_ids])
+
+        # Top-up / fallback: if YT Music was unavailable or thin, fill the rest
+        # from yt-dlp's related mix (flat entries normalized to the same shape).
+        if len(suggestions) < n:
+            rel_map = search_mod.related_many(seed_ids, limit=12)
+            fill_from([
+                [_external_item(e) for e in rel_map.get(vid, [])]
+                for vid in seed_ids
+            ])
 
         return {"external": suggestions}
 
