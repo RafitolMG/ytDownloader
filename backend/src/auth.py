@@ -9,6 +9,7 @@ protected routes must declare. Handles three states:
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -63,8 +64,11 @@ def _refresh_session(session: dict) -> dict:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="auth service unreachable",
             ) from e
-        # Refresh rejected (cookie expired or revoked) — drop the local session.
+        # Refresh genuinely rejected (cookie expired or revoked) — drop the local
+        # session. This runs single-flighted (see _refresh_if_needed), so it's a
+        # real rejection, not a request that lost the refresh-rotation race.
         db.delete_session(session["id"])
+        _drop_refresh_lock(session["id"])
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session expired") from e
 
     new_expires = _expires_in_seconds(result.expires_in)
@@ -79,6 +83,56 @@ def _refresh_session(session: dict) -> dict:
     refreshed["access_expires_at"] = new_expires
     refreshed["refresh_cookie"] = result.refresh_cookie
     return refreshed
+
+
+def _needs_refresh(session: dict) -> bool:
+    """True when the access token is within the refresh leeway of expiring."""
+    now = datetime.now(timezone.utc)
+    expires_at = _parse_iso(session["access_expires_at"])
+    return expires_at - now <= timedelta(seconds=config.ACCESS_REFRESH_LEEWAY_SEC)
+
+
+# Per-session refresh locks. HomeAuth rotates AND revokes the refresh cookie on
+# every /auth/refresh (one-time use), so when the short-lived access token nears
+# expiry the SPA's many parallel requests would each try to refresh with the
+# SAME cookie: the first wins and rotates it, the rest present a now-revoked
+# cookie, get a 401, and used to drop the whole session — logging the user out
+# roughly every access-token lifetime (~15 min). Serializing refresh per session
+# (single-flight) and re-reading under the lock lets the losers reuse the
+# winner's fresh tokens instead of consuming the rotated cookie a second time.
+_refresh_locks: dict[str, threading.Lock] = {}
+_refresh_locks_guard = threading.Lock()
+
+
+def _refresh_lock_for(session_id: str) -> threading.Lock:
+    with _refresh_locks_guard:
+        return _refresh_locks.setdefault(session_id, threading.Lock())
+
+
+def _drop_refresh_lock(session_id: str) -> None:
+    """Forget the per-session lock once its session is gone, so the map doesn't
+    accumulate an entry per dead session."""
+    with _refresh_locks_guard:
+        _refresh_locks.pop(session_id, None)
+
+
+def _refresh_if_needed(session: dict) -> dict:
+    """Single-flighted refresh. Hold the per-session lock, then re-read the row
+    under it: if a parallel request already refreshed (token no longer near
+    expiry), reuse those tokens rather than presenting the rotated cookie again
+    (which HomeAuth would reject, dropping the session)."""
+    lock = _refresh_lock_for(session["id"])
+    with lock:
+        current = db.get_session(session["id"])
+        if current is None:
+            # A concurrent refresh rejection already dropped it — treat as expired.
+            _drop_refresh_lock(session["id"])
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="session expired"
+            )
+        if not _needs_refresh(current):
+            return current
+        return _refresh_session(current)
 
 
 _DEV_USER = CurrentUser(
@@ -107,10 +161,8 @@ def current_user(ytdl_session: str | None = Cookie(default=None, alias=config.SE
     if session is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session not found")
 
-    now = datetime.now(timezone.utc)
-    expires_at = _parse_iso(session["access_expires_at"])
-    if expires_at - now <= timedelta(seconds=config.ACCESS_REFRESH_LEEWAY_SEC):
-        session = _refresh_session(session)
+    if _needs_refresh(session):
+        session = _refresh_if_needed(session)
 
     db.touch_session(session["id"])
 
