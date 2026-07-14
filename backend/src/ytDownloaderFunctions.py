@@ -155,6 +155,21 @@ def _get_cookie_opts() -> dict:
         'extractor_args': {
             'youtube': {'player_client': ['default', 'web_music', 'ios', 'tv']},
         },
+        # Resilience against YouTube's intermittent 403s on the media fetch —
+        # common from a datacenter IP with shared cookies, where the first
+        # request slips through and rapid follow-ups get throttled/blocked. Retry
+        # the HTTP data fetch, the fragments and the extractor a few times with a
+        # capped exponential backoff (1,2,4,8,16,30s) so a transient block
+        # doesn't fail a whole track; a hard block still surfaces once the
+        # retries are spent. yt-dlp calls the sleep func as sleep_func(n=attempt).
+        'retries': 5,
+        'fragment_retries': 10,
+        'extractor_retries': 3,
+        'retry_sleep_functions': {
+            'http': lambda n: min(2 ** n, 30),
+            'fragment': lambda n: min(2 ** n, 30),
+            'extractor': lambda n: min(2 ** n, 30),
+        },
     }
 
     cookies_file = _resolve_cookies_file()
