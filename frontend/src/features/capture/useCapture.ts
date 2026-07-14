@@ -236,6 +236,11 @@ export function useCapture() {
                 reused: data.reused ?? 0,
                 skipped: data.skipped ?? 0,
               })
+              // A library import lands in the shared catalog and the "recent
+              // activity" feed — refresh both so the new track shows without a
+              // reload (the queue + Liked view already refresh above).
+              queryClient.invalidateQueries({ queryKey: ['catalog'] })
+              queryClient.invalidateQueries({ queryKey: ['activity'] })
             }
             ws.close()
             break
