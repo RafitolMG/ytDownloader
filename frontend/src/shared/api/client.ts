@@ -394,7 +394,9 @@ export const api = {
 
   dailyMixes: (opts: { count?: number; size?: number } = {}) => {
     const qs = new URLSearchParams()
-    qs.set('count', String(opts.count ?? 4))
+    // 6 distinct-kind mixes (artist / era / on-repeat / deep-cuts / discovery)
+    // now that the backend diversifies them; was 4 near-identical artist mixes.
+    qs.set('count', String(opts.count ?? 6))
     qs.set('size', String(opts.size ?? 40))
     return json<DailyMixesResponse>(`/api/catalog/daily-mixes?${qs.toString()}`)
   },
