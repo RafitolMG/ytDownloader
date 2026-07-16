@@ -11,7 +11,7 @@ export default function SettingsPage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <main className="max-w-2xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-40 sm:pb-32">
+      <main className="max-w-2xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-bottombars">
         <AppHeader queueCount={activeCount} />
 
         <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-4">
