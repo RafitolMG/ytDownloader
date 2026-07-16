@@ -46,6 +46,9 @@ export function useExternalDownload(
       // "✓ added" state instead and the carousel refreshes on its own staleTime.
       queryClient.invalidateQueries({ queryKey: ['daily-mixes'] })
       queryClient.invalidateQueries({ queryKey: ['library'] })
+      // The download registers a library addition — refresh the "recently
+      // added" activity feed so the track shows up there without a reload.
+      queryClient.invalidateQueries({ queryKey: ['activity'] })
     } else if (live.status === 'error') {
       setFailed('download failed — check the queue')
     }

@@ -85,6 +85,37 @@ body {
   padding-top: env(safe-area-inset-top);
 }
 
+/* ============================================================
+   Bottom safe inset — the fixed bottom-nav (phones) and the floating
+   mini-player are `position: fixed`, so they don't reserve layout space and
+   would cover the last rows of a scrollable page. Pages reserve room for them
+   with `.pb-bottombars`, which sums whichever bars are actually present:
+     · --nav-h    the bottom nav — phones only (Tailwind `sm` breakpoint)
+     · --player-h the mini-player — only while a track is loaded
+   `body.player-active` is toggled from the PlayerBar so idle pages don't waste
+   a mini-player's worth of blank space at the bottom.
+   ============================================================ */
+:root {
+  --nav-h: 0px;
+  --player-h: 0px;
+}
+@media (max-width: 639.98px) {
+  :root {
+    --nav-h: calc(3.5rem + env(safe-area-inset-bottom));
+  }
+}
+body.player-active {
+  --player-h: 4.25rem;
+}
+@media (min-width: 640px) {
+  body.player-active {
+    --player-h: 5rem;
+  }
+}
+.pb-bottombars {
+  padding-bottom: calc(var(--nav-h) + var(--player-h) + 1.5rem);
+}
+
 ::selection {
   background: var(--color-hot);
   color: var(--color-page);

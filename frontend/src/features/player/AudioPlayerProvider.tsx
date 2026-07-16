@@ -71,13 +71,6 @@ type PlayerCtx = {
   seek: (seconds: number) => void
   toggleShuffle: () => void
   cycleRepeat: () => void
-  /** ms left until the sleep timer pauses playback; null when no timed sleep is
-   * set (also null in end-of-track mode, which has no countdown). */
-  sleepRemainingMs: number | null
-  /** True when a "stop after the current track" sleep is armed. */
-  sleepEndOfTrack: boolean
-  /** Arm/replace the sleep timer: a minute count, 'endOfTrack', or null to clear. */
-  setSleepTimer: (v: number | 'endOfTrack' | null) => void
   /** Insert a track to play right after the current one. Starts playing it if
    * nothing is loaded. */
   playNext: (track: LibraryItem) => void
@@ -132,13 +125,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const [shuffle, setShuffle] = useState(false)
   const [repeat, setRepeat] = useState<RepeatMode>('off')
   const [volume, setVolumeState] = useState(1)
-  // Sleep timer: `sleepFireAt` is the epoch-ms deadline for a timed sleep;
-  // `sleepEndOfTrack` stops after the current track instead (checked via a ref
-  // inside the `ended` handler so it sees the latest value without a re-bind).
-  const [sleepFireAt, setSleepFireAt] = useState<number | null>(null)
-  const [sleepEndOfTrack, setSleepEndOfTrack] = useState(false)
-  const [sleepRemainingMs, setSleepRemainingMs] = useState<number | null>(null)
-  const sleepEndOfTrackRef = useRef(false)
   // Persistence + auto-radio.
   const hydratedRef = useRef(false)
   const pendingSeekRef = useRef<number | null>(null)
@@ -393,11 +379,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
     setPos(-1)
     setIsPlaying(false)
     setPlaybackTime({ position: 0, duration: NaN })
-    // Tear down any armed sleep timer along with playback.
-    setSleepFireAt(null)
-    setSleepRemainingMs(null)
-    setSleepEndOfTrack(false)
-    sleepEndOfTrackRef.current = false
   }, [])
 
   // Stop playback the moment there's no session — on logout or when a 401
@@ -438,45 +419,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const cycleRepeat = useCallback(() => {
     setRepeat((r) => (r === 'off' ? 'all' : r === 'all' ? 'one' : 'off'))
   }, [])
-
-  const setSleepTimer = useCallback((v: number | 'endOfTrack' | null) => {
-    if (v === null) {
-      setSleepFireAt(null)
-      setSleepRemainingMs(null)
-      setSleepEndOfTrack(false)
-      sleepEndOfTrackRef.current = false
-    } else if (v === 'endOfTrack') {
-      setSleepFireAt(null)
-      setSleepRemainingMs(null)
-      setSleepEndOfTrack(true)
-      sleepEndOfTrackRef.current = true
-    } else {
-      setSleepEndOfTrack(false)
-      sleepEndOfTrackRef.current = false
-      setSleepFireAt(Date.now() + v * 60_000)
-      setSleepRemainingMs(v * 60_000)
-    }
-  }, [])
-
-  // Tick the timed-sleep countdown once a second; pause (not stop, so the queue
-  // survives) when it reaches zero. Background tab throttling can drift the
-  // wall clock — fine for a sleep timer; end-of-track mode sidesteps it.
-  useEffect(() => {
-    if (sleepFireAt === null) return
-    const tick = () => {
-      const remaining = sleepFireAt - Date.now()
-      if (remaining <= 0) {
-        audioRef.current?.pause()
-        setSleepFireAt(null)
-        setSleepRemainingMs(null)
-      } else {
-        setSleepRemainingMs(remaining)
-      }
-    }
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => clearInterval(id)
-  }, [sleepFireAt])
 
   const setVolume = useCallback((v: number) => {
     const clamped = Math.max(0, Math.min(1, v))
@@ -728,9 +670,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       seek,
       toggleShuffle,
       cycleRepeat,
-      sleepRemainingMs,
-      sleepEndOfTrack,
-      setSleepTimer,
       playNext,
       enqueue,
       removeFromQueueAt,
@@ -741,7 +680,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       current, coverUrl, queue, index, pos, canGoNext, canGoPrev, isPlaying,
       shuffle, repeat, volume, setVolume,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
-      sleepRemainingMs, sleepEndOfTrack, setSleepTimer,
       playNext, enqueue, removeFromQueueAt, jumpTo, orderedQueue,
     ],
   )
@@ -771,12 +709,6 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
           msSetPosition(el.duration, el.currentTime, !el.paused)
         }}
         onEnded={() => {
-          // End-of-track sleep: stop here, leaving the queue intact.
-          if (sleepEndOfTrackRef.current) {
-            sleepEndOfTrackRef.current = false
-            setSleepEndOfTrack(false)
-            return
-          }
           if (repeat === 'one') {
             const el = audioRef.current
             if (el) {

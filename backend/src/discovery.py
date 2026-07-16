@@ -9,6 +9,7 @@ touches the request/job runtime.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 import threading
@@ -309,13 +310,71 @@ def _daily_mixes_impl(count: int, size: int, user: CurrentUser):
     with _lineup_lock:
         hit = _lineup_cache.get(cache_key)
         if hit is not None and hit[0] == day_seed:
-            return hit[1]
+            return _reconcile_downloaded(hit[1], user)
     result = _build_daily_mixes(count, size, user, day_seed)
     with _lineup_lock:
         _lineup_cache[cache_key] = (day_seed, result)
         for k in [k for k, v in _lineup_cache.items() if v[0] != day_seed]:
             _lineup_cache.pop(k, None)
-    return result
+    return _reconcile_downloaded(result, user)
+
+
+def _reconcile_downloaded(result: dict, user: CurrentUser) -> dict:
+    """Promote any of a mix's `external` (not-yet-downloaded) suggestions that
+    have since been downloaded into its playable `tracks`.
+
+    The lineup is cached for the whole day (see `_daily_mixes_impl`), so a track
+    downloaded from a mix's "download to play" list would otherwise stay stranded
+    in `external` — un-playable — until tomorrow's rebuild. Re-checking the
+    catalog on each serve is cheap (one indexed lookup) and keeps the mix stable
+    while still reflecting what's now on the server. Returns a copy; the cached
+    lineup is never mutated."""
+    mixes = result.get("mixes") or []
+    ext_ids = {
+        e["video_id"]
+        for m in mixes
+        for e in m.get("external", [])
+        if e.get("video_id")
+    }
+    if not ext_ids:
+        return result
+
+    rows = db.list_catalog_by_video_ids(user.user_id, list(ext_ids))
+    by_vid: dict[str, dict] = {}
+    for r in rows:
+        # One catalog row per video_id — prefer the copy already in most
+        # libraries, then the newest download, so a re-encode doesn't shadow it.
+        cur = by_vid.get(r["video_id"])
+        if cur is None or (r.get("owner_count") or 0) > (cur.get("owner_count") or 0):
+            by_vid[r["video_id"]] = r
+    if not by_vid:
+        return result
+
+    out = copy.deepcopy(result)
+    for m in out["mixes"]:
+        have = {(t["video_id"], t["codec"], t["bitrate"]) for t in m["tracks"]}
+        keep_external: list[dict] = []
+        for e in m.get("external", []):
+            row = by_vid.get(e.get("video_id"))
+            if row is None:
+                keep_external.append(e)
+                continue
+            key = (row["video_id"], row["codec"], row["bitrate"])
+            if key not in have:
+                m["tracks"].append(row)
+                have.add(key)
+        m["external"] = keep_external
+        # Cover collage may have leaned on an external thumbnail that's now a
+        # track — recompute from the reconciled lists (tracks first).
+        urls: list[str] = []
+        for t in list(m["tracks"]) + list(m["external"]):
+            u = t.get("thumbnail_url")
+            if u and u not in urls:
+                urls.append(u)
+            if len(urls) >= 4:
+                break
+        m["cover_urls"] = urls
+    return out
 
 
 def _build_daily_mixes(count: int, size: int, user: CurrentUser, day_seed: int):
