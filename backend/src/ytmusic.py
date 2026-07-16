@@ -132,6 +132,12 @@ _RADIO_TTL_SEC = 900
 _radio_cache: dict[str, tuple[list[dict], float]] = {}
 _radio_cache_lock = threading.Lock()
 
+# Song search feeds the catalog's "found on youtube" results. Users re-type the
+# same prefixes, so a short TTL kills the duplicate round-trips.
+_SONG_SEARCH_TTL_SEC = 300
+_song_search_cache: dict[str, tuple[list[dict], float]] = {}
+_song_search_lock = threading.Lock()
+
 
 def _parse_length(text: str | None) -> int | None:
     """'3:45' / '1:02:03' → seconds; None on anything unparseable."""
@@ -226,6 +232,63 @@ def radio_many(video_ids: list[str], limit: int = 25) -> dict[str, list[dict]]:
     with ThreadPoolExecutor(max_workers=min(4, len(ids))) as ex:
         for vid, res in ex.map(_one, ids):
             out[vid] = res
+    return out
+
+
+def search_songs(q: str, limit: int = 12) -> list[dict]:
+    """YouTube Music song search → raw candidate dicts in the *same shape as
+    `search.search()`* (i.e. `search._shape_entry` output), so the discover feed
+    can use it as a drop-in, cleaner source than plain YouTube.
+
+    The `songs` filter returns real music tracks with artist/duration/album — no
+    videoclips, lyric videos, live sets or non-music — where a bare `ytsearch`
+    returns everything. Best-effort: `[]` when disabled, no client, or on any
+    error, so the caller can fall back to plain YouTube search."""
+    q = (q or "").strip()
+    if not config.YTMUSIC_ENABLED or not q:
+        return []
+    limit = max(1, min(limit, 40))
+
+    now = time.time()
+    key = f"{limit}:{q.lower()}"
+    with _song_search_lock:
+        hit = _song_search_cache.get(key)
+        if hit is not None and now - hit[1] <= _SONG_SEARCH_TTL_SEC:
+            return hit[0]
+
+    client = _get_client()
+    if client is None:
+        return []
+    try:
+        results = client.search(q, filter="songs", limit=limit)
+    except Exception as e:
+        log.debug("ytmusic song search failed for %r: %s", q, e)
+        return []
+
+    out: list[dict] = []
+    for r in results or []:
+        vid = r.get("videoId")
+        if not vid:
+            continue
+        artists = [a.get("name") for a in (r.get("artists") or []) if a.get("name")]
+        thumbs = r.get("thumbnails") or []
+        out.append({
+            "id": vid,
+            "title": r.get("title"),
+            "channel": ", ".join(artists) or None,
+            "channel_url": None,
+            "thumbnail": thumbs[-1].get("url") if thumbs else None,
+            "duration_seconds": r.get("duration_seconds") or _parse_length(r.get("duration")),
+            "view_count": None,
+            # Plain watch URL — the download flow resolves it like any other.
+            "url": f"https://www.youtube.com/watch?v={vid}",
+        })
+
+    with _song_search_lock:
+        _song_search_cache[key] = (out, now)
+        if len(_song_search_cache) > 256:  # bound the map on the long-lived process
+            oldest = min(_song_search_cache, key=lambda k: _song_search_cache[k][1])
+            _song_search_cache.pop(oldest, None)
     return out
 
 
