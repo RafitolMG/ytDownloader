@@ -164,7 +164,7 @@ export function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) 
           <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
             <span>↓ more in this mix · download to play</span>
             <span className="flex-1 border-t border-border" />
-            <DownloadAllButton items={mix.external} own={false} />
+            <DownloadAllButton items={mix.external} />
           </div>
           <ul className="card-vapor rounded-sm divide-y divide-border">
             {mix.external.map((ext, idx) => (
@@ -172,7 +172,6 @@ export function MixView({ mix, onBack }: { mix: DailyMix; onBack: () => void }) 
                 key={ext.video_id}
                 item={ext}
                 position={mix.tracks.length + idx + 1}
-                own={false}
               />
             ))}
           </ul>
