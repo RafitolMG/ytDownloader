@@ -334,23 +334,12 @@ def _album_card(album_id: str) -> dict | None:
     return _album_header(album_id, info, entries)
 
 
-def search_albums(q: str, limit: int = 12) -> list[dict]:
-    """Search YouTube Music for albums matching `q`.
+def _search_album_ids(q: str, limit: int) -> list[str]:
+    """The `#albums` YouTube Music search → album browse ids, relevance-ordered.
 
-    Two-stage: the `#albums` search filter yields album browse ids (no titles in
-    flat mode), then each album's title/cover/artist is fetched concurrently.
-    Best-effort and heavily cached — returns [] on any upstream failure.
+    Flat mode returns ids only (no titles), so callers fetch each album's
+    metadata separately. Returns [] on any upstream failure.
     """
-    q = q.strip()
-    if not q:
-        return []
-    limit = max(1, min(limit, 16))
-
-    cache_key = f"{limit}:{q.lower()}"
-    cached = _ALBUM_SEARCH_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -376,6 +365,27 @@ def search_albums(q: str, limit: int = 12) -> list[dict]:
             album_ids.append(vid)
         if len(album_ids) >= limit:
             break
+    return album_ids
+
+
+def search_albums(q: str, limit: int = 12) -> list[dict]:
+    """Search YouTube Music for albums matching `q`.
+
+    Two-stage: the `#albums` search filter yields album browse ids (no titles in
+    flat mode), then each album's title/cover/artist is fetched concurrently.
+    Best-effort and heavily cached — returns [] on any upstream failure.
+    """
+    q = q.strip()
+    if not q:
+        return []
+    limit = max(1, min(limit, 16))
+
+    cache_key = f"{limit}:{q.lower()}"
+    cached = _ALBUM_SEARCH_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    album_ids = _search_album_ids(q, limit)
 
     if not album_ids:
         _ALBUM_SEARCH_CACHE.set(cache_key, [])
@@ -414,3 +424,48 @@ def get_album(album_id: str) -> dict | None:
     result = {**_album_header(album_id, info, entries), "tracks": tracks}
     _ALBUM_CACHE.set(album_id, result)
     return result
+
+
+def resolve_album(
+    q: str, owned_ids: set[str] | None = None, limit: int = 6
+) -> dict | None:
+    """Resolve a free-text "artist title" query to the best-matching YouTube
+    Music album and return its full detail (header + ordered tracklist), same
+    shape as `get_album()`. `None` if nothing resolves.
+
+    A *library* album is only a title-grouped bag of the tracks a user owns — it
+    carries no album id, so to show the tracks they're *missing* we re-find the
+    album on YTM. When `owned_ids` is given, the candidate whose tracklist
+    overlaps those ids the most wins; this reliably disambiguates the many
+    same-titled editions / re-releases / karaoke versions a search returns. With
+    no overlap signal (or no overlap at all), the most relevant / fullest result
+    is used and the caller decides whether to trust it.
+    """
+    q = q.strip()
+    if not q:
+        return None
+    owned = set(owned_ids or ())
+    limit = max(1, min(limit, 10))
+
+    album_ids = _search_album_ids(q, limit)
+    if not album_ids:
+        return None
+
+    def _one(aid: str) -> dict | None:
+        try:
+            return get_album(aid)  # per-album cached (30min)
+        except Exception:
+            log.warning("resolve: album fetch failed for %r", aid, exc_info=True)
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(6, len(album_ids))) as ex:
+        details = [d for d in ex.map(_one, album_ids) if d]
+    if not details:
+        return None
+
+    def _score(d: dict) -> tuple[int, int]:
+        ids = {t.get("id") for t in (d.get("tracks") or [])}
+        overlap = len(ids & owned)
+        return (overlap, d.get("track_count") or len(d.get("tracks") or []))
+
+    return max(details, key=_score)

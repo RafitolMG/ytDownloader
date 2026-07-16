@@ -176,8 +176,8 @@ export default function CatalogPage() {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="search the catalog and youtube..."
-            aria-label="search the catalog and youtube"
+            placeholder="search the catalog and youtube music..."
+            aria-label="search the catalog and youtube music"
             spellCheck={false}
             autoComplete="off"
             className="flex-1 bg-transparent border-none outline-none text-ink-hi placeholder:text-ink-lo text-lg caret-cool"
@@ -262,7 +262,7 @@ export default function CatalogPage() {
                 </div>
                 <div className="font-pixel text-sm text-ink-lo">
                   {isSearching
-                    ? `nothing in the catalog or on youtube matches "${debouncedQuery}"`
+                    ? `nothing in the catalog or on youtube music matches "${debouncedQuery}"`
                     : isMine
                       ? 'your library is empty — tap ♡ on any catalog track to save it here.'
                       : 'no tracks have been downloaded yet.'}
@@ -359,7 +359,7 @@ export default function CatalogPage() {
               <>
                 <div className="mt-6 mb-3 flex items-center gap-3 font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
                   <span className="flex-1 border-t border-border" />
-                  <span>↓ found on youtube · not yet downloaded</span>
+                  <span>↓ found on youtube music · not yet downloaded</span>
                   <span className="flex-1 border-t border-border" />
                 </div>
                 <ul className="card-vapor rounded-sm divide-y divide-border">

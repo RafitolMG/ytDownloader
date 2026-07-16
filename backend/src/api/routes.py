@@ -1626,6 +1626,72 @@ async def albums_search(
     return {"albums": albums}
 
 
+def _album_payload(viewer_id: str, album: dict) -> dict:
+    """Shape a resolved album (`get_album`/`resolve_album` output) into the API
+    response: `{album, tracks, db}`. `tracks` is the full ordered tracklist
+    (deduped); `db` is the subset already in the shared catalog (playable now),
+    matched by exact video_id against the whole registry — not a popular top-N —
+    so an owned track is never misfiled as "missing" just because the user's
+    catalog is large."""
+    tracks = album.pop("tracks", [])
+    ordered: list[dict] = []
+    ids: list[str] = []
+    seen: set[str] = set()
+    for entry in tracks:
+        vid = entry.get("id")
+        if not vid or vid in seen:
+            continue
+        seen.add(vid)
+        ordered.append(_external_item(entry))
+        ids.append(vid)
+    by_id = {c["video_id"]: c for c in db.list_catalog_by_video_ids(viewer_id, ids)}
+    db_items = [by_id[v] for v in ids if v in by_id]
+    return {"album": album, "tracks": ordered, "db": db_items}
+
+
+@app.get("/api/albums/resolve")
+async def album_resolve(
+    title: str = "",
+    artist: str = "",
+    user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
+):
+    """Resolve a *library* album — a bag of owned tracks grouped by album title,
+    with no album id — back to its YouTube Music album, so the client can show
+    the tracks the user is still missing.
+
+    The right edition is picked by overlap with the tracks the caller already
+    owns under this album title (see `resolve_album`), which disambiguates the
+    re-releases / karaoke / tribute versions a bare title search returns. 404 if
+    nothing resolves; the client then falls back to showing just owned tracks."""
+    title_norm = (title or "").strip()
+    if not title_norm:
+        raise HTTPException(status_code=400, detail="title required")
+
+    def work():
+        # Owned video_ids under this album title — the overlap signal that steers
+        # resolution to the exact edition the user downloaded from.
+        want = title_norm.lower()
+        owned_ids = {
+            r["video_id"]
+            for r in db.list_library(user.user_id, limit=10000)
+            if (r.get("album") or "").strip().lower() == want
+        }
+        q = f"{artist} {title_norm}".strip()
+        album = search_mod.resolve_album(q, owned_ids=owned_ids)
+        if album is None:
+            return None
+        return _album_payload(user.user_id, album)
+
+    try:
+        result = await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="album resolve timed out")
+    if result is None:
+        raise HTTPException(status_code=404, detail="album not found")
+    return result
+
+
 @app.get("/api/albums/{album_id}")
 async def album_detail(
     album_id: str,
@@ -1642,23 +1708,7 @@ async def album_detail(
         album = search_mod.get_album(album_id)
         if album is None:
             return None
-        tracks = album.pop("tracks", [])
-        by_id = {
-            c["video_id"]: c
-            for c in db.popular_catalog(user.user_id, 500)
-        }
-        ordered: list[dict] = []
-        db_items: list[dict] = []
-        seen: set[str] = set()
-        for entry in tracks:
-            vid = entry.get("id")
-            if not vid or vid in seen:
-                continue
-            seen.add(vid)
-            ordered.append(_external_item(entry))
-            if vid in by_id:
-                db_items.append(by_id[vid])
-        return {"album": album, "tracks": ordered, "db": db_items}
+        return _album_payload(user.user_id, album)
 
     try:
         result = await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
