@@ -240,11 +240,16 @@ def _discover_feed(
         if music_only:
             # Long mixes get dropped, so cast a wider net to still fill the page.
             fetch = min(50, fetch * 3)
-        try:
-            raw = search_mod.search(q_norm, limit=fetch)
-        except Exception:
-            traceback.print_exc()
-            raw = []
+        # Prefer YouTube Music (songs only — real tracks with artist/duration, no
+        # videoclips or non-music) and fall back to plain YouTube search when YT
+        # Music is disabled or comes up empty. Both return the same shape.
+        raw = ytmusic.search_songs(q_norm, limit=fetch)
+        if not raw:
+            try:
+                raw = search_mod.search(q_norm, limit=fetch)
+            except Exception:
+                traceback.print_exc()
+                raw = []
         # Some search hits are already in the catalog but didn't match the text
         # query (different stored title/artist). Pull those in as catalog rows
         # so they render as "add to library" (adopt, no re-download) instead of
