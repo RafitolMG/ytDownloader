@@ -198,6 +198,7 @@ export function DownloadAllButton({
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
       queryClient.invalidateQueries({ queryKey: ['daily-mixes'] })
       queryClient.invalidateQueries({ queryKey: ['library'] })
+      queryClient.invalidateQueries({ queryKey: ['activity'] })
     },
     onError: () => setFailed(true),
   })

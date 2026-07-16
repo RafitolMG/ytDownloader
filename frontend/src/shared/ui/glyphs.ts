@@ -24,7 +24,6 @@ export const G = {
   mute: '♪̸',
   heart: '♥',
   heartEmpty: '♡',
-  sleep: '◑',
   autoplay: '∞',
   check: '✓',
   undo: '↺',

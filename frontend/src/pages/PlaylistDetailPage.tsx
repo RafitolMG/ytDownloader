@@ -154,7 +154,7 @@ function PlaylistDetailView() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-bottombars">
         <AppHeader queueCount={activeCount} />
 
         <div className="mb-3">
@@ -279,7 +279,7 @@ function OfflinePlaylistView({
 
   return (
     <div className="relative z-10 min-h-full">
-      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-bottombars">
         <AppHeader queueCount={queueCount} />
 
         <div className="mb-3">

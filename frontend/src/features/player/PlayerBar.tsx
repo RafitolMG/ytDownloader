@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
 import { useAudioPlayer } from './AudioPlayerProvider'
@@ -20,6 +20,14 @@ export function PlayerBar() {
   useGlobalPlayerHotkeys()
   const [queueOpen, setQueueOpen] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  // Publish "the mini-player is on screen" to the document so pages can reserve
+  // bottom padding for it (see `.pb-bottombars`). Mirrors the render guard
+  // below; runs before the early return so hooks stay unconditional.
+  const barVisible = !!user && !!p.current
+  useEffect(() => {
+    document.body.classList.toggle('player-active', barVisible)
+    return () => document.body.classList.remove('player-active')
+  }, [barVisible])
   // Rendered outside the router; a queue restored from localStorage would
   // otherwise float over the login screen. Hide until signed in.
   if (!user || !p.current) return null
@@ -180,7 +188,6 @@ export function PlayerBar() {
               {p.orderPos + 1}/{p.queue.length}
             </span>
           )}
-          <SleepButton />
           <button
             type="button"
             onClick={() => setQueueOpen((v) => !v)}
@@ -351,82 +358,6 @@ function PlayQueuePanel({ onClose }: { onClose: () => void }) {
   )
 }
 
-
-function fmtCountdown(ms: number): string {
-  const total = Math.max(0, Math.ceil(ms / 1000))
-  const m = Math.floor(total / 60)
-  const s = total % 60
-  return `${m}:${String(s).padStart(2, '0')}`
-}
-
-/** Sleep-timer control: a popover (15/30/60 / end of track / off) with a live
- * countdown on the button while a timed sleep is armed. */
-function SleepButton() {
-  const p = useAudioPlayer()
-  const [open, setOpen] = useState(false)
-  const active = p.sleepRemainingMs != null || p.sleepEndOfTrack
-  const label =
-    p.sleepRemainingMs != null
-      ? fmtCountdown(p.sleepRemainingMs)
-      : p.sleepEndOfTrack
-        ? 'end'
-        : null
-  const lowTime = p.sleepRemainingMs != null && p.sleepRemainingMs < 60_000
-
-  const opts: { label: string; value: number | 'endOfTrack' | null }[] = [
-    { label: '15 min', value: 15 },
-    { label: '30 min', value: 30 },
-    { label: '60 min', value: 60 },
-    { label: 'end of track', value: 'endOfTrack' },
-    { label: 'off', value: null },
-  ]
-
-  return (
-    <div className="relative hidden sm:block">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        title="sleep timer"
-        aria-label="sleep timer"
-        className={`h-8 sm:h-9 px-2 font-pixel text-base flex items-center justify-center transition rounded-xs border ${
-          active
-            ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
-            : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
-        }`}
-      >
-        {G.sleep}
-        {label && (
-          <span className={`ml-1 text-[10px] tabular-nums ${lowTime ? 'text-sun' : ''}`}>
-            {label}
-          </span>
-        )}
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-full right-0 mb-2 z-50 w-36 card-vapor rounded-sm border border-border p-1.5 flex flex-col gap-1 shadow-[var(--shadow-glow-cool)]">
-            <div className="font-pixel text-[10px] uppercase tracking-widest text-cool px-1 pb-1">
-              ░ sleep ░
-            </div>
-            {opts.map((o) => (
-              <button
-                key={o.label}
-                type="button"
-                onClick={() => {
-                  p.setSleepTimer(o.value)
-                  setOpen(false)
-                }}
-                className="text-left font-sans text-sm text-ink-hi px-2 py-1 rounded-xs hover:bg-violet/10 transition"
-              >
-                {o.label}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
 
 /** Save the current play order as a new private playlist (preview-only tracks
  * are skipped — they have no DB row). Navigates to the new playlist on success. */

@@ -161,7 +161,7 @@ export default function CatalogPage() {
   return (
     <RadioCtx.Provider value={openRadio}>
     <div className="relative z-10 min-h-full">
-      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-32">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-bottombars">
         <AppHeader queueCount={activeCount} />
 
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
@@ -277,15 +277,25 @@ export default function CatalogPage() {
                 <button
                   type="button"
                   onClick={() => setCatalogOpen((o) => !o)}
-                  className="w-full mb-3 flex items-center gap-3 font-pixel text-xs text-cool uppercase tracking-[0.2em] hover:text-ink-hi transition"
+                  aria-expanded={catalogOpen}
+                  className={`w-full mb-3 flex items-center justify-between gap-3 card-vapor rounded-sm px-4 py-3 font-pixel uppercase tracking-[0.2em] border transition ${
+                    catalogOpen
+                      ? 'border-cool/60 text-cool shadow-[var(--shadow-glow-cool)]'
+                      : 'border-border text-cool hover:text-ink-hi hover:border-cool/60'
+                  }`}
                 >
-                  <span className="whitespace-nowrap">
-                    {catalogOpen ? '▾' : '▸'} ▤ the full catalog
+                  <span className="flex items-center gap-2 text-sm whitespace-nowrap">
+                    <span className="text-lg leading-none">▤</span>
+                    the full catalog
                   </span>
-                  <span className="text-ink-lo normal-case tracking-normal tabular-nums">
-                    {dbItems.length} tracks
+                  <span className="flex items-center gap-2 normal-case tracking-normal">
+                    <span className="text-ink-lo text-xs tabular-nums">
+                      {dbItems.length} tracks
+                    </span>
+                    <span className="text-cool text-base leading-none">
+                      {catalogOpen ? '▾ hide' : '▸ show all'}
+                    </span>
                   </span>
-                  <span className="flex-1 border-t border-border" />
                 </button>
 
                 {catalogOpen && (
