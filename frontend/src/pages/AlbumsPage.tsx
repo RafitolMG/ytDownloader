@@ -50,6 +50,15 @@ function groupLibraryAlbums(items: LibraryItem[]): LibraryAlbum[] {
   return [...byAlbum.values()].sort((a, b) => b.tracks.length - a.tracks.length)
 }
 
+/** Does a library album match the search box? Title or artist substring. */
+function albumMatches(a: LibraryAlbum, query: string): boolean {
+  const needle = query.toLowerCase()
+  return (
+    a.title.toLowerCase().includes(needle) ||
+    (a.artist ?? '').toLowerCase().includes(needle)
+  )
+}
+
 type OpenAlbum =
   | { kind: 'remote'; card: AlbumCard }
   | { kind: 'library'; album: LibraryAlbum }
@@ -82,6 +91,17 @@ export default function AlbumsPage() {
     staleTime: 5 * 60_000,
   })
   const searchAlbums = isSearching ? searchQuery.data?.albums ?? [] : []
+
+  // The search box searches your own albums too — not just YouTube Music — so an
+  // album you already have surfaces first instead of being hidden behind remote
+  // results.
+  const matchedLibraryAlbums = useMemo(
+    () =>
+      isSearching
+        ? libraryAlbums.filter((a) => albumMatches(a, debouncedQuery))
+        : [],
+    [isSearching, libraryAlbums, debouncedQuery],
+  )
 
   if (open) {
     return (
@@ -126,34 +146,52 @@ export default function AlbumsPage() {
       </div>
 
       {isSearching ? (
-        <section>
-          <SectionHeader title="◉ album results" note="youtube music" />
-          {searchQuery.isLoading && (
-            <div className="font-pixel text-ink-mid">··· searching albums ···</div>
+        <>
+          {matchedLibraryAlbums.length > 0 && (
+            <section className="mb-8">
+              <SectionHeader title="▤ your albums" note="in your library" />
+              <AlbumGrid>
+                {matchedLibraryAlbums.map((a) => (
+                  <LibraryAlbumCard
+                    key={a.key}
+                    album={a}
+                    onOpen={() => setOpen({ kind: 'library', album: a })}
+                  />
+                ))}
+              </AlbumGrid>
+            </section>
           )}
-          {searchQuery.isError && (
-            <div className="font-pixel text-crit">
-              album search failed —{' '}
-              {searchQuery.error instanceof Error
-                ? searchQuery.error.message
-                : 'unknown'}
-            </div>
-          )}
-          {searchQuery.data && searchAlbums.length === 0 && (
-            <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
-              no albums found for "{debouncedQuery}".
-            </div>
-          )}
-          <AlbumGrid>
-            {searchAlbums.map((a) => (
-              <RemoteAlbumCard
-                key={a.album_id}
-                album={a}
-                onOpen={() => setOpen({ kind: 'remote', card: a })}
-              />
-            ))}
-          </AlbumGrid>
-        </section>
+
+          <section>
+            <SectionHeader title="◉ album results" note="youtube music" />
+            {searchQuery.isLoading && (
+              <div className="font-pixel text-ink-mid">··· searching albums ···</div>
+            )}
+            {searchQuery.isError && (
+              <div className="font-pixel text-crit">
+                album search failed —{' '}
+                {searchQuery.error instanceof Error
+                  ? searchQuery.error.message
+                  : 'unknown'}
+              </div>
+            )}
+            {searchQuery.data && searchAlbums.length === 0 && (
+              <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
+                no albums found for "{debouncedQuery}"
+                {matchedLibraryAlbums.length > 0 ? ' on youtube music.' : '.'}
+              </div>
+            )}
+            <AlbumGrid>
+              {searchAlbums.map((a) => (
+                <RemoteAlbumCard
+                  key={a.album_id}
+                  album={a}
+                  onOpen={() => setOpen({ kind: 'remote', card: a })}
+                />
+              ))}
+            </AlbumGrid>
+          </section>
+        </>
       ) : (
         <section>
           <SectionHeader title="▤ your albums" note="grouped from your library" />
@@ -312,7 +350,12 @@ function RemoteAlbumCard({
   )
 }
 
-/** A library album opened up: header + play-all + the owned tracklist. */
+/** A library album opened up. A library album is only the tracks the user owns
+ * grouped by title, so on open we re-resolve it against YouTube Music to show
+ * the *full* tracklist — owned tracks stay playable, the ones not yet in the DB
+ * become downloadable rows. If the resolved album doesn't convincingly contain
+ * the tracks we own, we fall back to the owned-only list (correct, just without
+ * the "missing" rows) rather than risk showing a wrong album. */
 function LibraryAlbumView({
   album,
   onBack,
@@ -321,10 +364,41 @@ function LibraryAlbumView({
   onBack: () => void
 }) {
   const player = useAudioPlayer()
-  const isCurrentAlbum = (t: LibraryItem) =>
-    player.current?.video_id === t.video_id &&
-    player.current?.codec === t.codec &&
-    player.current?.bitrate === t.bitrate
+
+  const resolved = useQuery({
+    queryKey: ['album-resolve', album.key],
+    queryFn: () => api.albumResolve(album.title, album.artist),
+    staleTime: 30 * 60_000,
+    retry: false,
+  })
+
+  const remoteTracks = resolved.data?.tracks ?? []
+  const dbItems = resolved.data?.db ?? []
+  const dbById = useMemo(() => {
+    const m = new Map<string, CatalogItem>()
+    for (const it of dbItems) m.set(it.video_id, it)
+    return m
+  }, [dbItems])
+
+  const ownedVids = useMemo(
+    () => new Set(album.tracks.map((t) => t.video_id)),
+    [album.tracks],
+  )
+  // Trust the resolved tracklist only if it contains *every* track we own —
+  // otherwise the merged view (which renders the resolved list) would silently
+  // drop an owned track that isn't in it. When coverage isn't complete we fall
+  // back to the owned-only list, which is correct, just without "missing" rows.
+  const matchedOwned = remoteTracks.filter((t) => ownedVids.has(t.video_id)).length
+  const confident = remoteTracks.length > 0 && matchedOwned === ownedVids.size
+
+  const missingCount = confident
+    ? remoteTracks.filter((t) => !dbById.has(t.video_id)).length
+    : 0
+
+  const playAlbum = () =>
+    confident && dbItems.length > 0
+      ? player.play(dbItems.map(toLibraryItem), 0)
+      : player.play(album.tracks, 0)
 
   return (
     <section>
@@ -333,14 +407,17 @@ function LibraryAlbumView({
         title={album.title}
         artist={album.artist}
         meta={[
-          `${album.tracks.length} tracks`,
+          confident
+            ? `${ownedVids.size} of ${remoteTracks.length} tracks`
+            : `${album.tracks.length} tracks`,
           album.year ? String(album.year) : null,
+          missingCount > 0 ? `${missingCount} missing` : null,
         ]}
         onBack={onBack}
         actions={
           <button
             type="button"
-            onClick={() => player.play(album.tracks, 0)}
+            onClick={playAlbum}
             className="font-pixel text-xs uppercase tracking-widest px-4 py-2 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
           >
             ▶ play album
@@ -348,39 +425,77 @@ function LibraryAlbumView({
         }
       />
 
-      <ul className="card-vapor rounded-sm divide-y divide-border">
-        {album.tracks.map((t, idx) => (
-          <li
-            key={`${t.video_id}/${t.codec}/${t.bitrate}`}
-            onClick={() => player.play(album.tracks, idx)}
-            className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition ${
-              isCurrentAlbum(t) ? 'bg-hot/10' : 'hover:bg-violet/10'
-            }`}
-          >
-            <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
-              {isCurrentAlbum(t) && player.isPlaying ? (
-                <span className="text-hot">▶</span>
-              ) : (
-                String(idx + 1).padStart(2, '0')
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="font-sans text-sm font-medium text-ink-hi leading-snug truncate">
-                {t.title ?? t.video_id}
-              </div>
-              <div className="text-sm text-ink-lo truncate mt-0.5">
-                {t.artist ?? '—'}
-              </div>
-            </div>
-            {t.duration_sec != null && (
-              <div className="font-pixel text-xs text-ink-lo tabular-nums">
-                {fmtDuration(t.duration_sec)}
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
+      {resolved.isLoading && (
+        <div className="font-pixel text-ink-mid mb-3">
+          ··· finding missing tracks ···
+        </div>
+      )}
+
+      {confident ? (
+        <ul className="card-vapor rounded-sm divide-y divide-border">
+          {remoteTracks.map((t, idx) => {
+            const hit = dbById.get(t.video_id)
+            return hit ? (
+              <CatalogRow
+                key={t.video_id}
+                item={hit}
+                position={idx + 1}
+                allItems={dbItems}
+              />
+            ) : (
+              <ExternalRow key={t.video_id} item={t} position={idx + 1} />
+            )
+          })}
+        </ul>
+      ) : (
+        <OwnedTrackList album={album} />
+      )}
     </section>
+  )
+}
+
+/** The owned-only tracklist for a library album — shown while the full album
+ * resolves, and as the fallback when it can't be matched. */
+function OwnedTrackList({ album }: { album: LibraryAlbum }) {
+  const player = useAudioPlayer()
+  const isCurrentAlbum = (t: LibraryItem) =>
+    player.current?.video_id === t.video_id &&
+    player.current?.codec === t.codec &&
+    player.current?.bitrate === t.bitrate
+
+  return (
+    <ul className="card-vapor rounded-sm divide-y divide-border">
+      {album.tracks.map((t, idx) => (
+        <li
+          key={`${t.video_id}/${t.codec}/${t.bitrate}`}
+          onClick={() => player.play(album.tracks, idx)}
+          className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition ${
+            isCurrentAlbum(t) ? 'bg-hot/10' : 'hover:bg-violet/10'
+          }`}
+        >
+          <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
+            {isCurrentAlbum(t) && player.isPlaying ? (
+              <span className="text-hot">▶</span>
+            ) : (
+              String(idx + 1).padStart(2, '0')
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-sans text-sm font-medium text-ink-hi leading-snug truncate">
+              {t.title ?? t.video_id}
+            </div>
+            <div className="text-sm text-ink-lo truncate mt-0.5">
+              {t.artist ?? '—'}
+            </div>
+          </div>
+          {t.duration_sec != null && (
+            <div className="font-pixel text-xs text-ink-lo tabular-nums">
+              {fmtDuration(t.duration_sec)}
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
   )
 }
 

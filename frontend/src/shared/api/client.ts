@@ -250,6 +250,14 @@ export const api = {
   album: (albumId: string) =>
     json<AlbumDetailResponse>(`/api/albums/${encodeURIComponent(albumId)}`),
 
+  /** Re-find a library album (title-grouped owned tracks, no album id) on
+   *  YouTube Music so the client can show the tracks the user is missing. */
+  albumResolve: (title: string, artist?: string | null) =>
+    json<AlbumDetailResponse>(
+      `/api/albums/resolve?title=${encodeURIComponent(title)}` +
+        (artist ? `&artist=${encodeURIComponent(artist)}` : ''),
+    ),
+
   // ── admin: metadata backfill (offline, from embedded file tags) ──
   adminBackfillMetadata: (
     opts: { onlyMissing?: boolean; overwriteArtist?: boolean } = {},
