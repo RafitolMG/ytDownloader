@@ -252,7 +252,8 @@ body::after {
 @media (prefers-reduced-motion: reduce) {
   body::after { display: none; }
   .caret-blink,
-  .vhs-tracking { animation: none; }
+  .vhs-tracking,
+  .animate-pulse { animation: none; }
 }
 
 /* ============================================================

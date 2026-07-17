@@ -1,5 +1,5 @@
-import { lazy, Suspense } from 'react'
-import { Link, Navigate, Route, Routes } from 'react-router-dom'
+import { lazy, Suspense, useEffect } from 'react'
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import LoginPage from '@/pages/LoginPage'
 import { RequireAuth } from '@/features/auth/RequireAuth'
 import { RequireAdmin } from '@/features/auth/RequireAdmin'
@@ -51,9 +51,20 @@ function RouteFallback() {
   )
 }
 
+/** Reset scroll to the top on each route change — otherwise navigating between
+ * long lists (catalog ↔ playlists) inherits the previous page's scroll offset. */
+function ScrollToTop() {
+  const { pathname } = useLocation()
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [pathname])
+  return null
+}
+
 export function AppRouter() {
   return (
     <Suspense fallback={<RouteFallback />}>
+      <ScrollToTop />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route
