@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
+import { useModalDismiss } from '@/shared/lib/backStack'
 import { Link } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { useToast } from '@/shared/ui/ToastProvider'
@@ -269,6 +270,7 @@ function CreatePlaylistDialog({ onClose }: { onClose: () => void }) {
   const [visibility, setVisibility] = useState<PlaylistVisibility>('private')
   const [description, setDescription] = useState('')
   const qc = useQueryClient()
+  useModalDismiss(onClose)
 
   const showToast = useToast()
   const create = useMutation({
@@ -296,6 +298,9 @@ function CreatePlaylistDialog({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <form
+        role="dialog"
+        aria-modal="true"
+        aria-label="new playlist"
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault()

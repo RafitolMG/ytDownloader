@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
+import { useModalDismiss } from '@/shared/lib/backStack'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { ConfirmButton } from '@/shared/ui/ConfirmButton'
@@ -519,6 +520,7 @@ function EditDialog({
   const [name, setName] = useState(initialName)
   const [description, setDescription] = useState(initialDescription)
   const [visibility, setVisibility] = useState<PlaylistVisibility>(initialVisibility)
+  useModalDismiss(onClose)
 
   const showToast = useToast()
   const save = useMutation({
@@ -543,6 +545,9 @@ function EditDialog({
       onClick={onClose}
     >
       <form
+        role="dialog"
+        aria-modal="true"
+        aria-label="edit playlist"
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault()
