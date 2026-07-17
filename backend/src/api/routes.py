@@ -1165,10 +1165,32 @@ async def progress_ws(websocket: WebSocket, job_id: str):
     Sends a `snapshot` event with the current DB state first, then either:
       - streams live queue events if the job is still running in memory, or
       - closes immediately if the job has reached a terminal state.
+
+    Authenticated like the media endpoints: the web app rides the httponly
+    session cookie (same-origin), the native app appends a media-scoped `mt`
+    token (it can't send the cookie cross-origin). The job row is scoped to its
+    owner (ADMIN sees all), matching every REST job endpoint.
     """
+    # Resolve the caller off the event loop — the cookie path can trigger a
+    # blocking HomeAuth refresh, which must not stall the async loop.
+    try:
+        user = await asyncio.to_thread(
+            media_user,
+            mt=websocket.query_params.get("mt"),
+            ytdl_session=websocket.cookies.get(config.SESSION_COOKIE_NAME),
+        )
+    except HTTPException:
+        await websocket.close(code=4401)  # unauthenticated
+        return
+
     row = db.get(job_id)
     if row is None:
         await websocket.close(code=4004)
+        return
+    try:
+        _ensure_owner(row, user)
+    except HTTPException:
+        await websocket.close(code=4403)  # not the caller's job
         return
 
     await websocket.accept()
