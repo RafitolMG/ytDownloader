@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -135,6 +136,14 @@ def _needs_refresh(session: dict) -> bool:
 _refresh_locks: dict[str, threading.Lock] = {}
 _refresh_locks_guard = threading.Lock()
 
+# Throttle last_seen writes. current_user runs on every authenticated request, so
+# an unthrottled touch turns each cheap read into a serialized write under the
+# global DB write lock. A short per-session cooldown keeps last_seen fresh enough
+# for idle tracking without that write amplification.
+_TOUCH_THROTTLE_SEC = 60.0
+_last_touch: dict[str, float] = {}
+_last_touch_guard = threading.Lock()
+
 
 def _refresh_lock_for(session_id: str) -> threading.Lock:
     with _refresh_locks_guard:
@@ -142,10 +151,22 @@ def _refresh_lock_for(session_id: str) -> threading.Lock:
 
 
 def _drop_refresh_lock(session_id: str) -> None:
-    """Forget the per-session lock once its session is gone, so the map doesn't
-    accumulate an entry per dead session."""
+    """Forget the per-session in-memory bookkeeping once its session is gone, so
+    the maps don't accumulate an entry per dead session."""
     with _refresh_locks_guard:
         _refresh_locks.pop(session_id, None)
+    with _last_touch_guard:
+        _last_touch.pop(session_id, None)
+
+
+def _touch_session_throttled(session_id: str) -> None:
+    """db.touch_session at most once per _TOUCH_THROTTLE_SEC per session."""
+    now = time.monotonic()
+    with _last_touch_guard:
+        if now - _last_touch.get(session_id, 0.0) < _TOUCH_THROTTLE_SEC:
+            return
+        _last_touch[session_id] = now
+    db.touch_session(session_id)
 
 
 def _refresh_if_needed(session: dict) -> dict:
@@ -196,7 +217,7 @@ def current_user(ytdl_session: str | None = Cookie(default=None, alias=config.SE
     if _needs_refresh(session):
         session = _refresh_if_needed(session)
 
-    db.touch_session(session["id"])
+    _touch_session_throttled(session["id"])
 
     return CurrentUser(
         session_id=session["id"],
