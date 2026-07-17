@@ -32,3 +32,16 @@ export function useBackClose(active: boolean, onClose: () => void): void {
     }
   }, [active, onClose])
 }
+
+/** Dismiss wiring for a dialog/overlay that is mounted only while open: the
+ *  hardware back gesture (useBackClose) and the Escape key both call `onClose`. */
+export function useModalDismiss(onClose: () => void): void {
+  useBackClose(true, onClose)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+}
