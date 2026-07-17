@@ -22,6 +22,12 @@ import { resolveArtworkUrl } from '@/shared/lib/thumbnail'
 import { offlineIndex } from '@/features/offline/offlineIndex'
 import { getPlaybackTime, setPlaybackTime } from './playbackStore'
 import { catalogToLibrary } from '@/shared/lib/libraryItem'
+import { useToast } from '@/shared/ui/ToastProvider'
+
+// Skip past this many consecutive unplayable tracks before giving up, so a
+// systemic failure (expired media token, offline, deleted files) stops the
+// player instead of racing through the whole queue skipping every track.
+const MAX_CONSECUTIVE_LOAD_FAILURES = 3
 
 const PLAYER_SNAPSHOT_KEY = 'ytdl.player.v1'
 const PLAYER_POSITION_KEY = 'ytdl.player.position'
@@ -112,6 +118,7 @@ function buildOrder(length: number, startAt: number, shuffle: boolean): number[]
 
 export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
+  const showToast = useToast()
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [queue, setQueue] = useState<LibraryItem[]>([])
   /** Permutation of queue indices. `order[pos]` is the queue index playing. */
@@ -133,6 +140,9 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   const autoplayRef = useRef(true)
   const autoRadioBusyRef = useRef(false)
   const autoRadioSeenRef = useRef<Set<string>>(new Set())
+  // Counts back-to-back track load failures; reset once any track loads. Bounds
+  // the auto-skip so a systemic failure stops rather than skip-storming.
+  const consecutiveFailuresRef = useRef(0)
   const [coverUrl, setCoverUrl] = useState<string | null>(null)
 
   const index = pos >= 0 && pos < order.length ? order[pos] : -1
@@ -694,6 +704,8 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         onTimeUpdate={(e) => setPlaybackTime({ position: e.currentTarget.currentTime })}
         onLoadedMetadata={(e) => {
           const el = e.currentTarget
+          // This track reached the browser → the streak of failures is broken.
+          consecutiveFailuresRef.current = 0
           setPlaybackTime({ duration: el.duration })
           // Resume to the persisted position once metadata (and thus duration)
           // is known. Clamp just shy of the end so it doesn't instantly 'ended'.
@@ -725,6 +737,35 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
             return
           }
           advanceOrReshuffle()
+        }}
+        onError={() => {
+          const el = audioRef.current
+          const cur = current
+          // Ignore spurious errors when nothing is genuinely loaded (e.g. the
+          // src being cleared on stop() fires an error in some browsers).
+          if (!cur || !el || !el.error || !el.currentSrc) return
+          consecutiveFailuresRef.current += 1
+          const title = cur.title || 'this track'
+          if (consecutiveFailuresRef.current >= MAX_CONSECUTIVE_LOAD_FAILURES) {
+            // Whole queue looks unplayable (expired media token, offline, missing
+            // files) — stop instead of skipping through every remaining track.
+            consecutiveFailuresRef.current = 0
+            setIsPlaying(false)
+            showToast({
+              message: `Playback stopped — couldn't load "${title}"`,
+              variant: 'err',
+            })
+            return
+          }
+          showToast({ message: `Couldn't play "${title}" — skipping`, variant: 'err' })
+          // Advance like a natural end-of-track; seed auto-radio at the tail so a
+          // failure on the last track doesn't dead-end the session.
+          const atTail = pos + 1 >= order.length
+          if (atTail && !(shuffle && queue.length > 1) && repeat !== 'all') {
+            void triggerAutoRadio()
+          } else {
+            advanceOrReshuffle()
+          }
         }}
         preload="metadata"
         className="hidden"
