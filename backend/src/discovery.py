@@ -255,11 +255,18 @@ def _discover_feed(
         # so they render as "add to library" (adopt, no re-download) instead of
         # a fresh download row.
         raw_ids = [e.get("id") for e in raw if e.get("id")]
-        already = [
-            it
-            for it in db.list_catalog_by_video_ids(user_id, raw_ids)
-            if it["video_id"] not in known_ids
-        ]
+        # list_catalog_by_video_ids returns one row per (video_id, codec, bitrate),
+        # so a track owned in two codecs comes back twice. Collapse to one row per
+        # video_id (prefer the copy in most libraries, matching _reconcile below)
+        # before extending — otherwise the discover feed lists the same song twice.
+        already_by_vid: dict[str, dict] = {}
+        for it in db.list_catalog_by_video_ids(user_id, raw_ids):
+            if it["video_id"] in known_ids:
+                continue
+            cur = already_by_vid.get(it["video_id"])
+            if cur is None or (it.get("owner_count") or 0) > (cur.get("owner_count") or 0):
+                already_by_vid[it["video_id"]] = it
+        already = list(already_by_vid.values())
         if already:
             db_items.extend(already)
             known_ids.update(it["video_id"] for it in already)
