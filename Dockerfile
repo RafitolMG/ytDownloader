@@ -30,14 +30,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # returns only image (storyboard) formats and any audio/video download fails
 # with "Requested format is not available".
 #
-# yt-dlp-ejs requires Node ≥ 22. Debian bookworm's apt nodejs is 18.x, too old
-# (silently fails with "n challenge solving failed"), so we install Node 22
-# from NodeSource. See https://github.com/yt-dlp/ejs.
+# yt-dlp-ejs requires Node ≥ 22 (bookworm's apt nodejs is 18.x, too old). Copy
+# the Node 22 binary straight from the official image instead of piping
+# NodeSource's install script into bash — no curl|bash supply-chain step and no
+# third-party apt repo/key. Same Debian base (bookworm) as this stage, and the
+# libstdc++6 the binary needs is pulled in by ffmpeg below. yt-dlp only needs the
+# `node` runtime (not npm) to run the bundled challenge JS.
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && apt-get purge -y --auto-remove gnupg \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -48,9 +50,12 @@ RUN pip install -r requirements.txt
 COPY backend/ ./
 COPY --from=frontend-build /build/dist /app/frontend_dist
 
+# Only the data volume needs to be writable by the runtime user; keep the app
+# code + frontend dist root-owned (world-readable) so a runtime compromise can't
+# overwrite the running code and persist across restarts.
 RUN mkdir -p /app/data \
     && useradd --create-home --uid 1000 --shell /usr/sbin/nologin ytdl \
-    && chown -R ytdl:ytdl /app
+    && chown -R ytdl:ytdl /app/data
 
 # The SQLite DB (sessions, play history, catalog metadata) lives in /app/data.
 # Back this path with persistent storage in Coolify (Service → Storage →
@@ -62,7 +67,8 @@ USER ytdl
 
 EXPOSE 9877
 
+# Probe with the Python already in the image (curl is no longer installed).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:9877/api/auth/config || exit 1
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9877/api/auth/config').status==200 else 1)"]
 
 CMD ["python", "main.py"]
