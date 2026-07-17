@@ -296,7 +296,16 @@ export function ActivityRow({
   })
   return (
     <li
+      role="button"
+      tabIndex={0}
+      aria-label={`play ${item.title ?? item.video_id}`}
       onClick={() => player.play(queue.map(toLib), index)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          player.play(queue.map(toLib), index)
+        }
+      }}
       className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer hover:bg-violet/10 transition"
     >
       <div className="relative w-12 sm:w-14 aspect-video flex-shrink-0 rounded-xs overflow-hidden border border-border bg-page-mid">

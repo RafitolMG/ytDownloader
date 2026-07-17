@@ -45,7 +45,6 @@ def _get_client():
     with _lock:
         if _client_tried:
             return _client
-        _client_tried = True
         try:
             from ytmusicapi import YTMusic
 
@@ -53,6 +52,9 @@ def _get_client():
         except Exception as e:  # import error, network, etc.
             log.warning("ytmusicapi client unavailable: %s", e)
             _client = None
+        # Flip the flag only after _client is assigned, so a concurrent lock-free
+        # reader on the fast path can't observe tried=True with _client still None.
+        _client_tried = True
         return _client
 
 

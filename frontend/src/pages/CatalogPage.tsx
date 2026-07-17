@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
+import { useBackClose } from '@/shared/lib/backStack'
 import { api } from '@/shared/api/client'
 import type {
   CatalogItem,
@@ -93,6 +94,17 @@ export default function CatalogPage() {
     setActiveRadio(item)
   }
 
+  // Drill-downs are local state, not routes, so wire the Android/browser back
+  // gesture to pop them back to browse-home first (instead of leaving the page).
+  const inDrillDown =
+    activeCategory !== null || activeMix !== null || activeRadio !== null
+  const closeDrillDown = useCallback(() => {
+    setActiveCategory(null)
+    setActiveMix(null)
+    setActiveRadio(null)
+  }, [])
+  useBackClose(inDrillDown, closeDrillDown)
+
   const recentQuery = useQuery({
     queryKey: ['recent'],
     queryFn: () => api.recentPlays(20),
@@ -170,6 +182,13 @@ export default function CatalogPage() {
           </div>
         </div>
 
+        {browseHome &&
+          (dailyMixesQuery.isError || recentQuery.isError || categoriesQuery.isError) && (
+            <div className="font-pixel text-sm text-crit mb-4">
+              ⚠ some of your home feeds couldn't load — check your connection.
+            </div>
+          )}
+
         <div className="card-vapor rounded-sm p-3 mb-6 flex items-center gap-3 font-pixel">
           <span className="text-cool text-xl">⌕</span>
           <input
@@ -187,6 +206,7 @@ export default function CatalogPage() {
               type="button"
               onClick={() => setQuery('')}
               className="text-sm uppercase tracking-widest px-2 py-1 border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 transition rounded-xs"
+              aria-label="clear search"
               title="clear search"
             >
               ✕

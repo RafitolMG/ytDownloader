@@ -7,10 +7,12 @@ raw session id there is dangerous: a URL query param lands in access logs,
 Referer headers and proxy history, and the session id IS the full session
 credential — a leak is a full account takeover.
 
-Instead we hand out an HMAC-signed token that (a) carries only user_id/username/
-role plus an expiry, (b) is scoped to media use ("p":"media"), and (c) expires
-quickly. A leak grants at most short-lived media access and can never be replayed
-as a session cookie.
+Instead we hand out an HMAC-signed token that (a) is bound to the session that
+requested it (the `sid` claim), (b) is scoped to media use ("p":"media"), and
+(c) expires quickly. It carries no identity/role of its own — the caller is
+resolved from the live session row at use time — so logout (session deleted)
+and role changes take effect immediately, and a leak grants at most short-lived
+media access that dies with the session and can never be replayed as a cookie.
 
 Format: `<base64url(payload)>.<base64url(hmac_sha256)>`.
 """
@@ -43,14 +45,15 @@ def _sign(body: str) -> str:
     return _b64e(hmac.new(_SECRET, body.encode(), hashlib.sha256).digest())
 
 
-def mint(user_id: str, username: str, role: str) -> tuple[str, int]:
-    """Return (token, expires_in_seconds) for a media-scoped token."""
+def mint(user_id: str, session_id: str) -> tuple[str, int]:
+    """Return (token, expires_in_seconds) for a media-scoped token bound to the
+    session that requested it. `uid` is informational (logging); authorization
+    is done against the live session identified by `sid` at verify time."""
     ttl = config.MEDIA_TOKEN_TTL_SEC
     payload = {
         "p": "media",
         "uid": user_id,
-        "un": username,
-        "r": role,
+        "sid": session_id,
         "exp": int(time.time()) + ttl,
     }
     body = _b64e(json.dumps(payload, separators=(",", ":")).encode())
@@ -58,7 +61,9 @@ def mint(user_id: str, username: str, role: str) -> tuple[str, int]:
 
 
 def verify(token: str) -> dict | None:
-    """Return the claims dict for a valid, unexpired media token, else None."""
+    """Return the claims dict for a valid, unexpired, session-bound media token,
+    else None. A token without a `sid` (malformed or minted by an older build)
+    is rejected so it can't be used unbound."""
     try:
         body, sig = token.split(".", 1)
     except ValueError:
@@ -70,6 +75,8 @@ def verify(token: str) -> dict | None:
     except Exception:
         return None
     if payload.get("p") != "media":
+        return None
+    if not payload.get("sid"):
         return None
     if int(payload.get("exp", 0)) < int(time.time()):
         return None

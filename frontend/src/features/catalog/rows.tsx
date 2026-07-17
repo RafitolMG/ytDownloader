@@ -7,6 +7,7 @@ import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { AddToPlaylistMenu } from '@/features/playlists/AddToPlaylistMenu'
 import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
+import { useToast } from '@/shared/ui/ToastProvider'
 import { useRadio } from './RadioContext'
 import { useExternalDownload } from './useExternalDownload'
 import { toPreviewItem } from './lib'
@@ -26,6 +27,7 @@ export const CatalogRow = memo(function CatalogRow({
   const player = useAudioPlayer()
   const queryClient = useQueryClient()
   const openRadio = useRadio()
+  const showToast = useToast()
 
   const toggleLibrary = useMutation({
     // The two branches return different literal `owned` types; widen to a
@@ -40,6 +42,11 @@ export const CatalogRow = memo(function CatalogRow({
       queryClient.invalidateQueries({ queryKey: ['discover'] })
       queryClient.invalidateQueries({ queryKey: ['library'] })
     },
+    onError: () =>
+      showToast({
+        message: item.is_owned ? "couldn't remove from your library" : "couldn't save to your library",
+        variant: 'err',
+      }),
   })
 
   const isCurrent =
@@ -287,8 +294,9 @@ export const ExternalRow = memo(function ExternalRow({
         onClick={() =>
           isPreviewing ? player.togglePlay() : player.play([toPreviewItem(item)])
         }
+        aria-label={isPreviewing ? 'stop preview' : 'preview'}
         title="preview without downloading"
-        className={`font-pixel text-sm w-8 h-8 flex items-center justify-center border rounded-xs transition ${
+        className={`font-pixel text-sm w-9 h-9 flex items-center justify-center border rounded-xs transition ${
           isPreviewing
             ? 'border-hot text-hot bg-hot/10 shadow-[var(--shadow-glow-hot)]'
             : 'border-border text-ink-mid hover:text-hot hover:border-hot/60'
@@ -301,6 +309,7 @@ export const ExternalRow = memo(function ExternalRow({
         type="button"
         onClick={dl.start}
         disabled={dl.isPending}
+        aria-label="download to catalog"
         title="download mp3 · 320 and add to the catalog"
         className="font-pixel text-sm flex items-center gap-1 px-2 py-1 border rounded-xs transition disabled:opacity-50 border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)]"
       >

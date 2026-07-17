@@ -9,17 +9,28 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 
-from src import config, db, homeauth, media_token as media_token_mod
+from src import auth, config, db, homeauth, media_token as media_token_mod, rate_limit
 from src.auth import CurrentUser, current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 log = logging.getLogger(__name__)
+
+# Brute-force throttles for /login (see config for rationale). Per-account keys
+# the submitted identifier; the global limiter (key "*") bounds username-rotation
+# spraying that would slip past any single per-account key.
+_login_limiter = rate_limit.SlidingWindowLimiter(
+    config.LOGIN_RATELIMIT_MAX, config.LOGIN_RATELIMIT_WINDOW_SEC
+)
+_login_global_limiter = rate_limit.SlidingWindowLimiter(
+    config.LOGIN_RATELIMIT_GLOBAL_MAX, config.LOGIN_RATELIMIT_WINDOW_SEC
+)
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -77,6 +88,18 @@ def login(body: LoginRequest, response: Response):
     """
     Exchange credentials → HomeAuth login → server-side session row → set ytdl_session cookie.
     """
+    # Throttle before touching HomeAuth so a brute-force is both rejected here and
+    # never forwarded upstream. Key on the account (not client IP — the proxy
+    # collapses every client to one IP) plus a global cap.
+    ident = body.usernameOrEmail.strip().lower()
+    ok_global, retry_g = _login_global_limiter.check("*")
+    ok_account, retry_a = _login_limiter.check(ident)
+    if not ok_global or not ok_account:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too many login attempts — try again in a moment",
+            headers={"Retry-After": str(max(retry_g, retry_a))},
+        )
     try:
         result = homeauth.login(body.usernameOrEmail, body.password)
     except homeauth.HomeAuthError as e:
@@ -86,6 +109,10 @@ def login(body: LoginRequest, response: Response):
                 detail="auth service unreachable",
             ) from e
         if e.status_code == 401:
+            # Add a small delay on a bad credential to slow guessing that stays
+            # under the rate cap (runs in the threadpool, off the event loop).
+            if config.LOGIN_FAIL_DELAY_SEC > 0:
+                time.sleep(config.LOGIN_FAIL_DELAY_SEC)
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials") from e
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
@@ -111,6 +138,9 @@ def logout(response: Response, user: CurrentUser = Depends(current_user)):
     if session is not None:
         homeauth.logout(session.get("refresh_cookie"))
         db.delete_session(user.session_id)
+    # Forget the per-session refresh lock too — delete_session drops the row but
+    # the in-memory lock map would otherwise keep an entry per logged-out session.
+    auth._drop_refresh_lock(user.session_id)
     _clear_session_cookie(response)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -132,7 +162,7 @@ def media_token(user: CurrentUser = Depends(current_user)):
     session id: it's HMAC-signed, carries only user/role + an expiry, and dies on
     its own, so a leaked media URL can't be replayed as a session. The client
     re-fetches before it expires. The web app never calls this (cookie suffices)."""
-    token, expires_in = media_token_mod.mint(user.user_id, user.username, user.role)
+    token, expires_in = media_token_mod.mint(user.user_id, user.session_id)
     return {"token": token, "expires_in": expires_in}
 
 

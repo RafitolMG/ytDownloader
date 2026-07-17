@@ -236,7 +236,7 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
                       onClick={() => p.removeFromQueueAt(orderPos)}
                       title="remove from queue"
                       aria-label="remove from queue"
-                      className="focus-vis font-pixel text-sm w-6 h-6 flex items-center justify-center text-ink-lo hover:text-crit transition"
+                      className="focus-vis font-pixel text-sm w-8 h-8 flex items-center justify-center text-ink-lo hover:text-crit transition"
                     >
                       {G.close}
                     </button>

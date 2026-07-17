@@ -50,10 +50,17 @@ export function apiUrl(path: string): string {
   return path.startsWith('/') ? API_BASE + path : path
 }
 
-/** Build a WebSocket URL. Same-origin on the web; derived from API_BASE
- *  (http→ws, https→wss) in the native build. */
+/** Build a WebSocket URL. Same-origin on the web (the httponly session cookie
+ *  rides along); derived from API_BASE (http→ws, https→wss) in the native build,
+ *  where the WebView can't send that cookie cross-origin so we append the same
+ *  media-scoped `mt` token used for <audio>/download. */
 export function wsUrl(path: string): string {
-  if (IS_REMOTE) return API_BASE.replace(/^http/, 'ws') + path
+  if (IS_REMOTE) {
+    const authed = mediaToken
+      ? `${path}${path.includes('?') ? '&' : '?'}mt=${encodeURIComponent(mediaToken)}`
+      : path
+    return API_BASE.replace(/^http/, 'ws') + authed
+  }
   const loc = window.location
   const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${loc.host}${path}`

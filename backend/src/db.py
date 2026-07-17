@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -521,32 +521,46 @@ def update_session_tokens(
     access_token: str,
     access_expires_at: str,
     refresh_cookie: str | None = None,
+    role: str | None = None,
+    username: str | None = None,
 ) -> None:
+    # Column names are fixed literals (never user input), so interpolating the
+    # SET clause is safe; every value is still bound. role/username are updated
+    # only when supplied, so a refresh re-syncs the identity HomeAuth returns.
+    fields: list[str] = ["access_token = ?", "access_expires_at = ?", "last_seen_at = ?"]
+    params: list[Any] = [access_token, access_expires_at, _now()]
+    if refresh_cookie is not None:
+        fields.append("refresh_cookie = ?")
+        params.append(refresh_cookie)
+    if role is not None:
+        fields.append("role = ?")
+        params.append(role)
+    if username is not None:
+        fields.append("username = ?")
+        params.append(username)
+    params.append(session_id)
     with _write() as conn:
-        if refresh_cookie is not None:
-            conn.execute(
-                """
-                UPDATE sessions
-                   SET access_token = ?, access_expires_at = ?,
-                       refresh_cookie = ?, last_seen_at = ?
-                 WHERE id = ?
-                """,
-                (access_token, access_expires_at, refresh_cookie, _now(), session_id),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE sessions
-                   SET access_token = ?, access_expires_at = ?, last_seen_at = ?
-                 WHERE id = ?
-                """,
-                (access_token, access_expires_at, _now(), session_id),
-            )
+        conn.execute(
+            f"UPDATE sessions SET {', '.join(fields)} WHERE id = ?",
+            params,
+        )
 
 
 def delete_session(session_id: str) -> None:
     with _write() as conn:
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+
+def delete_expired_sessions(max_age_days: int) -> int:
+    """Delete session rows past their absolute lifetime (by created_at) and
+    return how many were removed. Timestamps are UTC ISO-8601 at seconds
+    precision, so a lexicographic `<` against the cutoff is monotonic in time.
+    Keeps the sessions table (which holds live refresh credentials) from growing
+    without bound and stops an expired cookie leaving a usable session behind."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
+    with _write() as conn:
+        cur = conn.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
+        return cur.rowcount
 
 
 # ── Music library ────────────────────────────────────────────────────────────
@@ -1050,15 +1064,18 @@ def list_tracks_by_artist(
     sides in the ", " delimiter) — that way "Lola Indigo" still matches a track
     stored as "Lola Indigo, La Zowi". A full joined anchor string matches too."""
     conn = _get_conn()
+    # Escape LIKE wildcards so an artist name containing % or _ matches literally
+    # rather than as a pattern (e.g. "50%" must not match "5000").
+    artist_esc = artist.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     rows = conn.execute(
         f"""
         SELECT {_TRACK_COLS}
           FROM tracks t
-         WHERE (', ' || t.artist || ', ') LIKE ('%, ' || ? || ', %') COLLATE NOCASE
+         WHERE (', ' || t.artist || ', ') LIKE ('%, ' || ? || ', %') ESCAPE '\\' COLLATE NOCASE
          ORDER BY t.downloaded_at DESC
          LIMIT ?
         """,
-        (viewer_id, artist, limit),
+        (viewer_id, artist_esc, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 

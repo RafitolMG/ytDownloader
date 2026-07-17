@@ -138,9 +138,9 @@ export default function ImportPage() {
             rows={6}
             spellCheck={false}
             placeholder={
-              'Pega una playlist pública de Spotify…\n' +
+              'Paste a public Spotify playlist…\n' +
               'https://open.spotify.com/playlist/…\n\n' +
-              '…o una lista:  Artista - Título  (una por línea)\n' +
+              '…or a list:  Artist - Title  (one per line)\n' +
               'Quevedo - Columbia\n' +
               'Rosalía - Despechá'
             }
@@ -148,8 +148,8 @@ export default function ImportPage() {
           />
           <div className="mt-3 flex items-center justify-between gap-3 flex-wrap">
             <p className="font-pixel text-[0.7rem] text-ink-lo leading-snug">
-              URL de Spotify → hasta 100 · lista/CSV → sin límite. Cada tema se
-              busca en YouTube Music y se descarga.
+              Spotify URL → up to 100 · list/CSV → unlimited. Each track is
+              looked up on YouTube Music and downloaded.
             </p>
             <div className="flex items-center gap-2 flex-wrap">
               <label
@@ -159,7 +159,7 @@ export default function ImportPage() {
                     : 'cursor-pointer hover:bg-violet/10 hover:shadow-[var(--shadow-glow-violet)]'
                 }`}
               >
-                ▤ subir csv
+                ▤ upload csv
                 <input
                   type="file"
                   accept=".csv,text/csv,text/plain"
@@ -193,12 +193,12 @@ export default function ImportPage() {
                 {playlistName ?? 'importing…'}
                 {capped && (
                   <span className="ml-2 font-pixel text-[0.65rem] text-sun">
-                    ⚠ primeras 100
+                    ⚠ first 100
                   </span>
                 )}
               </div>
               <div className="font-pixel text-xs text-ink-lo tabular-nums">
-                {total > 0 ? `${total} temas` : ''}
+                {total > 0 ? `${total} tracks` : ''}
               </div>
             </div>
 
@@ -216,15 +216,15 @@ export default function ImportPage() {
             )}
 
             <div className="flex items-center gap-3 flex-wrap font-pixel text-xs">
-              <span className="text-cool">✓ {counts.imported} nuevas</span>
-              {counts.reused > 0 && <span className="text-violet">↺ {counts.reused} ya tenías</span>}
-              {counts.no_match > 0 && <span className="text-sun">✕ {counts.no_match} sin match</span>}
-              {counts.skipped > 0 && <span className="text-crit">⚠ {counts.skipped} fallidas</span>}
+              <span className="text-cool">✓ {counts.imported} new</span>
+              {counts.reused > 0 && <span className="text-violet">↺ {counts.reused} already had</span>}
+              {counts.no_match > 0 && <span className="text-sun">✕ {counts.no_match} no match</span>}
+              {counts.skipped > 0 && <span className="text-crit">⚠ {counts.skipped} failed</span>}
             </div>
 
             {phase === 'done' && (
               <div className="mt-3 font-pixel text-xs text-cool uppercase tracking-widest">
-                ✓ import completo
+                ✓ import complete
               </div>
             )}
           </section>
@@ -233,7 +233,7 @@ export default function ImportPage() {
         {skips.length > 0 && (
           <section className="card-vapor rounded-sm p-4 sm:p-5">
             <div className="font-pixel text-xs text-sun uppercase tracking-[0.2em] mb-2">
-              // sin match / fallidas ({skips.length})
+              // no match / failed ({skips.length})
             </div>
             <ul className="divide-y divide-border/60">
               {skips.map((s, i) => (

@@ -76,6 +76,20 @@ export async function toPlayableUrl(relPath: string): Promise<string> {
   return Capacitor.convertFileSrc(uri)
 }
 
+/** Read a downloaded cover off disk as a base64 `data:` URL (native only). The
+ *  media-session plugin's native loader can't fetch a capacitor_file URL, so it
+ *  needs the bytes inline; returns null when there's no local cover. */
+export async function readCoverDataUrl(videoId: string): Promise<string | null> {
+  if (!Capacitor.isNativePlatform()) return null
+  try {
+    const { data } = await Filesystem.readFile({ path: coverRel(videoId), directory: DIR })
+    // Binary reads (no Encoding) come back base64-encoded on native.
+    return typeof data === 'string' ? `data:image/jpeg;base64,${data}` : null
+  } catch {
+    return null // no local cover for this video
+  }
+}
+
 /** Stream a track's audio (and best-effort its cover) to disk. Returns the
  *  relative paths + audio byte size; throws if the audio download fails. */
 export async function downloadTrackFiles(
