@@ -29,8 +29,9 @@ The backend reads these env vars (defaults in parentheses):
 |---|---|
 | `HOMEAUTH_BASE_URL` (`http://localhost:8080`) | Where HomeAuth lives. |
 | `HOMEAUTH_APP_API_KEY` | **Required.** API key issued from the HomeAuth admin panel (`/admin/applications`). Only used server-to-server for `/auth/validate-token`. Never exposed to the browser. |
+| `APP_ENV` (`development`) | Set to `production` in prod. Fails the boot unless `SESSION_COOKIE_SECURE=true` and refuses `DEV_AUTH_BYPASS`, so a forgotten flag can't expose the backend. |
 | `SESSION_COOKIE_NAME` (`ytdl_session`) | Cookie name issued by this backend to the browser. |
-| `SESSION_COOKIE_SECURE` (`false`) | Set to `true` when serving over HTTPS. |
+| `SESSION_COOKIE_SECURE` (`false`) | Set to `true` when serving over HTTPS. **Required (and enforced at boot) when `APP_ENV=production`.** |
 | `SESSION_COOKIE_SAMESITE` (`lax`) | `lax` (default) or `strict`. |
 | `SESSION_TTL_DAYS` (`7`) | Lifetime of the cookie; refresh-cookie expiry on HomeAuth side matches. |
 | `ACCESS_REFRESH_LEEWAY_SEC` (`60`) | Refresh the access token when it has less than this many seconds left. |
@@ -104,7 +105,8 @@ In Coolify:
    | `HOMEAUTH_BASE_URL` | `http://home-auth:9876` | **Internal** URL — service name when HomeAuth lives in the same Coolify project. Used server-to-server, never reaches the browser. |
    | `HOMEAUTH_PUBLIC_URL` | `https://auth.tudominio.com` | **Public** URL the browser uses (e.g. for the "Register" link). Required when `BASE_URL` is an internal hostname the browser can't resolve. |
    | `HOMEAUTH_APP_API_KEY` | `…` | API key from HomeAuth `/admin/applications`. |
-   | `SESSION_COOKIE_SECURE` | `true` | Required once Traefik gives you HTTPS. |
+   | `APP_ENV` | `production` | Enforces the prod posture at boot: requires `SESSION_COOKIE_SECURE=true`, refuses `DEV_AUTH_BYPASS`. |
+   | `SESSION_COOKIE_SECURE` | `true` | Required once Traefik gives you HTTPS (enforced when `APP_ENV=production`). |
    | `SESSION_COOKIE_SAMESITE` | `lax` | `strict` if you don't need cross-site embeds. |
    | `FRONTEND_ORIGIN` | *(leave empty)* | Same-origin in this topology; CORS disabled. |
 

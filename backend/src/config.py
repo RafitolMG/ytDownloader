@@ -58,15 +58,31 @@ FRONTEND_ORIGIN: str = _env("FRONTEND_ORIGIN", "").rstrip("/")
 # backend gets ADMIN. The startup banner logs a loud warning when enabled.
 DEV_AUTH_BYPASS: bool = _env_bool("DEV_AUTH_BYPASS", False)
 
+# Explicit production marker. Set APP_ENV=production in prod (Coolify) so the
+# backend enforces its security posture at boot instead of relying on the
+# operator to remember individual flags. Anything else (default) = dev.
+APP_ENV: str = _env("APP_ENV", "development").lower()
+IS_PRODUCTION: bool = APP_ENV == "production"
+
 # Fail closed: DEV_AUTH_BYPASS disables auth entirely (every request is ADMIN),
-# so it must never run with a production posture. SESSION_COOKIE_SECURE is the
-# prod marker (production must enable it), so refuse to start in that combo
-# rather than silently serving an open backend.
-if DEV_AUTH_BYPASS and SESSION_COOKIE_SECURE:
+# so it must never run with a production posture. Refuse to start when it is on
+# together with either explicit-prod (APP_ENV=production) or the SECURE-cookie
+# prod marker, rather than silently serving an open backend.
+if DEV_AUTH_BYPASS and (IS_PRODUCTION or SESSION_COOKIE_SECURE):
     raise RuntimeError(
-        "DEV_AUTH_BYPASS is enabled together with SESSION_COOKIE_SECURE "
-        "(a production setting). This would expose the backend with no auth. "
-        "Refusing to start — unset DEV_AUTH_BYPASS in production."
+        "DEV_AUTH_BYPASS is enabled in a production posture "
+        "(APP_ENV=production or SESSION_COOKIE_SECURE=true). This would expose "
+        "the backend with no auth. Refusing to start — unset DEV_AUTH_BYPASS."
+    )
+
+# In production the session cookie must be Secure (HTTPS-only); otherwise a
+# stray cleartext request leaks the full session credential. Enforce it at boot
+# rather than trusting the operator to set SESSION_COOKIE_SECURE=true by hand.
+if IS_PRODUCTION and not SESSION_COOKIE_SECURE:
+    raise RuntimeError(
+        "APP_ENV=production requires SESSION_COOKIE_SECURE=true so the session "
+        "cookie is only sent over HTTPS. Refusing to start — set it (the app is "
+        "always deployed behind TLS)."
     )
 
 # Music library — content-addressed audio storage. Every track downloaded as
