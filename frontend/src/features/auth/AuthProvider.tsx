@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   ApiError,
   api,
@@ -59,6 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUserState] = useState<AuthedUser | null>(readCachedUser)
   const [loading, setLoading] = useState(true)
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
   // Keep the persisted copy in lockstep with in-memory user.
   const setUser = useCallback((u: AuthedUser | null) => {
@@ -101,10 +103,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(
     async (usernameOrEmail: string, password: string) => {
       const u = await api.login(usernameOrEmail, password)
+      // Drop any cached queries from a previous account before showing this one —
+      // React Query keys aren't user-scoped, so without this a second user on a
+      // shared device would briefly see the first user's library/playlists/etc.
+      queryClient.clear()
       setUser(u as AuthedUser)
       await ensureMediaToken(true)
     },
-    [setUser],
+    [setUser, queryClient],
   )
 
   const logout = useCallback(async () => {
@@ -115,17 +121,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     clearMediaToken()
     setUser(null)
+    queryClient.clear()
     navigate('/login', { replace: true })
-  }, [navigate, setUser])
+  }, [navigate, setUser, queryClient])
 
   // Wire the global 401 handler — when any API call gets a 401, redirect to /login.
   useEffect(() => {
     setUnauthorizedHandler(() => {
       setUser(null)
+      queryClient.clear()
       navigate('/login', { replace: true })
     })
     return () => setUnauthorizedHandler(null)
-  }, [navigate, setUser])
+  }, [navigate, setUser, queryClient])
 
   const value = useMemo<AuthState>(
     () => ({ user, loading, login, logout }),
