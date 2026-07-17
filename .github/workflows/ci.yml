@@ -19,7 +19,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: setup node 22
         uses: actions/setup-node@v4
@@ -42,7 +42,7 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: setup python 3.12
         uses: actions/setup-python@v5
@@ -90,7 +90,7 @@ jobs:
     name: docker · build image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Build the production image so a broken Dockerfile fails CI here instead
       # of mid-deploy on Coolify. No push.
       - name: build image
