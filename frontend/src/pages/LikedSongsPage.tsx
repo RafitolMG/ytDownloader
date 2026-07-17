@@ -139,6 +139,7 @@ export default function LikedSongsPage() {
               type="button"
               onClick={() => setQuery('')}
               className="text-sm uppercase tracking-widest px-2 py-1 border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 transition rounded-xs"
+              aria-label="clear search"
               title="clear search"
             >
               ✕
@@ -339,6 +340,7 @@ function LikedRow({
           }
         }}
         disabled={remove.isPending}
+        aria-label="remove from liked songs"
         title="remove from liked"
         className="font-pixel text-base w-10 h-10 flex items-center justify-center border border-transparent text-hot hover:text-crit hover:border-crit/60 disabled:opacity-30 transition rounded-xs"
       >

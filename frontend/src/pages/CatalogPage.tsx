@@ -206,6 +206,7 @@ export default function CatalogPage() {
               type="button"
               onClick={() => setQuery('')}
               className="text-sm uppercase tracking-widest px-2 py-1 border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 transition rounded-xs"
+              aria-label="clear search"
               title="clear search"
             >
               ✕
