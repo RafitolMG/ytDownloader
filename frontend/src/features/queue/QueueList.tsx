@@ -52,7 +52,17 @@ export function QueueList() {
         <div className="font-pixel text-ink-mid">// loading history…</div>
       )}
 
-      {!jobsQuery.isLoading && filtered.length === 0 && (
+      {jobsQuery.isError && jobs.length === 0 && (
+        <div className="card-vapor rounded-sm p-8 text-center font-pixel text-crit">
+          <div className="text-2xl mb-2">⚠</div>
+          <div>
+            couldn't load the queue:{' '}
+            {jobsQuery.error instanceof Error ? jobsQuery.error.message : 'unknown'}
+          </div>
+        </div>
+      )}
+
+      {!jobsQuery.isLoading && !jobsQuery.isError && filtered.length === 0 && (
         <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-mid">
           <div className="text-2xl mb-2">∅</div>
           <div>no jobs match the filter</div>
