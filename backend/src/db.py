@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -549,6 +549,18 @@ def update_session_tokens(
 def delete_session(session_id: str) -> None:
     with _write() as conn:
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+
+def delete_expired_sessions(max_age_days: int) -> int:
+    """Delete session rows past their absolute lifetime (by created_at) and
+    return how many were removed. Timestamps are UTC ISO-8601 at seconds
+    precision, so a lexicographic `<` against the cutoff is monotonic in time.
+    Keeps the sessions table (which holds live refresh credentials) from growing
+    without bound and stops an expired cookie leaving a usable session behind."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
+    with _write() as conn:
+        cur = conn.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
+        return cur.rowcount
 
 
 # ── Music library ────────────────────────────────────────────────────────────

@@ -250,6 +250,17 @@ async def _reaper_loop() -> None:
             await asyncio.to_thread(_reap_jobs_once)
         except Exception:
             traceback.print_exc()
+        try:
+            reaped = await asyncio.to_thread(
+                db.delete_expired_sessions, config.SESSION_TTL_DAYS
+            )
+            if reaped:
+                import logging
+                logging.getLogger("uvicorn.error").info(
+                    "reaped %d expired session(s)", reaped
+                )
+        except Exception:
+            traceback.print_exc()
 
 
 # ── Request models ────────────────────────────────────────────────────────────
