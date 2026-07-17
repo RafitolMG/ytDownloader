@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react'
-import { Navigate, Route, Routes } from 'react-router-dom'
+import { Link, Navigate, Route, Routes } from 'react-router-dom'
 import LoginPage from '@/pages/LoginPage'
 import { RequireAuth } from '@/features/auth/RequireAuth'
 import { RequireAdmin } from '@/features/auth/RequireAdmin'
@@ -18,6 +18,27 @@ const StatsPage = lazy(() => import('@/pages/StatsPage'))
 const ImportPage = lazy(() => import('@/pages/ImportPage'))
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
 const AdminPage = lazy(() => import('@/pages/AdminPage'))
+
+/** Catch-all for unknown URLs (typo, stale bookmark) — a themed 404 with a way
+ * home, instead of rendering nothing inside <Routes>. */
+function NotFound() {
+  return (
+    <div className="relative z-10 min-h-[70vh] flex flex-col items-center justify-center text-center px-6 gap-5">
+      <div className="font-pixel text-6xl sm:text-7xl text-hot [text-shadow:var(--shadow-glow-hot)]">
+        404
+      </div>
+      <div className="font-pixel text-sm uppercase tracking-[0.3em] text-ink-mid">
+        ░▒▓ lost in the void ▓▒░
+      </div>
+      <Link
+        to="/"
+        className="font-pixel text-sm uppercase tracking-widest px-4 py-1.5 border border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)] transition rounded-xs"
+      >
+        ◀ back to base
+      </Link>
+    </div>
+  )
+}
 
 /** Themed splash while a route chunk loads — beats a blank flash on first nav. */
 function RouteFallback() {
@@ -128,6 +149,8 @@ export function AppRouter() {
             </RequireAdmin>
           }
         />
+        {/* Unknown URL → themed 404 (public: no auth gate needed to say "not found"). */}
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </Suspense>
   )
