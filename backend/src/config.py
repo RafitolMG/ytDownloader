@@ -44,7 +44,10 @@ ACCESS_REFRESH_LEEWAY_SEC: int = int(_env("ACCESS_REFRESH_LEEWAY_SEC", "60"))
 # the backend generates a per-process secret (fine for the single-box default,
 # but a restart invalidates outstanding tokens until the client re-fetches).
 MEDIA_TOKEN_SECRET: str = _env("MEDIA_TOKEN_SECRET", "")
-MEDIA_TOKEN_TTL_SEC: int = int(_env("MEDIA_TOKEN_TTL_SEC", "21600"))  # 6h
+# Bound to a session (see media_token.py), so logout revokes it immediately; the
+# TTL is now just a backstop and re-fetch cadence, kept short. The web client
+# re-fetches ahead of expiry and AuthProvider polls it while signed in.
+MEDIA_TOKEN_TTL_SEC: int = int(_env("MEDIA_TOKEN_TTL_SEC", "3600"))  # 1h
 
 # CORS allow-list for the SPA dev server. Leave empty (or unset) in production
 # when the backend serves the SPA from the same origin — CORS is a no-op then.
@@ -55,15 +58,31 @@ FRONTEND_ORIGIN: str = _env("FRONTEND_ORIGIN", "").rstrip("/")
 # backend gets ADMIN. The startup banner logs a loud warning when enabled.
 DEV_AUTH_BYPASS: bool = _env_bool("DEV_AUTH_BYPASS", False)
 
+# Explicit production marker. Set APP_ENV=production in prod (Coolify) so the
+# backend enforces its security posture at boot instead of relying on the
+# operator to remember individual flags. Anything else (default) = dev.
+APP_ENV: str = _env("APP_ENV", "development").lower()
+IS_PRODUCTION: bool = APP_ENV == "production"
+
 # Fail closed: DEV_AUTH_BYPASS disables auth entirely (every request is ADMIN),
-# so it must never run with a production posture. SESSION_COOKIE_SECURE is the
-# prod marker (production must enable it), so refuse to start in that combo
-# rather than silently serving an open backend.
-if DEV_AUTH_BYPASS and SESSION_COOKIE_SECURE:
+# so it must never run with a production posture. Refuse to start when it is on
+# together with either explicit-prod (APP_ENV=production) or the SECURE-cookie
+# prod marker, rather than silently serving an open backend.
+if DEV_AUTH_BYPASS and (IS_PRODUCTION or SESSION_COOKIE_SECURE):
     raise RuntimeError(
-        "DEV_AUTH_BYPASS is enabled together with SESSION_COOKIE_SECURE "
-        "(a production setting). This would expose the backend with no auth. "
-        "Refusing to start — unset DEV_AUTH_BYPASS in production."
+        "DEV_AUTH_BYPASS is enabled in a production posture "
+        "(APP_ENV=production or SESSION_COOKIE_SECURE=true). This would expose "
+        "the backend with no auth. Refusing to start — unset DEV_AUTH_BYPASS."
+    )
+
+# In production the session cookie must be Secure (HTTPS-only); otherwise a
+# stray cleartext request leaks the full session credential. Enforce it at boot
+# rather than trusting the operator to set SESSION_COOKIE_SECURE=true by hand.
+if IS_PRODUCTION and not SESSION_COOKIE_SECURE:
+    raise RuntimeError(
+        "APP_ENV=production requires SESSION_COOKIE_SECURE=true so the session "
+        "cookie is only sent over HTTPS. Refusing to start — set it (the app is "
+        "always deployed behind TLS)."
     )
 
 # Music library — content-addressed audio storage. Every track downloaded as
@@ -111,6 +130,17 @@ YTMUSIC_ENABLED: bool = _env_bool("YTMUSIC_ENABLED", True)
 RATELIMIT_PER_MIN: int = int(_env("YTDL_RATELIMIT_PER_MIN", "40"))
 RATELIMIT_WINDOW_SEC: int = int(_env("YTDL_RATELIMIT_WINDOW_SEC", "60"))
 
+# Login throttle. /api/auth/login has no client identity yet, so it can't use
+# the per-user extraction limiter, and behind a reverse proxy every request
+# shares the proxy IP — so we key on the submitted account (normalised) plus a
+# global cap, both generous enough that a human never trips them but a scripted
+# password guess / spray does. A small delay on a rejected credential slows
+# slow-and-low guessing beyond the cap. All tunable via env.
+LOGIN_RATELIMIT_MAX: int = int(_env("YTDL_LOGIN_RATELIMIT_MAX", "10"))
+LOGIN_RATELIMIT_GLOBAL_MAX: int = int(_env("YTDL_LOGIN_RATELIMIT_GLOBAL_MAX", "60"))
+LOGIN_RATELIMIT_WINDOW_SEC: int = int(_env("YTDL_LOGIN_RATELIMIT_WINDOW_SEC", "300"))
+LOGIN_FAIL_DELAY_SEC: float = float(_env("YTDL_LOGIN_FAIL_DELAY_SEC", "0.5"))
+
 # Dedicated bounded threadpool for yt-dlp-bound request handlers. Keeps slow
 # extraction subprocesses off the default request threadpool so they can't stall
 # the cheap DB endpoints (library/catalog/playlists). Sized to the (small ARM)
@@ -125,6 +155,13 @@ EXTRACTION_TIMEOUT_SEC: float = float(_env("YTDL_EXTRACTION_TIMEOUT_SEC", "45"))
 # instead of spawning an unbounded thread per request. Sized small for the ARM
 # box. Endpoint rate limiting caps how fast jobs can be created in the meantime.
 MAX_CONCURRENT_DOWNLOADS: int = int(_env("YTDL_MAX_CONCURRENT_DOWNLOADS", "0")) or min(3, (os.cpu_count() or 3))
+
+# Hard cap on how many tracks one playlist download / tracklist import will
+# process. The per-user rate limit bounds how fast *jobs* are created, not the
+# work *inside* a job, so without this a single request pointed at a giant
+# playlist (or a pasted 10k-line list) could fill the library volume and run for
+# hours. Beyond the cap the import is truncated (and flagged to the client).
+MAX_IMPORT_TRACKS: int = int(_env("YTDL_MAX_IMPORT_TRACKS", "500"))
 
 # Hard ceiling on a single ffmpeg merge/transcode pass. A hung ffmpeg (rare, but
 # it can wedge on a corrupt stream) would otherwise block its download worker

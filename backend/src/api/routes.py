@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import httpx
 import os
-import queue
 import re
 import shutil
 import tempfile
@@ -148,9 +147,48 @@ def _startup_init():
         )
 
 
-# ── In-memory job runtime (file paths, queues, cancel flags) ──────────────────
+# ── In-memory job runtime (file paths, progress fan-out, cancel flags) ────────
 
-# job_id -> {"queue": Queue, "file_path": str | None, "tmp_dir": str}
+
+class _ProgressHub:
+    """Fan-out of a job's progress events to any number of live WebSocket
+    subscribers.
+
+    The (sync) download worker calls `put()` exactly like it used to with a
+    single Queue; each connected client instead subscribes its own asyncio.Queue,
+    so two tabs on the same job don't steal each other's events and a terminal
+    event reaches them all. Events published with no subscribers are dropped — a
+    late subscriber gets the DB snapshot for current state on connect, then live
+    events from that point (unchanged from the old single-consumer behaviour).
+    Bridging is thread-safe: the worker thread hands each event to the
+    subscriber's own event loop via call_soon_threadsafe, so no thread blocks.
+    """
+
+    def __init__(self) -> None:
+        self._subs: dict[asyncio.Queue, asyncio.AbstractEventLoop] = {}
+        self._lock = threading.Lock()
+
+    def put(self, event: dict) -> None:
+        with self._lock:
+            items = list(self._subs.items())
+        for q, loop in items:
+            try:
+                loop.call_soon_threadsafe(q.put_nowait, event)
+            except RuntimeError:
+                pass  # subscriber's loop already closed — it's gone
+
+    def subscribe(self, loop: asyncio.AbstractEventLoop) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        with self._lock:
+            self._subs[q] = loop
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        with self._lock:
+            self._subs.pop(q, None)
+
+
+# job_id -> {"queue": _ProgressHub, "file_path": str | None, "tmp_dir": str}
 _jobs: dict[str, dict] = {}
 _cancelled: set[str] = set()
 
@@ -250,6 +288,17 @@ async def _reaper_loop() -> None:
             await asyncio.to_thread(_reap_jobs_once)
         except Exception:
             traceback.print_exc()
+        try:
+            reaped = await asyncio.to_thread(
+                db.delete_expired_sessions, config.SESSION_TTL_DAYS
+            )
+            if reaped:
+                import logging
+                logging.getLogger("uvicorn.error").info(
+                    "reaped %d expired session(s)", reaped
+                )
+        except Exception:
+            traceback.print_exc()
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -305,16 +354,29 @@ def _validate_youtube_url(url: str) -> None:
         raise HTTPException(status_code=400, detail="only youtube urls are allowed")
 
 
+def _cap_import_tracks(tracks: list) -> tuple[list, bool]:
+    """Bound a playlist download / tracklist import to MAX_IMPORT_TRACKS so a
+    single request can't fill the library volume or run for hours. Returns the
+    (possibly truncated) list and whether it was truncated."""
+    if len(tracks) > config.MAX_IMPORT_TRACKS:
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "import truncated: %d tracks exceeds cap of %d",
+            len(tracks), config.MAX_IMPORT_TRACKS,
+        )
+        return tracks[: config.MAX_IMPORT_TRACKS], True
+    return tracks, False
+
+
 _extraction_limiter = rate_limit.SlidingWindowLimiter(
     config.RATELIMIT_PER_MIN, config.RATELIMIT_WINDOW_SEC,
 )
 
 
-def rate_limit_extraction(user: CurrentUser = Depends(current_user)) -> CurrentUser:
-    """Dependency for yt-dlp-bound endpoints: 429 (with Retry-After) once a
-    non-admin user exceeds the per-user extraction budget, so one user can't
-    saturate the extraction threadpool or hammer YouTube against the shared
-    cookies. ADMINs are exempt."""
+def _enforce_extraction_budget(user: CurrentUser) -> CurrentUser:
+    """429 (with Retry-After) once a non-admin exceeds the per-user extraction
+    budget, so one user can't saturate the extraction threadpool or hammer
+    YouTube against the shared cookies. ADMINs are exempt."""
     if user.is_admin:
         return user
     ok, retry_after = _extraction_limiter.check(user.user_id)
@@ -325,6 +387,17 @@ def rate_limit_extraction(user: CurrentUser = Depends(current_user)) -> CurrentU
             headers={"Retry-After": str(retry_after)},
         )
     return user
+
+
+def rate_limit_extraction(user: CurrentUser = Depends(current_user)) -> CurrentUser:
+    """Dependency for cookie-authed yt-dlp-bound endpoints."""
+    return _enforce_extraction_budget(user)
+
+
+def rate_limit_media_extraction(user: CurrentUser = Depends(media_user)) -> CurrentUser:
+    """Like `rate_limit_extraction` but for media-token-authed endpoints, keyed on
+    the resolved user id so it works for both cookie and `mt` callers."""
+    return _enforce_extraction_budget(user)
 
 
 @app.post("/api/resolutions")
@@ -351,7 +424,7 @@ async def get_resolutions(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-def _throttled_progress(job_id: str, progress_queue: queue.Queue):
+def _throttled_progress(job_id: str, progress_queue: _ProgressHub):
     """
     Build an on_progress callback that:
       - cancels via _Cancelled if the job is in _cancelled
@@ -399,7 +472,7 @@ def start_download(
     is_audio_file = is_audio_preset and body.as_file
 
     job_id = str(uuid.uuid4())
-    progress_queue: queue.Queue = queue.Queue()
+    progress_queue: _ProgressHub = _ProgressHub()
     # For library imports we don't need a tmp_dir at the job level — the
     # per-track downloader manages its own scratch space under LIBRARY_DIR.
     tmp_dir = None if is_audio_import else tempfile.mkdtemp(prefix="ytdl_")
@@ -681,7 +754,7 @@ def start_playlist_download(
         raise HTTPException(status_code=400, detail=str(e))
 
     job_id = str(uuid.uuid4())
-    progress_queue: queue.Queue = queue.Queue()
+    progress_queue: _ProgressHub = _ProgressHub()
     # Zip flow stages everything in a tmp_dir; in-app flow writes straight
     # to LIBRARY_DIR via the per-track downloader and needs no scratch space.
     tmp_dir = tempfile.mkdtemp(prefix="ytdl_pl_") if body.as_file else None
@@ -715,6 +788,7 @@ def start_playlist_download(
                 raise
 
             tracks = info.get('tracks') or []
+            tracks, _ = _cap_import_tracks(tracks)
             if not tracks:
                 raise RuntimeError(
                     "Playlist returned no tracks. It may be private, empty, or "
@@ -884,6 +958,7 @@ def start_playlist_download(
                 raise
 
             tracks = info.get('tracks') or []
+            tracks, _ = _cap_import_tracks(tracks)
             if not tracks:
                 raise RuntimeError(
                     "Playlist returned no tracks. It may be private, empty, or "
@@ -1002,7 +1077,7 @@ def start_tracklist_import(
     codec, bitrate, ext = ytDownloaderFunctions.parse_audio_quality('mp3-320')
 
     job_id = str(uuid.uuid4())
-    progress_queue: queue.Queue = queue.Queue()
+    progress_queue: _ProgressHub = _ProgressHub()
     _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": None}
     db.create_job(
         job_id=job_id,
@@ -1019,13 +1094,13 @@ def start_tracklist_import(
             except spotify.TrackListError as e:
                 raise RuntimeError(str(e)) from e
 
-            tracks = wl.tracks
+            tracks, _capped = _cap_import_tracks(wl.tracks)
             total = len(tracks)
             db.set_metadata(
                 job_id, playlist_title=wl.name, playlist_count=total, thumbnail_url=None,
             )
             progress_queue.put({
-                "type": "metadata", "title": wl.name, "count": total, "capped": wl.capped,
+                "type": "metadata", "title": wl.name, "count": total, "capped": wl.capped or _capped,
             })
             if not tracks:
                 raise RuntimeError("No tracks found to import.")
@@ -1165,10 +1240,32 @@ async def progress_ws(websocket: WebSocket, job_id: str):
     Sends a `snapshot` event with the current DB state first, then either:
       - streams live queue events if the job is still running in memory, or
       - closes immediately if the job has reached a terminal state.
+
+    Authenticated like the media endpoints: the web app rides the httponly
+    session cookie (same-origin), the native app appends a media-scoped `mt`
+    token (it can't send the cookie cross-origin). The job row is scoped to its
+    owner (ADMIN sees all), matching every REST job endpoint.
     """
+    # Resolve the caller off the event loop — the cookie path can trigger a
+    # blocking HomeAuth refresh, which must not stall the async loop.
+    try:
+        user = await asyncio.to_thread(
+            media_user,
+            mt=websocket.query_params.get("mt"),
+            ytdl_session=websocket.cookies.get(config.SESSION_COOKIE_NAME),
+        )
+    except HTTPException:
+        await websocket.close(code=4401)  # unauthenticated
+        return
+
     row = db.get(job_id)
     if row is None:
         await websocket.close(code=4004)
+        return
+    try:
+        _ensure_owner(row, user)
+    except HTTPException:
+        await websocket.close(code=4403)  # not the caller's job
         return
 
     await websocket.accept()
@@ -1180,26 +1277,45 @@ async def progress_ws(websocket: WebSocket, job_id: str):
         await websocket.close()
         return
 
-    progress_queue: queue.Queue = runtime["queue"]
+    hub: _ProgressHub = runtime["queue"]
     loop = asyncio.get_running_loop()
+    sub = hub.subscribe(loop)
+
+    # The progress channel is server→client only, so a receive() completes only
+    # when the socket closes. Race it against the next event: a disconnect frees
+    # us immediately (instead of stranding a thread until some later event that
+    # may never come), and the subscriber queue is an asyncio.Queue so no thread
+    # is blocked at all.
+    async def _wait_disconnect() -> None:
+        try:
+            while True:
+                await websocket.receive()
+        except WebSocketDisconnect:
+            pass
+
+    watcher = asyncio.create_task(_wait_disconnect())
     try:
         while True:
-            try:
-                # Block off the event loop until the next event instead of
-                # busy-polling every 100ms — no added latency, no idle wakeups.
-                # The periodic timeout keeps a vanished producer from pinning a
-                # worker thread forever.
-                event = await loop.run_in_executor(
-                    None, lambda: progress_queue.get(True, 30)
-                )
-            except queue.Empty:
-                continue
+            getter = asyncio.create_task(sub.get())
+            done, _pending = await asyncio.wait(
+                {getter, watcher}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if watcher in done:
+                getter.cancel()
+                break
+            event = getter.result()
             await websocket.send_json(event)
             if event["type"] in ("done", "error", "cancelled"):
                 break
-        await websocket.close()
     except WebSocketDisconnect:
         pass
+    finally:
+        watcher.cancel()
+        hub.unsubscribe(sub)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.get("/api/file/{job_id}")
@@ -1352,6 +1468,7 @@ async def catalog_discover(
 async def catalog_suggestions(
     limit: int = 18,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """
     At-rest discovery: seed YouTube Mixes from the catalog's most popular
@@ -1696,6 +1813,7 @@ async def album_resolve(
 async def album_detail(
     album_id: str,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """An album's header + ordered tracklist. Tracks already in the shared
     catalog come back under `db` (playable now); the ordered id list in the
@@ -1734,6 +1852,7 @@ async def daily_mixes(
     count: int = 4,
     size: int = 40,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """Rotating daily mixes of *playable* catalog tracks.
 
@@ -2014,7 +2133,11 @@ def _cover_cache_put(video_id: str, url: str | None) -> None:
 
 
 @app.get("/api/track/{video_id}/cover")
-async def track_cover(video_id: str, user: CurrentUser = Depends(current_user)):
+async def track_cover(
+    video_id: str,
+    user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
+):
     """Square album-cover URL for a track (YT Music), for the now-playing screen
     and the media notification — the stored thumbnail is a 16:9 video frame that
     crops badly into a square slot. Cached per process (the art URL is stable);
@@ -2081,8 +2204,15 @@ def stream_track(
         if units.strip().lower() != "bytes":
             raise ValueError("only `bytes` units are supported")
         start_str, _, end_str = ranges.strip().split(",", 1)[0].partition("-")
-        start = int(start_str) if start_str else 0
-        end = int(end_str) if end_str else file_size - 1
+        if not start_str and end_str:
+            # Suffix range `bytes=-N` → the LAST N bytes (RFC 7233). Treating an
+            # empty start as 0 would wrongly serve the first N.
+            suffix = int(end_str)
+            start = max(0, file_size - suffix)
+            end = file_size - 1
+        else:
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
     except ValueError:
         raise HTTPException(status_code=416, detail="invalid Range header")
 
@@ -2202,43 +2332,49 @@ async def preview_track(
     """
     if not _VIDEO_ID_RE.match(video_id):
         raise HTTPException(status_code=400, detail="invalid video id")
+    # Rate-limit only the expensive path — a fresh yt-dlp resolve. Seeking re-hits
+    # this endpoint with Range requests against the already-cached URL; charging
+    # those against the budget would 429 a scrub mid-track.
+    _hit = _preview_cache.get(video_id)
+    if not (_hit and _hit[2] > time.time()):
+        _enforce_extraction_budget(user)
     range_header = request.headers.get("range") or request.headers.get("Range")
 
-    def setup():
-        """Resolve the audio URL and open the upstream connection (with one
-        re-resolve on a stale-URL 403). Returns (client, upstream, content_type)."""
-        resolved = _resolve_preview(video_id)
+    async def resolve() -> tuple[str, str]:
+        """Resolve (and cache) the direct URL in the extraction pool. Safe to
+        abandon on timeout — it opens no socket, so nothing leaks."""
+        try:
+            resolved = await run_extraction(
+                lambda: _resolve_preview(video_id),
+                timeout=config.EXTRACTION_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="preview resolve timed out")
         if resolved is None:
             raise HTTPException(status_code=502, detail="could not resolve audio")
-        direct, content_type = resolved
+        return resolved
+
+    async def open_upstream(direct: str):
+        """Open the upstream off the event loop. Unlike the extraction pool (which
+        abandons its worker on timeout, stranding an opened connection), to_thread
+        isn't abandoned and httpx's own timeouts bound the open and close the
+        socket on failure — so a slow open can't leak the client/response."""
         try:
-            client, upstream = _open_preview_upstream(direct, range_header)
+            return await asyncio.to_thread(_open_preview_upstream, direct, range_header)
         except Exception:
             traceback.print_exc()
             raise HTTPException(status_code=502, detail="upstream fetch failed")
 
-        # A 403 usually means the cached URL went stale — re-resolve once.
-        if upstream.status_code == 403:
-            upstream.close()
-            client.close()
-            _preview_cache.pop(video_id, None)
-            resolved = _resolve_preview(video_id)
-            if resolved is None:
-                raise HTTPException(status_code=502, detail="could not resolve audio")
-            direct, content_type = resolved
-            try:
-                client, upstream = _open_preview_upstream(direct, range_header)
-            except Exception:
-                traceback.print_exc()
-                raise HTTPException(status_code=502, detail="upstream fetch failed")
-        return client, upstream, content_type
+    direct, content_type = await resolve()
+    client, upstream = await open_upstream(direct)
 
-    try:
-        client, upstream, content_type = await run_extraction(
-            setup, timeout=config.EXTRACTION_TIMEOUT_SEC,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="preview resolve timed out")
+    # A 403 usually means the cached URL went stale — re-resolve once.
+    if upstream.status_code == 403:
+        upstream.close()
+        client.close()
+        _preview_cache.pop(video_id, None)
+        direct, content_type = await resolve()
+        client, upstream = await open_upstream(direct)
 
     headers = {"Accept-Ranges": "bytes"}
     for h in ("Content-Range", "Content-Length"):
@@ -2340,6 +2476,7 @@ async def search_suggest(
     q: str = "",
     hl: str = "es",
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """Autocomplete strings for the search bar dropdown. Cached 60s. The cache
     miss does a blocking httpx call, so resolve it on the extraction pool."""

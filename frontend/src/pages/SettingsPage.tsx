@@ -15,31 +15,31 @@ export default function SettingsPage() {
         <AppHeader queueCount={activeCount} />
 
         <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em] mb-4">
-          ░▒▓ configuración ▓▒░
+          ░▒▓ settings ▓▒░
         </div>
 
         <section className="card-vapor rounded-sm p-4 sm:p-5 mb-4">
           <div className="font-pixel text-xs text-cool uppercase tracking-[0.2em] mb-3">
-            // cuenta
+            // account
           </div>
-          <Row label="usuario" value={user?.username ?? '—'} />
-          <Row label="rol" value={user?.role ?? '—'} />
+          <Row label="user" value={user?.username ?? '—'} />
+          <Row label="role" value={user?.role ?? '—'} />
           <button
             type="button"
             onClick={() => void logout()}
             className="mt-4 font-pixel text-sm uppercase tracking-widest px-4 py-1.5 border border-crit/60 text-crit hover:bg-crit/10 transition rounded-xs"
           >
-            ⏻ cerrar sesión
+            ⏻ sign out
           </button>
         </section>
 
         <section className="card-vapor rounded-sm p-4 sm:p-5">
           <div className="font-pixel text-xs text-cool uppercase tracking-[0.2em] mb-3">
-            // reproducción
+            // playback
           </div>
           <p className="font-pixel text-sm text-ink-mid leading-relaxed">
-            La radio infinita (∞) está <span className="text-cool">siempre activa</span>: al
-            acabarse la cola se encadenan temas relacionados de tu biblioteca.
+            Infinite radio (∞) is <span className="text-cool">always on</span>: when the
+            queue runs out, related tracks from your library are chained on.
           </p>
         </section>
 
@@ -47,7 +47,7 @@ export default function SettingsPage() {
           <div className="font-pixel text-xs text-cool uppercase tracking-[0.2em] mb-3">
             // app
           </div>
-          <Row label="backend" value={API_BASE || 'mismo origen'} />
+          <Row label="backend" value={API_BASE || 'same origin'} />
         </section>
       </main>
     </div>

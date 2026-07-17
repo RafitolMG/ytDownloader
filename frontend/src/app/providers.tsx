@@ -25,9 +25,11 @@ export function AppProviders({ children }: { children: ReactNode }) {
       <BrowserRouter>
         <AuthProvider>
           <OfflineProvider>
-            <AudioPlayerProvider>
-              <ToastProvider>{children}</ToastProvider>
-            </AudioPlayerProvider>
+            {/* ToastProvider wraps the player so the player can surface toasts
+                (e.g. a track that fails to load). Children get both contexts. */}
+            <ToastProvider>
+              <AudioPlayerProvider>{children}</AudioPlayerProvider>
+            </ToastProvider>
           </OfflineProvider>
         </AuthProvider>
       </BrowserRouter>

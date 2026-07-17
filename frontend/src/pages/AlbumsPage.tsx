@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
+import { useBackClose } from '@/shared/lib/backStack'
 import { EmptyState } from '@/shared/ui/EmptyState'
 import { api } from '@/shared/api/client'
 import type { AlbumCard, CatalogItem, LibraryItem } from '@/shared/api/types'
@@ -73,6 +74,10 @@ export default function AlbumsPage() {
   const isSearching = debouncedQuery.length >= 2
 
   const [open, setOpen] = useState<OpenAlbum | null>(null)
+  // Album detail is local state, not a route — let the back gesture close it
+  // first instead of navigating away from the Albums page.
+  const closeAlbum = useCallback(() => setOpen(null), [])
+  useBackClose(open !== null, closeAlbum)
 
   const libraryQuery = useQuery({
     queryKey: ['library'],
@@ -138,6 +143,7 @@ export default function AlbumsPage() {
             type="button"
             onClick={() => setQuery('')}
             className="text-sm uppercase tracking-widest px-2 py-1 border border-ink-lo/50 text-ink-lo hover:text-crit hover:border-crit/60 transition rounded-xs"
+            aria-label="clear search"
             title="clear search"
           >
             ✕
@@ -468,7 +474,16 @@ function OwnedTrackList({ album }: { album: LibraryAlbum }) {
       {album.tracks.map((t, idx) => (
         <li
           key={`${t.video_id}/${t.codec}/${t.bitrate}`}
+          role="button"
+          tabIndex={0}
+          aria-label={`play ${t.title ?? t.video_id}`}
           onClick={() => player.play(album.tracks, idx)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              player.play(album.tracks, idx)
+            }
+          }}
           className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition ${
             isCurrentAlbum(t) ? 'bg-hot/10' : 'hover:bg-violet/10'
           }`}

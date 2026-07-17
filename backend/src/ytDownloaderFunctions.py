@@ -982,9 +982,9 @@ def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
             raise RuntimeError("ffmpeg produced no audio file")
 
         # Move atomically into place (same filesystem since work_dir is a child
-        # of parent_dir).
-        if os.path.exists(dest_path):
-            os.remove(dest_path)
+        # of parent_dir). os.replace overwrites an existing dest in one atomic
+        # step, so there's no pre-unlink — which would briefly expose a missing
+        # file to a concurrent streamer (a transient 410).
         os.replace(produced, dest_path)
         return meta
     finally:

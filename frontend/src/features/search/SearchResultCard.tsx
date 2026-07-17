@@ -46,7 +46,7 @@ export function SearchResultCard({ data, onSelect }: Props) {
       </div>
       <div className="p-3">
         <div className="font-sans text-sm font-semibold text-ink-hi leading-snug line-clamp-2 group-hover:text-cool transition">
-          {data.title ?? '(sin título)'}
+          {data.title ?? '(untitled)'}
         </div>
         <div className="font-pixel text-sm text-ink-mid mt-1 truncate">
           {data.channel ?? '—'}

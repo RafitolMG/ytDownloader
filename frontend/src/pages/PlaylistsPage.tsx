@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
+import { useModalDismiss } from '@/shared/lib/backStack'
 import { Link } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { useToast } from '@/shared/ui/ToastProvider'
@@ -269,7 +270,9 @@ function CreatePlaylistDialog({ onClose }: { onClose: () => void }) {
   const [visibility, setVisibility] = useState<PlaylistVisibility>('private')
   const [description, setDescription] = useState('')
   const qc = useQueryClient()
+  useModalDismiss(onClose)
 
+  const showToast = useToast()
   const create = useMutation({
     mutationFn: () =>
       api.createPlaylist({
@@ -279,8 +282,14 @@ function CreatePlaylistDialog({ onClose }: { onClose: () => void }) {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['playlists'] })
+      showToast({ message: 'playlist created', variant: 'success' })
       onClose()
     },
+    onError: (e) =>
+      showToast({
+        message: e instanceof Error ? `couldn't create playlist: ${e.message}` : "couldn't create playlist",
+        variant: 'err',
+      }),
   })
 
   return (
@@ -289,6 +298,9 @@ function CreatePlaylistDialog({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <form
+        role="dialog"
+        aria-modal="true"
+        aria-label="new playlist"
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault()

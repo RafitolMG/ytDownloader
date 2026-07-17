@@ -23,7 +23,7 @@ export function SideMenu({ open, onClose }: { open: boolean; onClose: () => void
     { to: '/import', icon: '⬇', label: 'import' },
     { to: '/stats', icon: '★', label: 'stats' },
     ...(user?.role === 'ADMIN' ? [{ to: '/admin', icon: '◈', label: 'admin' }] : []),
-    { to: '/settings', icon: '⚙', label: 'configuración' },
+    { to: '/settings', icon: '⚙', label: 'settings' },
   ]
 
   return (

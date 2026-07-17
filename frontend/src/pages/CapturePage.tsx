@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { SearchBar } from '@/features/search/SearchBar'
@@ -8,13 +8,20 @@ import { VideoMetadata } from '@/features/capture/VideoMetadata'
 import { PlaylistTracks } from '@/features/capture/PlaylistTracks'
 import { DownloadProgress } from '@/features/capture/DownloadProgress'
 import { useCapture } from '@/features/capture/useCapture'
-import { ErrorToast } from '@/shared/ui/Toast'
+import { useToast } from '@/shared/ui/ToastProvider'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 
 export default function CapturePage() {
   const c = useCapture()
+  const showToast = useToast()
   const jobsQuery = useJobs()
   const activeCount = countActive(jobsQuery.data)
+
+  // Surface capture errors through the shared toast system (bottom-right,
+  // consistent with the rest of the app) rather than a second, top-right toast.
+  useEffect(() => {
+    if (c.errorMsg) showToast({ message: c.errorMsg, variant: 'err' })
+  }, [c.errorMsg, showToast])
 
   // Committed search query — set when user presses Enter / picks a suggestion.
   const [searchQuery, setSearchQuery] = useState('')
@@ -172,8 +179,6 @@ export default function CapturePage() {
           ＲＥＴＲＯ ＷＡＶＥ · powered by yt-dlp &amp; ffmpeg
         </footer>
       </main>
-
-      <ErrorToast message={c.errorMsg} onDismiss={() => {}} />
     </div>
   )
 }

@@ -21,6 +21,16 @@ class SlidingWindowLimiter:
         self.window = window_seconds
         self._events: dict[str, deque[float]] = defaultdict(deque)
         self._lock = threading.Lock()
+        self._last_prune = time.monotonic()
+
+    def _prune(self, now: float) -> None:
+        """Drop keys whose newest event has already aged out — i.e. idle since
+        the last window. Without this the map keeps one deque per key ever seen
+        (a key checked once and never again is never trimmed). Runs under lock."""
+        cutoff = now - self.window
+        dead = [k for k, dq in self._events.items() if not dq or dq[-1] < cutoff]
+        for k in dead:
+            self._events.pop(k, None)
 
     def check(self, key: str) -> tuple[bool, int]:
         """Record an event for `key` if under budget.
@@ -31,6 +41,11 @@ class SlidingWindowLimiter:
         now = time.monotonic()
         cutoff = now - self.window
         with self._lock:
+            # Sweep idle keys at most once per window so the map can't grow
+            # unbounded with the set of all keys ever seen.
+            if now - self._last_prune >= self.window:
+                self._last_prune = now
+                self._prune(now)
             dq = self._events[key]
             while dq and dq[0] < cutoff:
                 dq.popleft()
@@ -38,8 +53,4 @@ class SlidingWindowLimiter:
                 retry = self.window - (now - dq[0])
                 return False, max(1, int(retry) + 1)
             dq.append(now)
-            if not dq:
-                # Shouldn't happen (we just appended), but keep the map from
-                # accumulating empty deques for one-shot keys.
-                self._events.pop(key, None)
             return True, 0

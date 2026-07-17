@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -72,17 +73,49 @@ def _refresh_session(session: dict) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session expired") from e
 
     new_expires = _expires_in_seconds(result.expires_in)
+    # HomeAuth echoes the current role/username in every refresh response, so we
+    # re-sync them here. Otherwise a role change made in HomeAuth (e.g. an admin
+    # being demoted) would never take effect for an active session — the role is
+    # cached from login and outlives the change until the session finally drops.
+    # Guard against an unexpected empty user block by trusting the fresh values
+    # only when the refresh identifies the SAME user (non-empty, matching id).
+    role_update = username_update = None
+    if result.user_id and result.user_id == session["user_id"]:
+        role_update = result.role
+        username_update = result.username
     db.update_session_tokens(
         session["id"],
         access_token=result.access_token,
         access_expires_at=new_expires,
         refresh_cookie=result.refresh_cookie,
+        role=role_update,
+        username=username_update,
     )
     refreshed = dict(session)
     refreshed["access_token"] = result.access_token
     refreshed["access_expires_at"] = new_expires
     refreshed["refresh_cookie"] = result.refresh_cookie
+    if role_update is not None:
+        refreshed["role"] = role_update
+        refreshed["username"] = username_update
     return refreshed
+
+
+def _get_live_session(session_id: str) -> dict | None:
+    """Fetch a session, treating one past its absolute lifetime as gone (and
+    deleting it + its refresh lock). SESSION_TTL_DAYS mirrors the cookie max-age,
+    so a server-side session — which stores live access/refresh credentials —
+    never outlives the cookie that references it. A periodic sweep
+    (db.delete_expired_sessions) reaps the rest in bulk."""
+    session = db.get_session(session_id)
+    if session is None:
+        return None
+    created = _parse_iso(session["created_at"])
+    if datetime.now(timezone.utc) - created > timedelta(days=config.SESSION_TTL_DAYS):
+        db.delete_session(session_id)
+        _drop_refresh_lock(session_id)
+        return None
+    return session
 
 
 def _needs_refresh(session: dict) -> bool:
@@ -103,6 +136,14 @@ def _needs_refresh(session: dict) -> bool:
 _refresh_locks: dict[str, threading.Lock] = {}
 _refresh_locks_guard = threading.Lock()
 
+# Throttle last_seen writes. current_user runs on every authenticated request, so
+# an unthrottled touch turns each cheap read into a serialized write under the
+# global DB write lock. A short per-session cooldown keeps last_seen fresh enough
+# for idle tracking without that write amplification.
+_TOUCH_THROTTLE_SEC = 60.0
+_last_touch: dict[str, float] = {}
+_last_touch_guard = threading.Lock()
+
 
 def _refresh_lock_for(session_id: str) -> threading.Lock:
     with _refresh_locks_guard:
@@ -110,10 +151,27 @@ def _refresh_lock_for(session_id: str) -> threading.Lock:
 
 
 def _drop_refresh_lock(session_id: str) -> None:
-    """Forget the per-session lock once its session is gone, so the map doesn't
-    accumulate an entry per dead session."""
+    """Forget the per-session in-memory bookkeeping once its session is gone, so
+    the maps don't accumulate an entry per dead session."""
     with _refresh_locks_guard:
         _refresh_locks.pop(session_id, None)
+    with _last_touch_guard:
+        _last_touch.pop(session_id, None)
+
+
+def _touch_session_throttled(session_id: str) -> None:
+    """db.touch_session at most once per _TOUCH_THROTTLE_SEC per session.
+
+    A missing entry means "never touched" and must always write — using a 0.0
+    default instead would wrongly throttle the first touch whenever the monotonic
+    clock reads below the window (e.g. within a minute of a fresh boot)."""
+    now = time.monotonic()
+    with _last_touch_guard:
+        last = _last_touch.get(session_id)
+        if last is not None and now - last < _TOUCH_THROTTLE_SEC:
+            return
+        _last_touch[session_id] = now
+    db.touch_session(session_id)
 
 
 def _refresh_if_needed(session: dict) -> dict:
@@ -157,14 +215,14 @@ def current_user(ytdl_session: str | None = Cookie(default=None, alias=config.SE
     if not ytdl_session:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="not authenticated")
 
-    session = db.get_session(ytdl_session)
+    session = _get_live_session(ytdl_session)
     if session is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session not found")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session not found or expired")
 
     if _needs_refresh(session):
         session = _refresh_if_needed(session)
 
-    db.touch_session(session["id"])
+    _touch_session_throttled(session["id"])
 
     return CurrentUser(
         session_id=session["id"],
@@ -197,11 +255,21 @@ def media_user(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid or expired media token",
             )
+        # Resolve the caller from the live session the token was bound to, not
+        # from the token itself: logout (session gone) or an expired session
+        # revokes the token, and the current role/username are read fresh rather
+        # than frozen at mint time.
+        session = _get_live_session(claims["sid"])
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid or expired media token",
+            )
         return CurrentUser(
-            session_id="media-token",
-            user_id=claims["uid"],
-            username=claims.get("un", ""),
-            role=claims.get("r", db.ROLE_USER),
+            session_id=session["id"],
+            user_id=session["user_id"],
+            username=session["username"],
+            role=session["role"],
         )
     return current_user(ytdl_session=ytdl_session)
 

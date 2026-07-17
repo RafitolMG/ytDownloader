@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Least privilege: no job needs to write to the repo. The deploy job uses its own
+# repo secrets (Coolify webhook/token), not the GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   frontend:
     name: frontend · type-check + build
@@ -47,7 +52,7 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: pip install
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       # High-signal lint only: syntax errors (E9) and undefined/unused names (F).
       # Catches exactly the breakage a refactor introduces, without enforcing
@@ -73,6 +78,13 @@ jobs:
                   assert c.get(p).status_code == 200, p
           print("smoke OK:", len(r.app.routes), "routes")
           PY
+
+      # Security-critical unit tests: tokens, auth, session expiry, rate limits,
+      # SSRF url guard, ownership, WS auth. conftest sets its own env.
+      - name: pytest
+        env:
+          YTMUSIC_ENABLED: 'false'
+        run: python -m pytest -q
 
   docker:
     name: docker · build image

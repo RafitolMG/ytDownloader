@@ -172,6 +172,10 @@ export function useCapture() {
     (id: string) => {
       const ws = new WebSocket(wsUrl(`/ws/progress/${id}`))
       wsRef.current = ws
+      // Distinguishes a normal close (after a done/error/cancelled event) from a
+      // mid-download disconnect, so the latter surfaces an error instead of
+      // leaving the UI stuck on "downloading" forever.
+      let terminated = false
 
       ws.onmessage = (ev) => {
         const data = JSON.parse(ev.data) as WsEvent
@@ -218,6 +222,7 @@ export function useCapture() {
             // event aggregates them as `skipped`.
             break
           case 'done':
+            terminated = true
             setStatus('done')
             setProgress(100)
             setPhase('done')
@@ -245,6 +250,7 @@ export function useCapture() {
             ws.close()
             break
           case 'error':
+            terminated = true
             setStatus('error')
             setErrorMsg(data.message)
             setPhase('error')
@@ -252,6 +258,7 @@ export function useCapture() {
             ws.close()
             break
           case 'cancelled':
+            terminated = true
             setStatus('cancelled')
             setPhase('idle')
             queryClient.invalidateQueries({ queryKey: ['jobs'] })
@@ -260,7 +267,16 @@ export function useCapture() {
         }
       }
       ws.onerror = () => {
+        // onerror is always followed by onclose, which decides the phase.
         setErrorMsg('lost connection to backend')
+      }
+      ws.onclose = () => {
+        // A close without a preceding terminal event means the connection
+        // dropped mid-download — don't leave the UI frozen on "downloading".
+        if (!terminated) {
+          setErrorMsg((m) => m ?? 'lost connection to backend')
+          setPhase((p) => (p === 'downloading' ? 'error' : p))
+        }
       }
     },
     [queryClient],
