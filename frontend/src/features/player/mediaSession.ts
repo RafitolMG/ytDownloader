@@ -20,7 +20,21 @@ type Meta = {
   album?: string
   artworkUrl?: string | null
 }
-type Action = 'play' | 'pause' | 'previoustrack' | 'nexttrack'
+type Action =
+  | 'play'
+  | 'pause'
+  | 'previoustrack'
+  | 'nexttrack'
+  | 'seekto'
+  | 'seekbackward'
+  | 'seekforward'
+  | 'stop'
+
+/** The subset of MediaSession action details we consume. Both the web
+ * `MediaSessionActionDetails` and the plugin's `ActionDetails` are supersets of
+ * this, so a handler typed against it works on either platform. `seekTime` is
+ * an absolute target (seekto); `seekOffset` is a relative delta (seek±). */
+export type MediaActionDetails = { seekTime?: number | null; seekOffset?: number | null }
 
 function artworkOf(url?: string | null) {
   // One already-resolved, verified URL (the caller passes the square YT Music
@@ -82,10 +96,20 @@ export function msSetPlaybackState(state: 'playing' | 'paused' | 'none'): void {
   if (isNative) void MediaSession.setPlaybackState({ playbackState: state })
 }
 
-export function msSetActionHandler(action: Action, handler: (() => void) | null): void {
-  if (hasWebMS) navigator.mediaSession.setActionHandler(action, handler)
+export function msSetActionHandler(
+  action: Action,
+  handler: ((details: MediaActionDetails) => void) | null,
+): void {
+  if (hasWebMS) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler)
+    } catch {
+      // Some browsers throw NotSupportedError for actions they don't implement
+      // (e.g. seekto on older Safari) — degrade gracefully rather than crash.
+    }
+  }
   if (isNative) {
-    void MediaSession.setActionHandler({ action }, handler ? () => handler() : null)
+    void MediaSession.setActionHandler({ action }, handler ? (d) => handler(d) : null)
   }
 }
 

@@ -646,17 +646,27 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   }, [current && trackKey(current), isPlaying])
 
   useEffect(() => {
+    const at = () => audioRef.current?.currentTime ?? 0
     msSetActionHandler('play', () => togglePlay())
     msSetActionHandler('pause', () => togglePlay())
     msSetActionHandler('previoustrack', () => prev())
     msSetActionHandler('nexttrack', () => next())
+    // Scrubbing + skip from the notification / lock screen / OS now-playing.
+    msSetActionHandler('seekto', (d) => {
+      if (typeof d.seekTime === 'number') seek(d.seekTime)
+    })
+    msSetActionHandler('seekbackward', (d) => seek(at() - (d.seekOffset ?? 10)))
+    msSetActionHandler('seekforward', (d) => seek(at() + (d.seekOffset ?? 10)))
+    msSetActionHandler('stop', () => stop())
     return () => {
-      msSetActionHandler('play', null)
-      msSetActionHandler('pause', null)
-      msSetActionHandler('previoustrack', null)
-      msSetActionHandler('nexttrack', null)
+      for (const a of [
+        'play', 'pause', 'previoustrack', 'nexttrack',
+        'seekto', 'seekbackward', 'seekforward', 'stop',
+      ] as const) {
+        msSetActionHandler(a, null)
+      }
     }
-  }, [togglePlay, prev, next])
+  }, [togglePlay, prev, next, seek, stop])
 
   const value = useMemo<PlayerCtx>(
     () => ({
