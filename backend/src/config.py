@@ -114,6 +114,17 @@ YTMUSIC_ENABLED: bool = _env_bool("YTMUSIC_ENABLED", True)
 RATELIMIT_PER_MIN: int = int(_env("YTDL_RATELIMIT_PER_MIN", "40"))
 RATELIMIT_WINDOW_SEC: int = int(_env("YTDL_RATELIMIT_WINDOW_SEC", "60"))
 
+# Login throttle. /api/auth/login has no client identity yet, so it can't use
+# the per-user extraction limiter, and behind a reverse proxy every request
+# shares the proxy IP — so we key on the submitted account (normalised) plus a
+# global cap, both generous enough that a human never trips them but a scripted
+# password guess / spray does. A small delay on a rejected credential slows
+# slow-and-low guessing beyond the cap. All tunable via env.
+LOGIN_RATELIMIT_MAX: int = int(_env("YTDL_LOGIN_RATELIMIT_MAX", "10"))
+LOGIN_RATELIMIT_GLOBAL_MAX: int = int(_env("YTDL_LOGIN_RATELIMIT_GLOBAL_MAX", "60"))
+LOGIN_RATELIMIT_WINDOW_SEC: int = int(_env("YTDL_LOGIN_RATELIMIT_WINDOW_SEC", "300"))
+LOGIN_FAIL_DELAY_SEC: float = float(_env("YTDL_LOGIN_FAIL_DELAY_SEC", "0.5"))
+
 # Dedicated bounded threadpool for yt-dlp-bound request handlers. Keeps slow
 # extraction subprocesses off the default request threadpool so they can't stall
 # the cheap DB endpoints (library/catalog/playlists). Sized to the (small ARM)
