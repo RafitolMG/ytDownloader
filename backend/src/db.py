@@ -1064,15 +1064,18 @@ def list_tracks_by_artist(
     sides in the ", " delimiter) — that way "Lola Indigo" still matches a track
     stored as "Lola Indigo, La Zowi". A full joined anchor string matches too."""
     conn = _get_conn()
+    # Escape LIKE wildcards so an artist name containing % or _ matches literally
+    # rather than as a pattern (e.g. "50%" must not match "5000").
+    artist_esc = artist.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     rows = conn.execute(
         f"""
         SELECT {_TRACK_COLS}
           FROM tracks t
-         WHERE (', ' || t.artist || ', ') LIKE ('%, ' || ? || ', %') COLLATE NOCASE
+         WHERE (', ' || t.artist || ', ') LIKE ('%, ' || ? || ', %') ESCAPE '\\' COLLATE NOCASE
          ORDER BY t.downloaded_at DESC
          LIMIT ?
         """,
-        (viewer_id, artist, limit),
+        (viewer_id, artist_esc, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 
