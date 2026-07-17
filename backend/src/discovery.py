@@ -510,7 +510,7 @@ def _build_daily_mixes(count: int, size: int, user: CurrentUser, day_seed: int):
         while len(picked) < mix_size and progress:
             progress = False
             for k, lst in ordered:
-                if len(picked) >= size:
+                if len(picked) >= mix_size:
                     break
                 if counts.get(k, 0) >= cap or idxs[k] >= len(lst):
                     continue
