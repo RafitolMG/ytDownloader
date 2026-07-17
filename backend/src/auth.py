@@ -72,16 +72,31 @@ def _refresh_session(session: dict) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session expired") from e
 
     new_expires = _expires_in_seconds(result.expires_in)
+    # HomeAuth echoes the current role/username in every refresh response, so we
+    # re-sync them here. Otherwise a role change made in HomeAuth (e.g. an admin
+    # being demoted) would never take effect for an active session — the role is
+    # cached from login and outlives the change until the session finally drops.
+    # Guard against an unexpected empty user block by trusting the fresh values
+    # only when the refresh identifies the SAME user (non-empty, matching id).
+    role_update = username_update = None
+    if result.user_id and result.user_id == session["user_id"]:
+        role_update = result.role
+        username_update = result.username
     db.update_session_tokens(
         session["id"],
         access_token=result.access_token,
         access_expires_at=new_expires,
         refresh_cookie=result.refresh_cookie,
+        role=role_update,
+        username=username_update,
     )
     refreshed = dict(session)
     refreshed["access_token"] = result.access_token
     refreshed["access_expires_at"] = new_expires
     refreshed["refresh_cookie"] = result.refresh_cookie
+    if role_update is not None:
+        refreshed["role"] = role_update
+        refreshed["username"] = username_update
     return refreshed
 
 
