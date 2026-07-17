@@ -15,7 +15,7 @@
   /* Ink (text) */
   --color-ink-hi: #fdf4ff;
   --color-ink-mid: #c9a4f0;
-  --color-ink-lo: #7a5e9e;
+  --color-ink-lo: #9a7fc0; /* was #7a5e9e (3.7:1, below AA); now 5.85:1 on --color-page */
 
   /* Accents */
   --color-hot: #ff2975;
