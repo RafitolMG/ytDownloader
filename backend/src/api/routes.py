@@ -2276,41 +2276,41 @@ async def preview_track(
         _enforce_extraction_budget(user)
     range_header = request.headers.get("range") or request.headers.get("Range")
 
-    def setup():
-        """Resolve the audio URL and open the upstream connection (with one
-        re-resolve on a stale-URL 403). Returns (client, upstream, content_type)."""
-        resolved = _resolve_preview(video_id)
+    async def resolve() -> tuple[str, str]:
+        """Resolve (and cache) the direct URL in the extraction pool. Safe to
+        abandon on timeout — it opens no socket, so nothing leaks."""
+        try:
+            resolved = await run_extraction(
+                lambda: _resolve_preview(video_id),
+                timeout=config.EXTRACTION_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="preview resolve timed out")
         if resolved is None:
             raise HTTPException(status_code=502, detail="could not resolve audio")
-        direct, content_type = resolved
+        return resolved
+
+    async def open_upstream(direct: str):
+        """Open the upstream off the event loop. Unlike the extraction pool (which
+        abandons its worker on timeout, stranding an opened connection), to_thread
+        isn't abandoned and httpx's own timeouts bound the open and close the
+        socket on failure — so a slow open can't leak the client/response."""
         try:
-            client, upstream = _open_preview_upstream(direct, range_header)
+            return await asyncio.to_thread(_open_preview_upstream, direct, range_header)
         except Exception:
             traceback.print_exc()
             raise HTTPException(status_code=502, detail="upstream fetch failed")
 
-        # A 403 usually means the cached URL went stale — re-resolve once.
-        if upstream.status_code == 403:
-            upstream.close()
-            client.close()
-            _preview_cache.pop(video_id, None)
-            resolved = _resolve_preview(video_id)
-            if resolved is None:
-                raise HTTPException(status_code=502, detail="could not resolve audio")
-            direct, content_type = resolved
-            try:
-                client, upstream = _open_preview_upstream(direct, range_header)
-            except Exception:
-                traceback.print_exc()
-                raise HTTPException(status_code=502, detail="upstream fetch failed")
-        return client, upstream, content_type
+    direct, content_type = await resolve()
+    client, upstream = await open_upstream(direct)
 
-    try:
-        client, upstream, content_type = await run_extraction(
-            setup, timeout=config.EXTRACTION_TIMEOUT_SEC,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="preview resolve timed out")
+    # A 403 usually means the cached URL went stale — re-resolve once.
+    if upstream.status_code == 403:
+        upstream.close()
+        client.close()
+        _preview_cache.pop(video_id, None)
+        direct, content_type = await resolve()
+        client, upstream = await open_upstream(direct)
 
     headers = {"Accept-Ranges": "bytes"}
     for h in ("Content-Range", "Content-Length"):
