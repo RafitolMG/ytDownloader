@@ -521,27 +521,29 @@ def update_session_tokens(
     access_token: str,
     access_expires_at: str,
     refresh_cookie: str | None = None,
+    role: str | None = None,
+    username: str | None = None,
 ) -> None:
+    # Column names are fixed literals (never user input), so interpolating the
+    # SET clause is safe; every value is still bound. role/username are updated
+    # only when supplied, so a refresh re-syncs the identity HomeAuth returns.
+    fields: list[str] = ["access_token = ?", "access_expires_at = ?", "last_seen_at = ?"]
+    params: list[Any] = [access_token, access_expires_at, _now()]
+    if refresh_cookie is not None:
+        fields.append("refresh_cookie = ?")
+        params.append(refresh_cookie)
+    if role is not None:
+        fields.append("role = ?")
+        params.append(role)
+    if username is not None:
+        fields.append("username = ?")
+        params.append(username)
+    params.append(session_id)
     with _write() as conn:
-        if refresh_cookie is not None:
-            conn.execute(
-                """
-                UPDATE sessions
-                   SET access_token = ?, access_expires_at = ?,
-                       refresh_cookie = ?, last_seen_at = ?
-                 WHERE id = ?
-                """,
-                (access_token, access_expires_at, refresh_cookie, _now(), session_id),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE sessions
-                   SET access_token = ?, access_expires_at = ?, last_seen_at = ?
-                 WHERE id = ?
-                """,
-                (access_token, access_expires_at, _now(), session_id),
-            )
+        conn.execute(
+            f"UPDATE sessions SET {', '.join(fields)} WHERE id = ?",
+            params,
+        )
 
 
 def delete_session(session_id: str) -> None:
