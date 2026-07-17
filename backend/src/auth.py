@@ -100,6 +100,23 @@ def _refresh_session(session: dict) -> dict:
     return refreshed
 
 
+def _get_live_session(session_id: str) -> dict | None:
+    """Fetch a session, treating one past its absolute lifetime as gone (and
+    deleting it + its refresh lock). SESSION_TTL_DAYS mirrors the cookie max-age,
+    so a server-side session — which stores live access/refresh credentials —
+    never outlives the cookie that references it. A periodic sweep
+    (db.delete_expired_sessions) reaps the rest in bulk."""
+    session = db.get_session(session_id)
+    if session is None:
+        return None
+    created = _parse_iso(session["created_at"])
+    if datetime.now(timezone.utc) - created > timedelta(days=config.SESSION_TTL_DAYS):
+        db.delete_session(session_id)
+        _drop_refresh_lock(session_id)
+        return None
+    return session
+
+
 def _needs_refresh(session: dict) -> bool:
     """True when the access token is within the refresh leeway of expiring."""
     now = datetime.now(timezone.utc)
@@ -172,9 +189,9 @@ def current_user(ytdl_session: str | None = Cookie(default=None, alias=config.SE
     if not ytdl_session:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="not authenticated")
 
-    session = db.get_session(ytdl_session)
+    session = _get_live_session(ytdl_session)
     if session is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session not found")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session not found or expired")
 
     if _needs_refresh(session):
         session = _refresh_if_needed(session)
@@ -213,9 +230,10 @@ def media_user(
                 detail="invalid or expired media token",
             )
         # Resolve the caller from the live session the token was bound to, not
-        # from the token itself: logout (session gone) revokes the token, and the
-        # current role/username are read fresh rather than frozen at mint time.
-        session = db.get_session(claims["sid"])
+        # from the token itself: logout (session gone) or an expired session
+        # revokes the token, and the current role/username are read fresh rather
+        # than frozen at mint time.
+        session = _get_live_session(claims["sid"])
         if session is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
