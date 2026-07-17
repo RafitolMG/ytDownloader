@@ -140,6 +140,13 @@ EXTRACTION_TIMEOUT_SEC: float = float(_env("YTDL_EXTRACTION_TIMEOUT_SEC", "45"))
 # box. Endpoint rate limiting caps how fast jobs can be created in the meantime.
 MAX_CONCURRENT_DOWNLOADS: int = int(_env("YTDL_MAX_CONCURRENT_DOWNLOADS", "0")) or min(3, (os.cpu_count() or 3))
 
+# Hard cap on how many tracks one playlist download / tracklist import will
+# process. The per-user rate limit bounds how fast *jobs* are created, not the
+# work *inside* a job, so without this a single request pointed at a giant
+# playlist (or a pasted 10k-line list) could fill the library volume and run for
+# hours. Beyond the cap the import is truncated (and flagged to the client).
+MAX_IMPORT_TRACKS: int = int(_env("YTDL_MAX_IMPORT_TRACKS", "500"))
+
 # Hard ceiling on a single ffmpeg merge/transcode pass. A hung ffmpeg (rare, but
 # it can wedge on a corrupt stream) would otherwise block its download worker
 # forever, permanently consuming one of the MAX_CONCURRENT_DOWNLOADS slots.

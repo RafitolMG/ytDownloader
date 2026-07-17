@@ -316,16 +316,29 @@ def _validate_youtube_url(url: str) -> None:
         raise HTTPException(status_code=400, detail="only youtube urls are allowed")
 
 
+def _cap_import_tracks(tracks: list) -> tuple[list, bool]:
+    """Bound a playlist download / tracklist import to MAX_IMPORT_TRACKS so a
+    single request can't fill the library volume or run for hours. Returns the
+    (possibly truncated) list and whether it was truncated."""
+    if len(tracks) > config.MAX_IMPORT_TRACKS:
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "import truncated: %d tracks exceeds cap of %d",
+            len(tracks), config.MAX_IMPORT_TRACKS,
+        )
+        return tracks[: config.MAX_IMPORT_TRACKS], True
+    return tracks, False
+
+
 _extraction_limiter = rate_limit.SlidingWindowLimiter(
     config.RATELIMIT_PER_MIN, config.RATELIMIT_WINDOW_SEC,
 )
 
 
-def rate_limit_extraction(user: CurrentUser = Depends(current_user)) -> CurrentUser:
-    """Dependency for yt-dlp-bound endpoints: 429 (with Retry-After) once a
-    non-admin user exceeds the per-user extraction budget, so one user can't
-    saturate the extraction threadpool or hammer YouTube against the shared
-    cookies. ADMINs are exempt."""
+def _enforce_extraction_budget(user: CurrentUser) -> CurrentUser:
+    """429 (with Retry-After) once a non-admin exceeds the per-user extraction
+    budget, so one user can't saturate the extraction threadpool or hammer
+    YouTube against the shared cookies. ADMINs are exempt."""
     if user.is_admin:
         return user
     ok, retry_after = _extraction_limiter.check(user.user_id)
@@ -336,6 +349,17 @@ def rate_limit_extraction(user: CurrentUser = Depends(current_user)) -> CurrentU
             headers={"Retry-After": str(retry_after)},
         )
     return user
+
+
+def rate_limit_extraction(user: CurrentUser = Depends(current_user)) -> CurrentUser:
+    """Dependency for cookie-authed yt-dlp-bound endpoints."""
+    return _enforce_extraction_budget(user)
+
+
+def rate_limit_media_extraction(user: CurrentUser = Depends(media_user)) -> CurrentUser:
+    """Like `rate_limit_extraction` but for media-token-authed endpoints, keyed on
+    the resolved user id so it works for both cookie and `mt` callers."""
+    return _enforce_extraction_budget(user)
 
 
 @app.post("/api/resolutions")
@@ -726,6 +750,7 @@ def start_playlist_download(
                 raise
 
             tracks = info.get('tracks') or []
+            tracks, _ = _cap_import_tracks(tracks)
             if not tracks:
                 raise RuntimeError(
                     "Playlist returned no tracks. It may be private, empty, or "
@@ -895,6 +920,7 @@ def start_playlist_download(
                 raise
 
             tracks = info.get('tracks') or []
+            tracks, _ = _cap_import_tracks(tracks)
             if not tracks:
                 raise RuntimeError(
                     "Playlist returned no tracks. It may be private, empty, or "
@@ -1030,13 +1056,13 @@ def start_tracklist_import(
             except spotify.TrackListError as e:
                 raise RuntimeError(str(e)) from e
 
-            tracks = wl.tracks
+            tracks, _capped = _cap_import_tracks(wl.tracks)
             total = len(tracks)
             db.set_metadata(
                 job_id, playlist_title=wl.name, playlist_count=total, thumbnail_url=None,
             )
             progress_queue.put({
-                "type": "metadata", "title": wl.name, "count": total, "capped": wl.capped,
+                "type": "metadata", "title": wl.name, "count": total, "capped": wl.capped or _capped,
             })
             if not tracks:
                 raise RuntimeError("No tracks found to import.")
@@ -1385,6 +1411,7 @@ async def catalog_discover(
 async def catalog_suggestions(
     limit: int = 18,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """
     At-rest discovery: seed YouTube Mixes from the catalog's most popular
@@ -1729,6 +1756,7 @@ async def album_resolve(
 async def album_detail(
     album_id: str,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """An album's header + ordered tracklist. Tracks already in the shared
     catalog come back under `db` (playable now); the ordered id list in the
@@ -1767,6 +1795,7 @@ async def daily_mixes(
     count: int = 4,
     size: int = 40,
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """Rotating daily mixes of *playable* catalog tracks.
 
@@ -2047,7 +2076,11 @@ def _cover_cache_put(video_id: str, url: str | None) -> None:
 
 
 @app.get("/api/track/{video_id}/cover")
-async def track_cover(video_id: str, user: CurrentUser = Depends(current_user)):
+async def track_cover(
+    video_id: str,
+    user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
+):
     """Square album-cover URL for a track (YT Music), for the now-playing screen
     and the media notification — the stored thumbnail is a 16:9 video frame that
     crops badly into a square slot. Cached per process (the art URL is stable);
@@ -2235,6 +2268,12 @@ async def preview_track(
     """
     if not _VIDEO_ID_RE.match(video_id):
         raise HTTPException(status_code=400, detail="invalid video id")
+    # Rate-limit only the expensive path — a fresh yt-dlp resolve. Seeking re-hits
+    # this endpoint with Range requests against the already-cached URL; charging
+    # those against the budget would 429 a scrub mid-track.
+    _hit = _preview_cache.get(video_id)
+    if not (_hit and _hit[2] > time.time()):
+        _enforce_extraction_budget(user)
     range_header = request.headers.get("range") or request.headers.get("Range")
 
     def setup():
@@ -2373,6 +2412,7 @@ async def search_suggest(
     q: str = "",
     hl: str = "es",
     user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """Autocomplete strings for the search bar dropdown. Cached 60s. The cache
     miss does a blocking httpx call, so resolve it on the extraction pool."""
