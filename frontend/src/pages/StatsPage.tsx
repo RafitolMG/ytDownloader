@@ -134,7 +134,16 @@ export default function StatsPage() {
                   {topTracks.map((t, i) => (
                     <li
                       key={`${t.video_id}/${t.codec}/${t.bitrate}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`play ${t.title ?? t.video_id}`}
                       onClick={() => player.play(topTracks.map(toLibraryItem), i)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          player.play(topTracks.map(toLibraryItem), i)
+                        }
+                      }}
                       className="flex items-center gap-3 px-2 sm:px-3 py-2 cursor-pointer hover:bg-violet/10 transition"
                     >
                       <span className="font-pixel text-sm text-ink-lo w-6 text-right tabular-nums">
