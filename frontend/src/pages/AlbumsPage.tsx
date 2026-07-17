@@ -473,7 +473,16 @@ function OwnedTrackList({ album }: { album: LibraryAlbum }) {
       {album.tracks.map((t, idx) => (
         <li
           key={`${t.video_id}/${t.codec}/${t.bitrate}`}
+          role="button"
+          tabIndex={0}
+          aria-label={`play ${t.title ?? t.video_id}`}
           onClick={() => player.play(album.tracks, idx)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              player.play(album.tracks, idx)
+            }
+          }}
           className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition ${
             isCurrentAlbum(t) ? 'bg-hot/10' : 'hover:bg-violet/10'
           }`}
