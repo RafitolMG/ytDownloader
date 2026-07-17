@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
+import { useBackClose } from '@/shared/lib/backStack'
 import { EmptyState } from '@/shared/ui/EmptyState'
 import { api } from '@/shared/api/client'
 import type { AlbumCard, CatalogItem, LibraryItem } from '@/shared/api/types'
@@ -73,6 +74,10 @@ export default function AlbumsPage() {
   const isSearching = debouncedQuery.length >= 2
 
   const [open, setOpen] = useState<OpenAlbum | null>(null)
+  // Album detail is local state, not a route — let the back gesture close it
+  // first instead of navigating away from the Albums page.
+  const closeAlbum = useCallback(() => setOpen(null), [])
+  useBackClose(open !== null, closeAlbum)
 
   const libraryQuery = useQuery({
     queryKey: ['library'],
