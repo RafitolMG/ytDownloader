@@ -212,11 +212,20 @@ def media_user(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid or expired media token",
             )
+        # Resolve the caller from the live session the token was bound to, not
+        # from the token itself: logout (session gone) revokes the token, and the
+        # current role/username are read fresh rather than frozen at mint time.
+        session = db.get_session(claims["sid"])
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid or expired media token",
+            )
         return CurrentUser(
-            session_id="media-token",
-            user_id=claims["uid"],
-            username=claims.get("un", ""),
-            role=claims.get("r", db.ROLE_USER),
+            session_id=session["id"],
+            user_id=session["user_id"],
+            username=session["username"],
+            role=session["role"],
         )
     return current_user(ytdl_session=ytdl_session)
 

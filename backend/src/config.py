@@ -44,7 +44,10 @@ ACCESS_REFRESH_LEEWAY_SEC: int = int(_env("ACCESS_REFRESH_LEEWAY_SEC", "60"))
 # the backend generates a per-process secret (fine for the single-box default,
 # but a restart invalidates outstanding tokens until the client re-fetches).
 MEDIA_TOKEN_SECRET: str = _env("MEDIA_TOKEN_SECRET", "")
-MEDIA_TOKEN_TTL_SEC: int = int(_env("MEDIA_TOKEN_TTL_SEC", "21600"))  # 6h
+# Bound to a session (see media_token.py), so logout revokes it immediately; the
+# TTL is now just a backstop and re-fetch cadence, kept short. The web client
+# re-fetches ahead of expiry and AuthProvider polls it while signed in.
+MEDIA_TOKEN_TTL_SEC: int = int(_env("MEDIA_TOKEN_TTL_SEC", "3600"))  # 1h
 
 # CORS allow-list for the SPA dev server. Leave empty (or unset) in production
 # when the backend serves the SPA from the same origin — CORS is a no-op then.

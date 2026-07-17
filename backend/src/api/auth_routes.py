@@ -132,7 +132,7 @@ def media_token(user: CurrentUser = Depends(current_user)):
     session id: it's HMAC-signed, carries only user/role + an expiry, and dies on
     its own, so a leaked media URL can't be replayed as a session. The client
     re-fetches before it expires. The web app never calls this (cookie suffices)."""
-    token, expires_in = media_token_mod.mint(user.user_id, user.username, user.role)
+    token, expires_in = media_token_mod.mint(user.user_id, user.session_id)
     return {"token": token, "expires_in": expires_in}
 
 
