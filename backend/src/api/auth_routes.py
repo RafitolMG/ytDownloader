@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 
-from src import config, db, homeauth, media_token as media_token_mod, rate_limit
+from src import auth, config, db, homeauth, media_token as media_token_mod, rate_limit
 from src.auth import CurrentUser, current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -138,6 +138,9 @@ def logout(response: Response, user: CurrentUser = Depends(current_user)):
     if session is not None:
         homeauth.logout(session.get("refresh_cookie"))
         db.delete_session(user.session_id)
+    # Forget the per-session refresh lock too — delete_session drops the row but
+    # the in-memory lock map would otherwise keep an entry per logged-out session.
+    auth._drop_refresh_lock(user.session_id)
     _clear_session_cookie(response)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
