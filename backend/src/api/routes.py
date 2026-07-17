@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import httpx
 import os
-import queue
 import re
 import shutil
 import tempfile
@@ -148,9 +147,48 @@ def _startup_init():
         )
 
 
-# ── In-memory job runtime (file paths, queues, cancel flags) ──────────────────
+# ── In-memory job runtime (file paths, progress fan-out, cancel flags) ────────
 
-# job_id -> {"queue": Queue, "file_path": str | None, "tmp_dir": str}
+
+class _ProgressHub:
+    """Fan-out of a job's progress events to any number of live WebSocket
+    subscribers.
+
+    The (sync) download worker calls `put()` exactly like it used to with a
+    single Queue; each connected client instead subscribes its own asyncio.Queue,
+    so two tabs on the same job don't steal each other's events and a terminal
+    event reaches them all. Events published with no subscribers are dropped — a
+    late subscriber gets the DB snapshot for current state on connect, then live
+    events from that point (unchanged from the old single-consumer behaviour).
+    Bridging is thread-safe: the worker thread hands each event to the
+    subscriber's own event loop via call_soon_threadsafe, so no thread blocks.
+    """
+
+    def __init__(self) -> None:
+        self._subs: dict[asyncio.Queue, asyncio.AbstractEventLoop] = {}
+        self._lock = threading.Lock()
+
+    def put(self, event: dict) -> None:
+        with self._lock:
+            items = list(self._subs.items())
+        for q, loop in items:
+            try:
+                loop.call_soon_threadsafe(q.put_nowait, event)
+            except RuntimeError:
+                pass  # subscriber's loop already closed — it's gone
+
+    def subscribe(self, loop: asyncio.AbstractEventLoop) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        with self._lock:
+            self._subs[q] = loop
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        with self._lock:
+            self._subs.pop(q, None)
+
+
+# job_id -> {"queue": _ProgressHub, "file_path": str | None, "tmp_dir": str}
 _jobs: dict[str, dict] = {}
 _cancelled: set[str] = set()
 
@@ -386,7 +424,7 @@ async def get_resolutions(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-def _throttled_progress(job_id: str, progress_queue: queue.Queue):
+def _throttled_progress(job_id: str, progress_queue: _ProgressHub):
     """
     Build an on_progress callback that:
       - cancels via _Cancelled if the job is in _cancelled
@@ -434,7 +472,7 @@ def start_download(
     is_audio_file = is_audio_preset and body.as_file
 
     job_id = str(uuid.uuid4())
-    progress_queue: queue.Queue = queue.Queue()
+    progress_queue: _ProgressHub = _ProgressHub()
     # For library imports we don't need a tmp_dir at the job level — the
     # per-track downloader manages its own scratch space under LIBRARY_DIR.
     tmp_dir = None if is_audio_import else tempfile.mkdtemp(prefix="ytdl_")
@@ -716,7 +754,7 @@ def start_playlist_download(
         raise HTTPException(status_code=400, detail=str(e))
 
     job_id = str(uuid.uuid4())
-    progress_queue: queue.Queue = queue.Queue()
+    progress_queue: _ProgressHub = _ProgressHub()
     # Zip flow stages everything in a tmp_dir; in-app flow writes straight
     # to LIBRARY_DIR via the per-track downloader and needs no scratch space.
     tmp_dir = tempfile.mkdtemp(prefix="ytdl_pl_") if body.as_file else None
@@ -1039,7 +1077,7 @@ def start_tracklist_import(
     codec, bitrate, ext = ytDownloaderFunctions.parse_audio_quality('mp3-320')
 
     job_id = str(uuid.uuid4())
-    progress_queue: queue.Queue = queue.Queue()
+    progress_queue: _ProgressHub = _ProgressHub()
     _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": None}
     db.create_job(
         job_id=job_id,
@@ -1239,26 +1277,45 @@ async def progress_ws(websocket: WebSocket, job_id: str):
         await websocket.close()
         return
 
-    progress_queue: queue.Queue = runtime["queue"]
+    hub: _ProgressHub = runtime["queue"]
     loop = asyncio.get_running_loop()
+    sub = hub.subscribe(loop)
+
+    # The progress channel is server→client only, so a receive() completes only
+    # when the socket closes. Race it against the next event: a disconnect frees
+    # us immediately (instead of stranding a thread until some later event that
+    # may never come), and the subscriber queue is an asyncio.Queue so no thread
+    # is blocked at all.
+    async def _wait_disconnect() -> None:
+        try:
+            while True:
+                await websocket.receive()
+        except WebSocketDisconnect:
+            pass
+
+    watcher = asyncio.create_task(_wait_disconnect())
     try:
         while True:
-            try:
-                # Block off the event loop until the next event instead of
-                # busy-polling every 100ms — no added latency, no idle wakeups.
-                # The periodic timeout keeps a vanished producer from pinning a
-                # worker thread forever.
-                event = await loop.run_in_executor(
-                    None, lambda: progress_queue.get(True, 30)
-                )
-            except queue.Empty:
-                continue
+            getter = asyncio.create_task(sub.get())
+            done, _pending = await asyncio.wait(
+                {getter, watcher}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if watcher in done:
+                getter.cancel()
+                break
+            event = getter.result()
             await websocket.send_json(event)
             if event["type"] in ("done", "error", "cancelled"):
                 break
-        await websocket.close()
     except WebSocketDisconnect:
         pass
+    finally:
+        watcher.cancel()
+        hub.unsubscribe(sub)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.get("/api/file/{job_id}")
