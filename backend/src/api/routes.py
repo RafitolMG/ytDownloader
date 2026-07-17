@@ -2147,8 +2147,15 @@ def stream_track(
         if units.strip().lower() != "bytes":
             raise ValueError("only `bytes` units are supported")
         start_str, _, end_str = ranges.strip().split(",", 1)[0].partition("-")
-        start = int(start_str) if start_str else 0
-        end = int(end_str) if end_str else file_size - 1
+        if not start_str and end_str:
+            # Suffix range `bytes=-N` → the LAST N bytes (RFC 7233). Treating an
+            # empty start as 0 would wrongly serve the first N.
+            suffix = int(end_str)
+            start = max(0, file_size - suffix)
+            end = file_size - 1
+        else:
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
     except ValueError:
         raise HTTPException(status_code=416, detail="invalid Range header")
 
