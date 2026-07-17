@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/shared/api/client'
 import type { JobRow as Job, JobStatus } from '@/shared/api/types'
+import { ConfirmButton } from '@/shared/ui/ConfirmButton'
 import { useLiveJobProgress } from './useLiveJobProgress'
 
 const STATUS_STYLES: Record<JobStatus, { label: string; cls: string; glow?: string }> = {
@@ -139,14 +140,12 @@ export function JobRow({ job }: { job: Job }) {
             >
               ↻ retry
             </button>
-            <button
-              type="button"
+            <ConfirmButton
+              onConfirm={() => del.mutate()}
               disabled={del.isPending}
-              onClick={() => del.mutate()}
-              className="font-pixel text-sm uppercase tracking-widest px-3 py-1 border border-ink-lo/40 text-ink-lo hover:text-crit hover:border-crit/60 disabled:opacity-40 transition rounded-xs"
-            >
-              ⌫ delete
-            </button>
+              idle="⌫ delete"
+              title="delete this job from history"
+            />
           </>
         )}
       </div>
