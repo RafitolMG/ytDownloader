@@ -19,6 +19,7 @@ import {
   msSetPosition,
 } from './mediaSession'
 import { resolveArtworkUrl } from '@/shared/lib/thumbnail'
+import { nativeCoverDataUrl } from './nativeCover'
 import { offlineIndex } from '@/features/offline/offlineIndex'
 import { getPlaybackTime, setPlaybackTime } from './playbackStore'
 import { catalogToLibrary } from '@/shared/lib/libraryItem'
@@ -624,7 +625,15 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       if (!art) art = await resolveArtworkUrl(current.thumbnail_url)
       if (cancelled) return
       setCoverUrl(art ?? null)
+      // Fast path: title/artist/album + the WebView session's artwork (from the
+      // URL) show immediately.
       msSetMetadata({ ...base, artworkUrl: art })
+      // Native only: re-hand the cover as a data: URL the plugin can actually
+      // render (its loader can't fetch remote/capacitor_file URLs), so the
+      // notification/lock-screen art is reliable offline. No-op on web.
+      const nativeArt = await nativeCoverDataUrl(vid, art ?? null)
+      if (cancelled || !nativeArt) return
+      msSetMetadata({ ...base, artworkUrl: nativeArt })
     })()
     return () => {
       cancelled = true
