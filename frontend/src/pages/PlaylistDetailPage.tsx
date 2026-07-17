@@ -59,6 +59,11 @@ function PlaylistDetailView() {
           bitrate: t.bitrate,
         })),
       ),
+    onError: () => {
+      // The optimistic reorder lied — snap back to the server's order.
+      if (playlistQuery.data) setLocalTracks(playlistQuery.data.tracks)
+      showToast({ message: "couldn't save the new order", variant: 'err' })
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['playlist', id] })
     },
@@ -67,6 +72,7 @@ function PlaylistDetailView() {
   const remove = useMutation({
     mutationFn: (key: { video_id: string; codec: string; bitrate: string }) =>
       api.removeFromPlaylist(id, key.video_id, key.codec, key.bitrate),
+    onError: () => showToast({ message: "couldn't remove the track", variant: 'err' }),
     onSuccess: (_data, key) => {
       qc.invalidateQueries({ queryKey: ['playlist', id] })
       qc.invalidateQueries({ queryKey: ['playlists'] })
@@ -90,8 +96,10 @@ function PlaylistDetailView() {
     mutationFn: () => api.deletePlaylist(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['playlists'] })
+      showToast({ message: 'playlist deleted', variant: 'success' })
       navigate('/playlists')
     },
+    onError: () => showToast({ message: "couldn't delete the playlist", variant: 'err' }),
   })
 
   const player = useAudioPlayer()
@@ -512,6 +520,7 @@ function EditDialog({
   const [description, setDescription] = useState(initialDescription)
   const [visibility, setVisibility] = useState<PlaylistVisibility>(initialVisibility)
 
+  const showToast = useToast()
   const save = useMutation({
     mutationFn: () =>
       api.updatePlaylist(id, {
@@ -522,8 +531,10 @@ function EditDialog({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['playlist', id] })
       qc.invalidateQueries({ queryKey: ['playlists'] })
+      showToast({ message: 'playlist updated', variant: 'success' })
       onClose()
     },
+    onError: () => showToast({ message: "couldn't save changes", variant: 'err' }),
   })
 
   return (

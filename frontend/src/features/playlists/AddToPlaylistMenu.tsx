@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import { api, ApiError } from '@/shared/api/client'
 import type { LibraryItem } from '@/shared/api/types'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
+import { useToast } from '@/shared/ui/ToastProvider'
 
 type TrackKey = { video_id: string; codec: string; bitrate: string }
 
@@ -37,6 +38,7 @@ export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) 
   const triggerRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
   const qc = useQueryClient()
+  const showToast = useToast()
 
   const openMenu = () => {
     setError(null)
@@ -105,6 +107,7 @@ export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) 
     onSuccess: (_, id) => {
       qc.invalidateQueries({ queryKey: ['playlists'] })
       qc.invalidateQueries({ queryKey: ['playlist', id] })
+      showToast({ message: 'added to playlist', variant: 'success' })
       setOpen(false)
     },
     onError: (err) => setError(err instanceof ApiError ? err.message : 'failed'),
@@ -121,6 +124,7 @@ export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) 
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['playlists'] })
       setNewName('')
+      showToast({ message: 'playlist created — track added', variant: 'success' })
       setOpen(false)
     },
     onError: (err) => setError(err instanceof Error ? err.message : 'failed'),
