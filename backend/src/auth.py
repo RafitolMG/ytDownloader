@@ -160,10 +160,15 @@ def _drop_refresh_lock(session_id: str) -> None:
 
 
 def _touch_session_throttled(session_id: str) -> None:
-    """db.touch_session at most once per _TOUCH_THROTTLE_SEC per session."""
+    """db.touch_session at most once per _TOUCH_THROTTLE_SEC per session.
+
+    A missing entry means "never touched" and must always write — using a 0.0
+    default instead would wrongly throttle the first touch whenever the monotonic
+    clock reads below the window (e.g. within a minute of a fresh boot)."""
     now = time.monotonic()
     with _last_touch_guard:
-        if now - _last_touch.get(session_id, 0.0) < _TOUCH_THROTTLE_SEC:
+        last = _last_touch.get(session_id)
+        if last is not None and now - last < _TOUCH_THROTTLE_SEC:
             return
         _last_touch[session_id] = now
     db.touch_session(session_id)
