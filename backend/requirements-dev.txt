@@ -1,0 +1,5 @@
+# Test/CI-only dependencies. NOT installed into the runtime image (the Dockerfile
+# installs requirements.txt only). httpx is already a runtime dep and powers
+# Starlette's TestClient.
+-r requirements.txt
+pytest==9.1.1
