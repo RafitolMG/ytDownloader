@@ -270,6 +270,7 @@ function CreatePlaylistDialog({ onClose }: { onClose: () => void }) {
   const [description, setDescription] = useState('')
   const qc = useQueryClient()
 
+  const showToast = useToast()
   const create = useMutation({
     mutationFn: () =>
       api.createPlaylist({
@@ -279,8 +280,14 @@ function CreatePlaylistDialog({ onClose }: { onClose: () => void }) {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['playlists'] })
+      showToast({ message: 'playlist created', variant: 'success' })
       onClose()
     },
+    onError: (e) =>
+      showToast({
+        message: e instanceof Error ? `couldn't create playlist: ${e.message}` : "couldn't create playlist",
+        variant: 'err',
+      }),
   })
 
   return (

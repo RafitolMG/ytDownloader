@@ -7,6 +7,7 @@ import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { AddToPlaylistMenu } from '@/features/playlists/AddToPlaylistMenu'
 import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
+import { useToast } from '@/shared/ui/ToastProvider'
 import { useRadio } from './RadioContext'
 import { useExternalDownload } from './useExternalDownload'
 import { toPreviewItem } from './lib'
@@ -26,6 +27,7 @@ export const CatalogRow = memo(function CatalogRow({
   const player = useAudioPlayer()
   const queryClient = useQueryClient()
   const openRadio = useRadio()
+  const showToast = useToast()
 
   const toggleLibrary = useMutation({
     // The two branches return different literal `owned` types; widen to a
@@ -40,6 +42,11 @@ export const CatalogRow = memo(function CatalogRow({
       queryClient.invalidateQueries({ queryKey: ['discover'] })
       queryClient.invalidateQueries({ queryKey: ['library'] })
     },
+    onError: () =>
+      showToast({
+        message: item.is_owned ? "couldn't remove from your library" : "couldn't save to your library",
+        variant: 'err',
+      }),
   })
 
   const isCurrent =
