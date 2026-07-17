@@ -96,7 +96,7 @@ PKG_LOCK="$ROOT/frontend/package-lock.json"
 PKG_STAMP="$ROOT/.dev/frontend.package.sha256"
 
 if [ ! -d node_modules ]; then
-  npm install --silent
+  npm ci --silent
   if [ -f "$PKG_LOCK" ]; then
     sha256sum "$PKG_LOCK" | awk '{print $1}' > "$PKG_STAMP"
   fi
@@ -104,7 +104,7 @@ if [ ! -d node_modules ]; then
 elif [ -f "$PKG_LOCK" ]; then
   CURRENT_PKG_HASH="$(sha256sum "$PKG_LOCK" | awk '{print $1}')"
   if [ ! -f "$PKG_STAMP" ] || [ "$(cat "$PKG_STAMP")" != "$CURRENT_PKG_HASH" ]; then
-    npm install --silent
+    npm ci --silent
     echo "$CURRENT_PKG_HASH" > "$PKG_STAMP"
     echo "  · node_modules synced"
   fi
