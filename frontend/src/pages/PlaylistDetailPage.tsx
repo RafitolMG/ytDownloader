@@ -99,7 +99,8 @@ function PlaylistDetailView() {
 
   if (playlistQuery.isLoading) {
     return (
-      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-bottombars">
+        <AppHeader queueCount={activeCount} />
         <div className="font-pixel text-ink-mid">··· loading playlist ···</div>
       </main>
     )
@@ -118,7 +119,8 @@ function PlaylistDetailView() {
       )
     }
     return (
-      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
+      <main className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 pb-bottombars">
+        <AppHeader queueCount={activeCount} />
         <div className="font-pixel text-crit">
           could not load playlist —{' '}
           {playlistQuery.error instanceof Error

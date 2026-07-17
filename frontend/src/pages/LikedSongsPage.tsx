@@ -169,6 +169,13 @@ export default function LikedSongsPage() {
           <div className="font-pixel text-ink-mid">··· loading ···</div>
         )}
 
+        {libraryQuery.isError && (
+          <div className="font-pixel text-crit">
+            ⚠ couldn't load your songs:{' '}
+            {libraryQuery.error instanceof Error ? libraryQuery.error.message : 'unknown'}
+          </div>
+        )}
+
         {libraryQuery.data && items.length === 0 && (
           <EmptyState
             glyph="⊹"

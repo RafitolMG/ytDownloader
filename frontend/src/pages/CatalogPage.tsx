@@ -170,6 +170,13 @@ export default function CatalogPage() {
           </div>
         </div>
 
+        {browseHome &&
+          (dailyMixesQuery.isError || recentQuery.isError || categoriesQuery.isError) && (
+            <div className="font-pixel text-sm text-crit mb-4">
+              ⚠ some of your home feeds couldn't load — check your connection.
+            </div>
+          )}
+
         <div className="card-vapor rounded-sm p-3 mb-6 flex items-center gap-3 font-pixel">
           <span className="text-cool text-xl">⌕</span>
           <input
