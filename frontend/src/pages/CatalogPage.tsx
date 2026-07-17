@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
+import { useBackClose } from '@/shared/lib/backStack'
 import { api } from '@/shared/api/client'
 import type {
   CatalogItem,
@@ -92,6 +93,17 @@ export default function CatalogPage() {
     setActiveMix(null)
     setActiveRadio(item)
   }
+
+  // Drill-downs are local state, not routes, so wire the Android/browser back
+  // gesture to pop them back to browse-home first (instead of leaving the page).
+  const inDrillDown =
+    activeCategory !== null || activeMix !== null || activeRadio !== null
+  const closeDrillDown = useCallback(() => {
+    setActiveCategory(null)
+    setActiveMix(null)
+    setActiveRadio(null)
+  }, [])
+  useBackClose(inDrillDown, closeDrillDown)
 
   const recentQuery = useQuery({
     queryKey: ['recent'],
