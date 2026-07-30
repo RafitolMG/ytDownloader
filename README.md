@@ -145,3 +145,10 @@ prefix is enough to keep the upgrade headers. No special label required.
 - **Backend**: Python 3.12 + FastAPI + httpx + yt-dlp + ffmpeg + SQLite (WAL).
 - **Frontend**: React 19 + Vite + TypeScript + Tailwind v4 + react-query.
 - **Auth**: HomeAuth (external) via server-to-server JWT validation.
+
+
+## Licencia
+
+Publicado bajo **GNU AGPL-3.0-or-later** (ver [LICENSE](LICENSE)). Al ser AGPL, si
+ofreces una versión modificada como servicio en red, debes publicar también su
+código fuente.
