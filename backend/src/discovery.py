@@ -14,7 +14,9 @@ import hashlib
 import re
 import threading
 import traceback
-from datetime import datetime, timezone
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
+from typing import Iterable
 
 from src import db, search as search_mod, ytmusic
 from src.auth import CurrentUser
@@ -23,9 +25,22 @@ from src.auth import CurrentUser
 MAX_ARTIST_SHARE = 0.35      # ceiling on one artist's share of a mix
 _ANCHOR_BOOST = 1.0          # track credits the anchor
 _NEIGHBOR_BOOST = 0.45       # track shares a credit row with the anchor (collab graph)
+_PLAYLIST_NEIGHBOR_BOOST = 0.35  # track's artist co-occurs with the anchor on a playlist
 _AFFINITY_WEIGHT = 0.5       # × the user's normalized play affinity for the artist
 _POPULARITY_WEIGHT = 0.1     # × normalized owner_count (cold-start tie-breaker)
+_PLAY_WEIGHT = 0.3           # × normalized recent play count for the exact track
 _JITTER_WEIGHT = 0.25        # × deterministic per-(day, mix, track) jitter
+
+# How far back "recent" plays count as the current-taste signal. Recommendations
+# blend this window's plays (falling back to all-time when the window is empty) so
+# they track what the user listens to *now*, not their lifetime history.
+_RECENCY_WINDOW_DAYS = 90
+
+
+def _recency_since(days: int = _RECENCY_WINDOW_DAYS) -> str:
+    """ISO lower bound for the recent-play window, matching db._now()'s format so
+    the string compares lexicographically against stored played_at values."""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
 
 
 def _artist_members(credit: str | None) -> list[str]:
@@ -64,43 +79,82 @@ _SEED_W_BASE = 0.5           # floor so even a cold track can be sampled
 _SEED_W_POP = 1.0            # × normalized owner_count
 _SEED_W_RECENT = 1.0         # × recency (newest = 1, older = 0)
 _SEED_ARTIST_CAP = 2         # max seeds sharing a primary artist (diversity)
+_SEED_POSITIVE_SLOTS = 3     # seeds reserved for the viewer's actual top plays
+
+
+def _es_sample(scored: list[tuple[float, str, str]], count: int,
+               picked: list[str], per_artist: dict[str, int]) -> None:
+    """Efraimidis-Spirakis pick: append video_ids from `scored` (already
+    (draw_key, video_id, primary_artist) tuples) into `picked`, honoring the
+    per-artist cap and skipping ids already picked, until `picked` reaches
+    `count`. Mutates `picked`/`per_artist` in place so it can run in phases."""
+    seen = set(picked)
+    for _key, vid, primary in sorted(scored, key=lambda t: (t[0], t[1]), reverse=True):
+        if len(picked) >= count:
+            break
+        if vid in seen:
+            continue
+        if primary and per_artist.get(primary, 0) >= _SEED_ARTIST_CAP:
+            continue
+        picked.append(vid)
+        seen.add(vid)
+        per_artist[primary] = per_artist.get(primary, 0) + 1
 
 
 def weighted_seed_ids(viewer_id: str, *, count: int = 8, nonce: int = 0) -> list[str]:
-    """Pick `count` seed video_ids for the suggestion radios, biased for variety
-    instead of always taking the top-N most-popular tracks.
+    """Pick `count` seed video_ids for the suggestion radios, biased toward the
+    viewer's taste while staying varied instead of always taking the top-N popular.
 
-    Weighting:
-      - popular *and* recently-added tracks both feed the candidate pool;
-      - weight rises with owner_count and recency;
-      - the viewer's most-played tracks are penalized so suggestions lean on
-        material they haven't already worn out ("less-played");
-      - a per-(day, nonce, video_id) jitter makes a client ↻ refresh re-roll the
-        selection while a given nonce stays reproducible; the day component also
-        drifts the default (nonce=0) pick from one day to the next;
-      - an artist cap keeps `count` seeds from collapsing onto one artist.
+    Two phases:
+      1. Positive taste seeds — a few slots reserved for the viewer's actual
+         most-played tracks (recent window, all-time fallback), sampled weighted
+         by play count. This makes suggestions lean on what they love instead of
+         only using play history as a penalty.
+      2. Variety seeds — fill the rest from the popular + recently-added pool with
+         the existing less-played bias (owner_count + recency, the viewer's top
+         plays penalized so worn-out material doesn't dominate).
+
+    Both phases share one per-(day, nonce, video_id) jitter so a client ↻ refresh
+    re-rolls reproducibly (the day component also drifts the default nonce=0 pick
+    day to day), one artist cap, and one dedup set.
 
     Returns [] on a cold/empty catalog (caller decides the fallback)."""
     popular = db.popular_catalog(viewer_id, _SEED_POOL_POPULAR)
     if not popular:
         return []
     recent = db.list_catalog(viewer_id, sort="newest", limit=_SEED_POOL_RECENT)
-    familiar = {
-        t["video_id"]
-        for t in db.top_played_tracks(viewer_id, limit=_SEED_FAMILIAR_LIMIT)
-    }
+    since = _recency_since()
+    top_played = (
+        db.top_played_tracks(viewer_id, limit=_SEED_FAMILIAR_LIMIT, since=since)
+        or db.top_played_tracks(viewer_id, limit=_SEED_FAMILIAR_LIMIT)
+    )
+    familiar = {t["video_id"] for t in top_played}
 
+    day_seed = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+
+    picked: list[str] = []
+    per_artist: dict[str, int] = {}
+
+    # ── Phase 1: positive taste seeds ─────────────────────────────────────────
+    max_pc = max((t.get("play_count") or 0) for t in top_played) or 1
+    positive: list[tuple[float, str, str]] = []
+    for t in top_played:
+        vid = t["video_id"]
+        weight = _SEED_W_BASE + (t.get("play_count") or 0) / max_pc
+        u = _unit_hash(day_seed, nonce, "pos", vid)
+        primary = next(iter(_artist_members(t.get("artist"))), "").lower()
+        positive.append((u ** (1.0 / max(weight, 1e-6)), vid, primary))
+    _es_sample(positive, min(_SEED_POSITIVE_SLOTS, count), picked, per_artist)
+
+    # ── Phase 2: variety seeds from the popular + recent pool ──────────────────
     max_owner = max((c.get("owner_count") or 0) for c in popular) or 1
     recent_rank = {c["video_id"]: i for i, c in enumerate(recent)}
     n_recent = max(len(recent), 1)
-
     candidates: dict[str, dict] = {}
     for row in (*popular, *recent):
         candidates.setdefault(row["video_id"], row)
 
-    day_seed = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
-
-    scored: list[tuple[float, str, str]] = []  # (draw key, video_id, primary artist)
+    variety: list[tuple[float, str, str]] = []
     for vid, row in candidates.items():
         pop_norm = (row.get("owner_count") or 0) / max_owner
         rank = recent_rank.get(vid)
@@ -109,42 +163,96 @@ def weighted_seed_ids(viewer_id: str, *, count: int = 8, nonce: int = 0) -> list
         if vid in familiar:
             weight *= _SEED_FAMILIAR_PENALTY
         u = _unit_hash(day_seed, nonce, vid)
-        es_key = u ** (1.0 / max(weight, 1e-6))
         primary = next(iter(_artist_members(row.get("artist"))), "").lower()
-        scored.append((es_key, vid, primary))
+        variety.append((u ** (1.0 / max(weight, 1e-6)), vid, primary))
+    _es_sample(variety, count, picked, per_artist)
 
-    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
-
-    picked: list[str] = []
-    per_artist: dict[str, int] = {}
-    for _key, vid, primary in scored:
-        if primary and per_artist.get(primary, 0) >= _SEED_ARTIST_CAP:
-            continue
-        picked.append(vid)
-        per_artist[primary] = per_artist.get(primary, 0) + 1
-        if len(picked) >= count:
-            break
     return picked
 
 
 def rotate_pick(
     ranked_items: list[tuple[int, dict]], count: int, *, nonce: int = 0,
-    rank_falloff: float = 12.0,
+    rank_falloff: float = 12.0, exclude: "set[str] | None" = None,
 ) -> list[dict]:
     """Pick `count` items from a relevance-ranked `(rank, item)` list, favoring
     the most-related while re-rolling per `nonce` so a ↻ refresh surfaces
     different picks. `rank_falloff` sets how fast relevance weight decays with
     rank (weight = falloff/(rank+falloff): 1.0 at rank 0). Each item must carry a
-    'video_id'. Order of the return is by draw key (already rotated)."""
+    'video_id'. Order of the return is by draw key (already rotated).
+
+    `exclude` is a set of video_ids shown in recent rolls: they're held back so a
+    ↻ surfaces fresh picks, and only drawn on if the fresh pool can't fill `count`
+    (so a small pool never yields an empty roll)."""
     if count <= 0 or not ranked_items:
         return []
-    scored: list[tuple[float, dict]] = []
-    for rank, item in ranked_items:
-        weight = rank_falloff / (rank + rank_falloff)
-        u = _unit_hash(nonce, item.get("video_id"))
-        scored.append((u ** (1.0 / max(weight, 1e-6)), item))
-    scored.sort(key=lambda t: t[0], reverse=True)
-    return [item for _key, item in scored[:count]]
+    exclude = exclude or set()
+
+    def draw(items: list[tuple[int, dict]]) -> list[dict]:
+        scored: list[tuple[float, dict]] = []
+        for rank, item in items:
+            weight = rank_falloff / (rank + rank_falloff)
+            u = _unit_hash(nonce, item.get("video_id"))
+            scored.append((u ** (1.0 / max(weight, 1e-6)), item))
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [item for _key, item in scored]
+
+    fresh = [ri for ri in ranked_items if ri[1].get("video_id") not in exclude]
+    picked = draw(fresh)[:count]
+    if len(picked) < count:  # exclusion window drained the pool — relax
+        have = {it.get("video_id") for it in picked}
+        stale = [
+            ri for ri in ranked_items
+            if ri[1].get("video_id") in exclude and ri[1].get("video_id") not in have
+        ]
+        picked += draw(stale)[: count - len(picked)]
+    return picked
+
+
+# ── Cross-refresh memory ──────────────────────────────────────────────────────
+# Each ↻ is an independent weighted draw over the same candidate pool, so
+# consecutive rolls can resurface the same items. We remember the video_ids shown
+# in the last few rolls per (user, surface) and hold them back from a *newer*
+# roll — until the pool is exhausted, at which point callers relax so a roll is
+# never starved. Determinism per nonce holds: the exclusion for nonce N is the
+# union of the shown sets of the earlier nonces still in the window, stable as the
+# client increments N. Bounded and in-memory, like the radio / lineup caches.
+
+_ROLL_MEMORY_DEPTH = 6   # how many recent rolls to remember per (user, surface)
+_roll_memory: "dict[tuple[str, str], OrderedDict[int, frozenset[str]]]" = {}
+_roll_lock = threading.Lock()
+
+
+def roll_exclusions(user_id: str, surface: str, nonce: int) -> set[str]:
+    """video_ids shown in remembered rolls *older* than `nonce` — the set a new
+    roll should hold back. Empty for the initial load (nonce 0) or an unseen
+    surface."""
+    if nonce <= 0:
+        return set()
+    with _roll_lock:
+        hist = _roll_memory.get((user_id, surface))
+        if not hist:
+            return set()
+        out: set[str] = set()
+        for n, ids in hist.items():
+            if n < nonce:
+                out |= ids
+    return out
+
+
+def record_roll(user_id: str, surface: str, nonce: int, video_ids: Iterable[str]) -> None:
+    """Remember the ids a roll surfaced, capped to the last `_ROLL_MEMORY_DEPTH`
+    rolls per (user, surface). Idempotent per nonce (re-recording overwrites)."""
+    key = (user_id, surface)
+    ids = frozenset(v for v in video_ids if v)
+    with _roll_lock:
+        hist = _roll_memory.get(key)
+        if hist is None:
+            hist = OrderedDict()
+            _roll_memory[key] = hist
+        hist[nonce] = ids
+        hist.move_to_end(nonce)
+        while len(hist) > _ROLL_MEMORY_DEPTH:
+            hist.popitem(last=False)
 
 
 def _scene_clusters(neighbors: dict[str, set[str]], day_seed: int) -> list[list[str]]:
@@ -410,28 +518,51 @@ def _discover_feed(
 
 _lineup_cache: dict[tuple, tuple[int, dict]] = {}
 _lineup_lock = threading.Lock()
+_MAX_MIX_ROLLS = 12  # cap on cached nonce variants per (user, count, size) per day
 
 
-def _daily_mixes_impl(count: int, size: int, user: CurrentUser):
-    """Cache the assembled lineup per (user, count, size) for the current day.
+def _roll_seed(day_seed: int, nonce: int) -> int:
+    """Blend a refresh nonce into the day seed so a ↻ re-rolls the whole lineup
+    (anchors, scenes, jitter) reproducibly. nonce=0 returns the day seed
+    unchanged, preserving the default day-seeded behaviour."""
+    if nonce == 0:
+        return day_seed
+    h = hashlib.blake2b(f"{day_seed}:{nonce}".encode(), digest_size=8)
+    return int.from_bytes(h.digest(), "big")
+
+
+def _daily_mixes_impl(count: int, size: int, user: CurrentUser, nonce: int = 0):
+    """Cache the assembled lineup per (user, count, size, nonce) for the current
+    day.
 
     The build is heavy — several YT Music radio round-trips plus scoring — and the
     home page (plus a re-fetch after every ~20s of listening) would otherwise
     rebuild it constantly. The day seed is the natural TTL; stale-day entries are
-    swept on the next write. Mixes are meant to be daily, so within-day stability
-    is the intended behaviour, not a regression."""
+    swept on the next write. `nonce` is the client ↻ refresh counter: nonce=0 is
+    the stable day-seeded lineup; a higher nonce re-rolls it reproducibly. We keep
+    only the most recent `_MAX_MIX_ROLLS` variants per (user, count, size) so
+    repeated refreshing can't grow the cache without bound."""
     count = max(1, min(count, 8))
     size = max(5, min(size, 60))
+    nonce = max(0, int(nonce))
     day_seed = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
-    cache_key = (user.user_id, count, size)
+    cache_key = (user.user_id, count, size, nonce)
     with _lineup_lock:
         hit = _lineup_cache.get(cache_key)
         if hit is not None and hit[0] == day_seed:
             return _reconcile_downloaded(hit[1], user)
-    result = _build_daily_mixes(count, size, user, day_seed)
+    result = _build_daily_mixes(count, size, user, _roll_seed(day_seed, nonce))
     with _lineup_lock:
         _lineup_cache[cache_key] = (day_seed, result)
+        # Drop stale-day entries, then bound the surviving nonce variants for this
+        # (user, count, size) to the newest few (keys sort by nonce).
         for k in [k for k, v in _lineup_cache.items() if v[0] != day_seed]:
+            _lineup_cache.pop(k, None)
+        variants = sorted(
+            (k for k in _lineup_cache if k[:3] == cache_key[:3]),
+            key=lambda k: k[3],
+        )
+        for k in variants[:-_MAX_MIX_ROLLS]:
             _lineup_cache.pop(k, None)
     return _reconcile_downloaded(result, user)
 
@@ -500,8 +631,14 @@ def _build_daily_mixes(count: int, size: int, user: CurrentUser, day_seed: int):
 
     # ── Signals ──────────────────────────────────────────────────────────────
     # User affinity per artist (normalized 0-1), so personal favourites float up
-    # across every mix without overriding the anchor structure.
-    played = db.top_played_artists(user.user_id, limit=50)
+    # across every mix without overriding the anchor structure. Prefer the recent
+    # window (current taste) and fall back to all-time so a user who hasn't
+    # listened lately isn't left with an empty affinity map.
+    since = _recency_since()
+    played = (
+        db.top_played_artists(user.user_id, limit=50, since=since)
+        or db.top_played_artists(user.user_id, limit=50)
+    )
     personalized = bool(played)
     max_play = max((a["play_count"] for a in played), default=0)
     affinity: dict[str, float] = (
@@ -509,6 +646,10 @@ def _build_daily_mixes(count: int, size: int, user: CurrentUser, day_seed: int):
         if max_play
         else {}
     )
+    # Per-track recent play counts (current taste), normalized, so a track the
+    # user actually plays floats up within a mix — not just its artist's affinity.
+    track_plays = db.play_counts(user.user_id, since=since) or db.play_counts(user.user_id)
+    max_track_play = max(track_plays.values(), default=0) or 1
 
     # Wide pool so mixes can be long and varied as the catalog grows.
     pool = db.popular_catalog(user.user_id, 400)
@@ -527,6 +668,20 @@ def _build_daily_mixes(count: int, size: int, user: CurrentUser, day_seed: int):
         for m in members:
             neighbors.setdefault(m, set()).update(x for x in members if x != m)
 
+    # Soft adjacency from shared playlists: artists whose tracks land on the same
+    # imported playlist are grouped — a latent mood/genre signal the co-credit
+    # graph misses (source_playlist_title is otherwise unused by discovery). Kept
+    # separate from `neighbors` so it only *boosts* scoring, never perturbs anchor
+    # spreading or scene clustering.
+    playlist_neighbors: dict[str, set[str]] = {}
+    _pl_groups: dict[str, set[str]] = {}
+    for row in db.owned_playlist_artist_rows(user.user_id):
+        for m in _artist_members(row.get("artist")):
+            _pl_groups.setdefault(row["title"], set()).add(m.lower())
+    for grp in _pl_groups.values():
+        for a in grp:
+            playlist_neighbors.setdefault(a, set()).update(x for x in grp if x != a)
+
     # The whole-registry dedup index (for the discovery mix's external picks):
     # exclude *every* stored track, not just the popular-400 pool, plus fuzzy
     # signatures so a different upload of a stored song is dropped too.
@@ -536,7 +691,10 @@ def _build_daily_mixes(count: int, size: int, user: CurrentUser, day_seed: int):
 
     # Most-played tracks (for the "On Repeat" mix and to seed discovery / mark
     # which owned tracks are "deep cuts" the user rarely plays).
-    played_tracks = db.top_played_tracks(user.user_id, limit=100)
+    played_tracks = (
+        db.top_played_tracks(user.user_id, limit=100, since=since)
+        or db.top_played_tracks(user.user_id, limit=100)
+    )
     played_keys = {key(t) for t in played_tracks}
 
     # `used` reserves a track for the FIRST mix that picks it, so the lineup stops
@@ -587,6 +745,7 @@ def _build_daily_mixes(count: int, size: int, user: CurrentUser, day_seed: int):
         skipping tracks already claimed by an earlier mix today."""
         anchor_l = anchor.lower()
         nbrs = neighbors.get(anchor_l, set())
+        p_nbrs = playlist_neighbors.get(anchor_l, set())
         candidates = list(pool)
         for t in db.list_tracks_by_artist(user.user_id, anchor, limit=mix_size):
             if key(t) not in pool_keys:
@@ -601,7 +760,9 @@ def _build_daily_mixes(count: int, size: int, user: CurrentUser, day_seed: int):
             score = (
                 _ANCHOR_BOOST * (1.0 if anchor_l in members else 0.0)
                 + _NEIGHBOR_BOOST * (1.0 if set(members) & nbrs else 0.0)
+                + _PLAYLIST_NEIGHBOR_BOOST * (1.0 if set(members) & p_nbrs else 0.0)
                 + _AFFINITY_WEIGHT * max((affinity.get(m, 0.0) for m in members), default=0.0)
+                + _PLAY_WEIGHT * (track_plays.get(t["video_id"], 0) / max_track_play)
                 + _POPULARITY_WEIGHT * ((t.get("owner_count") or 0) / max_owner)
                 + _JITTER_WEIGHT * _jitter(day_seed, mix_i, t["video_id"])
             )

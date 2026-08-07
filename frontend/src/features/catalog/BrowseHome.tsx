@@ -6,6 +6,7 @@ import type {
   DailyMix,
 } from '@/shared/api/types'
 import { SectionHeader } from '@/shared/ui/SectionHeader'
+import { RefreshButton } from '@/shared/ui/RefreshButton'
 import { ActivityRow, CategoryCard, DailyMixCard, RecentCard } from './cards'
 
 /** The browse "home" shown when idle on the full catalog. */
@@ -16,6 +17,8 @@ export function BrowseHome({
   activity,
   mixes,
   mixesLoading,
+  mixesRefreshing,
+  onRefreshMixes,
   personalized,
   categories,
   onOpenCategory,
@@ -27,6 +30,8 @@ export function BrowseHome({
   activity: ActivityItem[]
   mixes: DailyMix[]
   mixesLoading: boolean
+  mixesRefreshing: boolean
+  onRefreshMixes: () => void
   personalized: boolean
   categories: Category[]
   onOpenCategory: (c: Category) => void
@@ -83,6 +88,15 @@ export function BrowseHome({
           <SectionHeader
             title="◈ daily mixes"
             note={personalized ? 'tuned to what you play' : 'fresh every day'}
+            action={
+              mixes.length > 0 ? (
+                <RefreshButton
+                  onClick={onRefreshMixes}
+                  busy={mixesRefreshing}
+                  title="re-roll your daily mixes"
+                />
+              ) : undefined
+            }
           />
           <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
             {mixesLoading && mixes.length === 0

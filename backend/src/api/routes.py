@@ -47,6 +47,8 @@ from src.discovery import (
     _owned_signatures,
     _same_song,
     _song_fingerprint,
+    record_roll,
+    roll_exclusions,
     rotate_pick,
     weighted_seed_ids,
 )
@@ -203,6 +205,26 @@ _cancelled: set[str] = set()
 _download_pool = ThreadPoolExecutor(
     max_workers=config.MAX_CONCURRENT_DOWNLOADS,
     thread_name_prefix="ytdl-download",
+)
+
+
+# Small bounded pool for post-download SHA-256 hashing. The hash is content-
+# integrity metadata that nothing reads on the hot path, so we compute it (a
+# full-file read) off the critical path: `done` fires as soon as the file is in
+# place and the hash backfills here. Bounded so a burst of imports can't spawn an
+# unbounded number of hashing threads.
+_hash_pool = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="ytdl-hash",
+)
+
+# Small bounded pool for metadata enrichment (YT Music `clean_artists`) that can
+# run *while* a track downloads instead of serially after it. The video id is
+# known before the download starts, so the ~0.5-2s get_song round-trip overlaps
+# the fetch+transcode and the clean artist list is still ready at `done`.
+_enrich_pool = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="ytdl-enrich",
 )
 
 
@@ -536,6 +558,11 @@ def start_download(
 
             dest_path = _library_path(video_id, codec, bitrate, ext)
 
+            # Kick off the YT Music clean-artist lookup now so its network round-
+            # trip overlaps the download+transcode instead of running serially
+            # after it. The clean list is still merged before `done` is emitted.
+            clean_future = _enrich_pool.submit(ytmusic.clean_artists, video_id)
+
             def on_progress(pct: float):
                 if job_id in _cancelled:
                     raise _Cancelled()
@@ -543,11 +570,18 @@ def start_download(
 
             meta = ytDownloaderFunctions.download_track_audio(
                 info['webpage_url'], codec, bitrate, dest_path,
-                on_progress=on_progress,
+                on_progress=on_progress, apply_clean_artists=False,
             ) or {}
 
+            try:
+                clean = clean_future.result()
+            except Exception:
+                clean = None
+            if clean:
+                meta['artists'] = clean
+                meta['artist'] = ", ".join(clean)
+
             file_size = os.path.getsize(dest_path)
-            sha256 = _sha256_file(dest_path)
             db.register_track(
                 video_id=video_id,
                 codec=codec,
@@ -562,7 +596,7 @@ def start_download(
                 source_url=info['webpage_url'],
                 file_path=dest_path,
                 file_size=file_size,
-                sha256=sha256,
+                sha256=None,
             )
             if body.own:
                 db.link_owner(
@@ -578,6 +612,7 @@ def start_download(
                 "imported": 1,
                 "reused": 0,
             })
+            _defer_sha256(video_id, codec, bitrate, dest_path)
 
         except _Cancelled:
             _jobs.pop(job_id, None)
@@ -714,6 +749,19 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _defer_sha256(video_id: str, codec: str, bitrate: str, path: str) -> None:
+    """Hash `path` and backfill tracks.sha256 in the background (see _hash_pool),
+    so a full-file read never sits between the file landing and the `done` event.
+    Best-effort: a failure just leaves sha256 NULL, which nothing depends on."""
+    def work() -> None:
+        try:
+            db.set_track_sha256(video_id, codec, bitrate, _sha256_file(path))
+        except Exception:
+            traceback.print_exc()
+
+    _hash_pool.submit(work)
 
 
 def _library_path(video_id: str, codec: str, bitrate: str, ext: str) -> str:
@@ -873,7 +921,6 @@ def start_playlist_download(
                     ) or {}
 
                     file_size = os.path.getsize(dest_path)
-                    sha256 = _sha256_file(dest_path)
 
                     db.register_track(
                         video_id=video_id,
@@ -891,7 +938,7 @@ def start_playlist_download(
                         source_url=entry.get('url') or f"https://www.youtube.com/watch?v={video_id}",
                         file_path=dest_path,
                         file_size=file_size,
-                        sha256=sha256,
+                        sha256=None,
                     )
                     db.link_owner(
                         owner_id=user.user_id,
@@ -903,6 +950,7 @@ def start_playlist_download(
                     db.add_track_to_playlist(
                         ensure_mirrored_playlist(), video_id, codec, bitrate,
                     )
+                    _defer_sha256(video_id, codec, bitrate, dest_path)
                     imported += 1
                 except _Cancelled:
                     raise
@@ -1171,7 +1219,6 @@ def start_tracklist_import(
                         codec, bitrate, dest_path, on_progress=on_track_progress,
                     ) or {}
                     file_size = os.path.getsize(dest_path)
-                    sha256 = _sha256_file(dest_path)
                     db.register_track(
                         video_id=video_id, codec=codec, bitrate=bitrate,
                         title=meta.get('title') or w.title,
@@ -1182,13 +1229,14 @@ def start_tracklist_import(
                         duration_sec=match.duration or w.duration_sec,
                         thumbnail_url=f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
                         source_url=f"https://www.youtube.com/watch?v={video_id}",
-                        file_path=dest_path, file_size=file_size, sha256=sha256,
+                        file_path=dest_path, file_size=file_size, sha256=None,
                     )
                     db.link_owner(
                         owner_id=user.user_id, video_id=video_id, codec=codec,
                         bitrate=bitrate, source_playlist_title=wl.name,
                     )
                     db.add_track_to_playlist(ensure_mirrored_playlist(), video_id, codec, bitrate)
+                    _defer_sha256(video_id, codec, bitrate, dest_path)
                     imported += 1
                 except _Cancelled:
                     raise
@@ -1519,10 +1567,15 @@ async def catalog_suggestions(
         # track shows twice and a user adding both downloads it twice.
         kept_fps: list[frozenset] = []
         suggestions: list[dict] = []
+        # Hold back songs shown in recent rolls so a ↻ surfaces fresh ones; a
+        # relax pass below allows them back if the fresh pool can't fill `n`.
+        exclude = roll_exclusions(user.user_id, "suggestions", refresh)
 
-        def fill_from(mixes: list[list[dict]]) -> None:
+        def fill_from(mixes: list[list[dict]], *, avoid: set[str]) -> None:
             """Round-robin across the seed mixes (spread artists across the head),
-            dropping known / non-music / owned / same-song items, until `n`."""
+            dropping known / non-music / owned / same-song / recently-shown items,
+            until `n`. `avoid` ids are skipped without consuming them, so a later
+            relax pass (avoid=∅) can still surface them."""
             depth = 0
             while len(suggestions) < n and any(depth < len(m) for m in mixes):
                 for mix in mixes:
@@ -1532,6 +1585,8 @@ async def catalog_suggestions(
                     vid = item.get("video_id")
                     if not vid or vid in known_ids or vid in seen:
                         continue
+                    if vid in avoid:
+                        continue  # shown in a recent roll — save for the relax pass
                     seen.add(vid)
                     # Radios are music-seeded; the lenient filter only trims the
                     # odd hour-long upload or sub-minute clip that sneaks in.
@@ -1549,17 +1604,31 @@ async def catalog_suggestions(
         # Primary source: YT Music radio → the audio (ATV) tracks, so suggestions
         # are the music itself, not the official videoclips yt-dlp's RD mix serves.
         ytm = ytmusic.radio_many(seed_ids, limit=25)
-        fill_from([ytm.get(vid, []) for vid in seed_ids])
+        ytm_lists = [ytm.get(vid, []) for vid in seed_ids]
+        fill_from(ytm_lists, avoid=exclude)
 
         # Top-up / fallback: if YT Music was unavailable or thin, fill the rest
         # from yt-dlp's related mix (flat entries normalized to the same shape).
+        rel_lists: list[list[dict]] = []
         if len(suggestions) < n:
             rel_map = search_mod.related_many(seed_ids, limit=12)
-            fill_from([
+            rel_lists = [
                 [_external_item(e) for e in rel_map.get(vid, [])]
                 for vid in seed_ids
-            ])
+            ]
+            fill_from(rel_lists, avoid=exclude)
 
+        # Relax: if the exclusion window starved the feed, allow recently-shown
+        # songs back in rather than return a short list.
+        if len(suggestions) < n and exclude:
+            fill_from(ytm_lists, avoid=set())
+            if len(suggestions) < n and rel_lists:
+                fill_from(rel_lists, avoid=set())
+
+        record_roll(
+            user.user_id, "suggestions", refresh,
+            [s.get("video_id") for s in suggestions],
+        )
         return {"external": suggestions}
 
     try:
@@ -1710,7 +1779,10 @@ async def catalog_radio(
                 continue
             ext_pool.append((rank, item))
 
-        externals = rotate_pick(ext_pool, external_limit, nonce=refresh)
+        surface = f"radio:{video_id}"
+        exclude = roll_exclusions(user.user_id, surface, refresh)
+        externals = rotate_pick(ext_pool, external_limit, nonce=refresh, exclude=exclude)
+        record_roll(user.user_id, surface, refresh, [e.get("video_id") for e in externals])
         return {"db": db_items, "external": externals}
 
     try:
@@ -1861,6 +1933,7 @@ async def album_detail(
 async def daily_mixes(
     count: int = 4,
     size: int = 40,
+    refresh: int = 0,
     user: CurrentUser = Depends(current_user),
     _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
@@ -1882,7 +1955,7 @@ async def daily_mixes(
     """
     try:
         return await run_extraction(
-            lambda: _daily_mixes_impl(count, size, user),
+            lambda: _daily_mixes_impl(count, size, user, nonce=refresh),
             timeout=config.EXTRACTION_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
