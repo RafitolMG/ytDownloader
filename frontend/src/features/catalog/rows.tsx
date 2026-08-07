@@ -175,10 +175,15 @@ export const CatalogRow = memo(function CatalogRow({
 export function DownloadAllButton({
   items,
   own,
+  label = 'download all',
+  title = 'download every track below to the catalog',
 }: {
   items: ExternalCatalogItem[]
   /** false → add to the catalog without favouriting (daily-mix tracks). */
   own?: boolean
+  /** Idle-state verb, e.g. "download missing" for an album's absent tracks. */
+  label?: string
+  title?: string
 }) {
   const queryClient = useQueryClient()
   const [queued, setQueued] = useState(0)
@@ -217,14 +222,14 @@ export function DownloadAllButton({
         if (!dl.isPending) dl.mutate()
       }}
       disabled={dl.isPending || queued > 0}
-      title="download every track below to the catalog"
+      title={title}
       className="font-pixel text-xs uppercase tracking-widest px-3 py-1 border border-cool/60 text-cool hover:bg-cool/10 hover:shadow-[var(--shadow-glow-cool)] disabled:opacity-50 transition rounded-xs whitespace-nowrap"
     >
       {dl.isPending
         ? '··· queueing'
         : queued > 0
           ? `✓ queued ${queued}${failed ? ' (some failed)' : ''}`
-          : `⬇ download all (${items.length})`}
+          : `⬇ ${label} (${items.length})`}
     </button>
   )
 }
