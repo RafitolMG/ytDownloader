@@ -120,12 +120,17 @@ export default function CatalogPage() {
     enabled: browseHome,
     staleTime: 30_000,
   })
+  // dailyRoll re-rolls the whole lineup server-side; keepPreviousData avoids
+  // flashing skeletons on each ↻ (same pattern as suggestions/radio).
+  const [dailyRoll, setDailyRoll] = useState(0)
   const dailyMixesQuery = useQuery({
-    queryKey: ['daily-mixes'],
-    queryFn: () => api.dailyMixes(),
+    queryKey: ['daily-mixes', dailyRoll],
+    queryFn: () => api.dailyMixes({ refresh: dailyRoll }),
     enabled: browseHome,
     staleTime: 5 * 60_000,
+    placeholderData: keepPreviousData,
   })
+  const dailyRefreshing = dailyMixesQuery.isFetching
   const categoriesQuery = useQuery({
     queryKey: ['categories'],
     queryFn: () => api.categories(),
@@ -258,6 +263,8 @@ export default function CatalogPage() {
                 activity={activity}
                 mixes={dailyMixes}
                 mixesLoading={dailyMixesQuery.isLoading}
+                mixesRefreshing={dailyRefreshing}
+                onRefreshMixes={() => setDailyRoll((r) => r + 1)}
                 personalized={dailyMixesQuery.data?.personalized ?? false}
                 categories={categories}
                 onOpenCategory={setActiveCategory}

@@ -665,6 +665,20 @@ def update_track_metadata(
         return cur.rowcount > 0
 
 
+def set_track_sha256(video_id: str, codec: str, bitrate: str, sha256: str) -> bool:
+    """Backfill the content hash for a track after the fact. The hash is a full-
+    file read that nothing reads on the hot path, so callers compute it off the
+    download critical path and store it here once the file is already in place.
+    Returns True iff the row still exists."""
+    with _write() as conn:
+        cur = conn.execute(
+            "UPDATE tracks SET sha256 = ? "
+            "WHERE video_id = ? AND codec = ? AND bitrate = ?",
+            (sha256, video_id, codec, bitrate),
+        )
+        return cur.rowcount > 0
+
+
 def list_tracks_for_backfill(only_missing_album: bool = False) -> list[dict[str, Any]]:
     """Tracks (key + file_path + current artist/album) for the metadata backfill.
     `only_missing_album` restricts to rows that never captured an album — i.e.
@@ -1020,6 +1034,50 @@ def list_recent_plays(viewer_id: str, *, limit: int = 20) -> list[dict[str, Any]
          LIMIT ?
         """,
         (viewer_id, viewer_id, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def play_counts(viewer_id: str, *, since: str | None = None) -> dict[str, int]:
+    """Per-video play counts for a user as {video_id: count}. `since` is an ISO
+    timestamp lower bound on played_at (None = all time). Collapses codec/bitrate
+    (a video is the same song across encodings) so callers can blend a play
+    signal keyed by video_id regardless of the stored quality. Read-only signal
+    for recommendation scoring (see discovery)."""
+    conn = _get_conn()
+    where = "WHERE user_id = ?"
+    params: list[Any] = [viewer_id]
+    if since:
+        where += " AND played_at >= ?"
+        params.append(since)
+    rows = conn.execute(
+        f"SELECT video_id, COUNT(*) AS n FROM plays {where} GROUP BY video_id",
+        tuple(params),
+    ).fetchall()
+    return {r["video_id"]: int(r["n"]) for r in rows}
+
+
+def owned_playlist_artist_rows(viewer_id: str) -> list[dict[str, Any]]:
+    """(title, artist) for the viewer's owned tracks that carry a source playlist
+    label. Lets discovery build a soft "these artists appear on the same playlist"
+    adjacency — a latent mood/genre grouping the co-credit graph misses. Read-only
+    recommendation signal; empty when nothing was imported from a playlist."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT o.source_playlist_title AS title, t.artist AS artist
+          FROM track_owners o
+          JOIN tracks t
+            ON t.video_id = o.video_id
+           AND t.codec    = o.codec
+           AND t.bitrate  = o.bitrate
+         WHERE o.owner_id = ?
+           AND o.source_playlist_title IS NOT NULL
+           AND TRIM(o.source_playlist_title) != ''
+           AND t.artist IS NOT NULL
+           AND TRIM(t.artist) != ''
+        """,
+        (viewer_id,),
     ).fetchall()
     return [dict(r) for r in rows]
 

@@ -152,6 +152,9 @@ def _get_cookie_opts() -> dict:
     # where `web` is blocked by anti-bot.
     opts: dict = {
         'js_runtimes': {'deno': {}, 'node': {}},
+        # Persist the player / n-sig cache on the data volume (see config) so it
+        # survives redeploys instead of a cold recompile after every restart.
+        'cachedir': config.YTDLP_CACHE_DIR,
         'extractor_args': {
             'youtube': {'player_client': ['default', 'web_music', 'ios', 'tv']},
         },
@@ -906,7 +909,8 @@ def get_audio_stream_url(url):
     return {'url': direct, 'ext': ext, 'duration': info.get('duration')}
 
 
-def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
+def download_track_audio(url, codec, bitrate, dest_path, on_progress=None,
+                         apply_clean_artists=True):
     """
     Download a single video as audio with the given codec+bitrate, writing the
     final post-processed file to `dest_path`. Creates parent dirs as needed.
@@ -965,13 +969,15 @@ def download_track_audio(url, codec, bitrate, dest_path, on_progress=None):
         meta['title'] = (info or {}).get('title')
         # Prefer YT Music's clean performer list over the yt-dlp credit dump
         # (which mixes in songwriters/producers). Best-effort: keeps the
-        # heuristic value when the lookup yields nothing. This is the only
-        # per-download path, so it never runs during flat playlist listing.
-        from src import ytmusic
-        clean = ytmusic.clean_artists((info or {}).get('id') or '')
-        if clean:
-            meta['artists'] = clean
-            meta['artist'] = ", ".join(clean)
+        # heuristic value when the lookup yields nothing. Callers that already
+        # overlap this lookup with the download (the single-track import) pass
+        # apply_clean_artists=False and merge the clean list themselves.
+        if apply_clean_artists:
+            from src import ytmusic
+            clean = ytmusic.clean_artists((info or {}).get('id') or '')
+            if clean:
+                meta['artists'] = clean
+                meta['artist'] = ", ".join(clean)
 
         produced = None
         for fname in os.listdir(work_dir):

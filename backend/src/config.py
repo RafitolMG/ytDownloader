@@ -97,6 +97,16 @@ _DEFAULT_LIBRARY_DIR = os.path.join(
 )
 LIBRARY_DIR: str = _env("LIBRARY_DIR", _DEFAULT_LIBRARY_DIR)
 
+# yt-dlp player / n-sig cache. yt-dlp caches the extracted "player" JS that
+# solves YouTube's signature / n-param challenges so it isn't re-downloaded and
+# re-parsed on every extraction. Its default location is ~/.cache/yt-dlp — the
+# container user's home, which is NOT on the persistent volume, so it's wiped on
+# every redeploy, forcing a cold "Downloading player" + n-sig recompile on the
+# first extraction after each restart. Pin it beside the library (under the same
+# persistent volume) so the cache survives redeploys. Most valuable from a
+# datacenter IP, where the n-sig challenge is on the critical path of every fetch.
+YTDLP_CACHE_DIR: str = _env("YTDLP_CACHE_DIR", os.path.join(os.path.dirname(LIBRARY_DIR), "yt-dlp-cache"))
+
 # yt-dlp cookies. YouTube blocks datacenter IPs (Coolify / VPS) without an
 # authenticated session, so prod deployments must provide a Netscape-format
 # cookies.txt exported from a logged-in browser.
