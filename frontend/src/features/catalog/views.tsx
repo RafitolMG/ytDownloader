@@ -6,6 +6,7 @@ import type {
 } from '@/shared/api/types'
 import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
+import { RefreshButton } from '@/shared/ui/RefreshButton'
 import { ACCENT, toPreviewItem } from './lib'
 import { CatalogRow, DownloadAllButton, ExternalRow } from './rows'
 
@@ -187,11 +188,15 @@ export function RadioView({
   seed,
   feed,
   isLoading,
+  isRefreshing = false,
+  onRefresh,
   onBack,
 }: {
   seed: CatalogItem
   feed: { db: CatalogItem[]; external: ExternalCatalogItem[] } | undefined
   isLoading: boolean
+  isRefreshing?: boolean
+  onRefresh?: () => void
   onBack: () => void
 }) {
   const player = useAudioPlayer()
@@ -235,6 +240,14 @@ export function RadioView({
           >
             ▶ play all
           </button>
+        )}
+        {onRefresh && (
+          <RefreshButton
+            onClick={onRefresh}
+            busy={isRefreshing}
+            label="more"
+            title="show different recommendations"
+          />
         )}
       </div>
 

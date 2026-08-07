@@ -356,9 +356,10 @@ export const api = {
     return json<DiscoverResponse>(`/api/catalog/discover?${qs.toString()}`)
   },
 
-  suggestions: (params: { limit?: number } = {}) => {
+  suggestions: (params: { limit?: number; refresh?: number } = {}) => {
     const qs = new URLSearchParams()
     if (params.limit != null) qs.set('limit', String(params.limit))
+    if (params.refresh) qs.set('refresh', String(params.refresh))
     const tail = qs.toString()
     return json<SuggestionsResponse>(
       `/api/catalog/suggestions${tail ? `?${tail}` : ''}`,
@@ -397,10 +398,14 @@ export const api = {
     )
   },
 
-  radio: (videoId: string, opts: { external_limit?: number } = {}) => {
+  radio: (
+    videoId: string,
+    opts: { external_limit?: number; refresh?: number } = {},
+  ) => {
     const qs = new URLSearchParams()
     if (opts.external_limit != null)
       qs.set('external_limit', String(opts.external_limit))
+    if (opts.refresh) qs.set('refresh', String(opts.refresh))
     const tail = qs.toString()
     return json<RadioFeed>(
       `/api/catalog/radio/${encodeURIComponent(videoId)}${tail ? `?${tail}` : ''}`,

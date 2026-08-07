@@ -47,6 +47,8 @@ from src.discovery import (
     _owned_signatures,
     _same_song,
     _song_fingerprint,
+    rotate_pick,
+    weighted_seed_ids,
 )
 
 
@@ -1467,16 +1469,21 @@ async def catalog_discover(
 @app.get("/api/catalog/suggestions")
 async def catalog_suggestions(
     limit: int = 18,
+    refresh: int = 0,
     user: CurrentUser = Depends(current_user),
     _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """
-    At-rest discovery: seed YouTube Mixes from the catalog's most popular
-    tracks and surface related songs that aren't in the shared library yet.
+    At-rest discovery: seed YouTube Mixes from a weighted sample of the catalog
+    and surface related songs that aren't in the shared library yet.
 
     Why this shape:
-      - Seeds come from `sort="popular"` so suggestions track what the group
-        actually listens to, not a random corner of the catalog.
+      - Seeds are a weighted-random draw (see `weighted_seed_ids`) across the
+        catalog's popular *and* recently-added tracks, penalizing the caller's
+        most-played, with an artist cap — so suggestions are varied, not the same
+        top-8 popular mix every time.
+      - `refresh` is a client rotation nonce: each ↻ re-rolls the seed sample
+        (and thus the suggestions) while a given nonce stays reproducible.
       - Results are round-robin interleaved across seeds so one artist's mix
         doesn't dominate the list.
       - Dedup is against the *entire* catalog (everything downloaded), not just
@@ -1492,24 +1499,19 @@ async def catalog_suggestions(
     n = max(1, min(limit, 40))
 
     def work():
-        # Popular seeds drive the radios; a top-N read is the right shape.
-        catalog = db.popular_catalog(user.user_id, 500)
-        if not catalog:
+        # Weighted, rotation-aware seeds; empty only on a cold catalog.
+        seed_ids = weighted_seed_ids(user.user_id, count=8, nonce=refresh)
+        if not seed_ids:
             return {"external": []}
 
-        # Dedup against the *entire* registry, not just the popular seeds —
-        # anything stored on the server beyond the top-500 would otherwise
-        # resurface. This feed exists only to surface songs NOT yet on the server.
+        # Dedup against the *entire* registry, not just the seeds — anything
+        # stored on the server would otherwise resurface. This feed exists only
+        # to surface songs NOT yet on the server.
         dedup_index = db.all_track_signatures_cached()
         known_ids = {it["video_id"] for it in dedup_index}
         # Fuzzy title/artist signatures so we also skip a *different* upload of a
         # song already in the library (same song, different video_id).
         owned_sigs = _owned_signatures(dedup_index)
-
-        # More seeds than we strictly need: dedup attrition (owned tracks, same-
-        # song collapse) used to leave this feed at only 4-10 items off 4 seeds.
-        # Fetched concurrently so a cold request overlaps the round-trips.
-        seed_ids = [seed["video_id"] for seed in catalog[:8]]
 
         seen: set[str] = set()
         # Fingerprints of songs already suggested, to collapse different uploads
@@ -1663,17 +1665,26 @@ async def catalog_category(
 async def catalog_radio(
     video_id: str,
     external_limit: int = 18,
+    refresh: int = 0,
     user: CurrentUser = Depends(current_user),
     _rl: CurrentUser = Depends(rate_limit_extraction),
 ):
     """"More like this" / artist radio for a track: the seed's YouTube Mix split
     into what's already in the catalog (playable now) and new candidates to
-    download. Music-filtered (lenient — the Mix is music-seeded)."""
+    download. Music-filtered (lenient — the Mix is music-seeded).
+
+    `refresh` is a client rotation nonce: we pull a *larger* candidate pool than
+    we show and weighted-sample `external_limit` from it (relevance-favored, see
+    `rotate_pick`), so each ↻ surfaces different "download more like this" picks
+    while a given nonce stays reproducible. Already-owned tracks always surface
+    as playable (`db`); only the external picks rotate."""
     external_limit = max(0, min(external_limit, 30))
 
     def work():
+        # Over-fetch so rotate_pick has more candidates than one page shows.
+        pool_size = external_limit + 40
         try:
-            rel = search_mod.related(video_id, limit=external_limit + 20)
+            rel = search_mod.related(video_id, limit=pool_size)
         except Exception:
             traceback.print_exc()
             rel = []
@@ -1684,9 +1695,9 @@ async def catalog_radio(
         }
 
         db_items: list[dict] = []
-        externals: list[dict] = []
+        ext_pool: list[tuple[int, dict]] = []  # (relevance rank, external item)
         seen: set[str] = set()
-        for entry in rel:
+        for rank, entry in enumerate(rel):
             vid = entry.get("id")
             if not vid or vid in seen:
                 continue
@@ -1694,13 +1705,12 @@ async def catalog_radio(
             if vid in by_id:
                 db_items.append(by_id[vid])
                 continue
-            if len(externals) >= external_limit:
-                continue
             item = _external_item(entry)
             if not _is_music_candidate(item, strict=False):
                 continue
-            externals.append(item)
+            ext_pool.append((rank, item))
 
+        externals = rotate_pick(ext_pool, external_limit, nonce=refresh)
         return {"db": db_items, "external": externals}
 
     try:
