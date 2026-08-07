@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useCallback, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { useBackClose } from '@/shared/lib/backStack'
@@ -14,6 +14,7 @@ import { countActive, useJobs } from '@/shared/api/useJobs'
 import { useDebouncedValue } from '@/shared/lib/useDebouncedValue'
 import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
 import { SectionHeader } from '@/shared/ui/SectionHeader'
+import { RefreshButton } from '@/shared/ui/RefreshButton'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { RadioCtx } from '@/features/catalog/RadioContext'
 import { CatalogRow, ExternalRow } from '@/features/catalog/rows'
@@ -68,18 +69,25 @@ export default function CatalogPage() {
   // the seeding + mix fetch is slow, so cache it generously.
   // Suggestions are a discovery aid — only relevant when browsing the full
   // catalog ('all'), not while viewing your own library or searching.
+  // suggestRoll re-rolls the server-side seed sample; keepPreviousData avoids
+  // flashing skeletons on each ↻.
+  const [suggestRoll, setSuggestRoll] = useState(0)
   const suggestionsQuery = useQuery({
-    queryKey: ['catalog-suggestions'],
-    queryFn: () => api.suggestions({ limit: 18 }),
+    queryKey: ['catalog-suggestions', suggestRoll],
+    queryFn: () => api.suggestions({ limit: 18, refresh: suggestRoll }),
     enabled: !isSearching && !isMine,
     staleTime: 5 * 60_000,
+    placeholderData: keepPreviousData,
   })
+  const suggestRefreshing = suggestionsQuery.isFetching
 
   // Browse "home" (Spotify-style): only when idle, scope=all, nothing drilled
   // into (no category or mix preview open).
   const [activeCategory, setActiveCategory] = useState<Category | null>(null)
   const [activeMix, setActiveMix] = useState<DailyMix | null>(null)
   const [activeRadio, setActiveRadio] = useState<CatalogItem | null>(null)
+  // Reset on each new seed so a fresh radio starts from its top matches.
+  const [radioRoll, setRadioRoll] = useState(0)
   const browseHome =
     !isSearching &&
     !isMine &&
@@ -91,6 +99,7 @@ export default function CatalogPage() {
   const openRadio = (item: CatalogItem) => {
     setActiveCategory(null)
     setActiveMix(null)
+    setRadioRoll(0)
     setActiveRadio(item)
   }
 
@@ -130,10 +139,15 @@ export default function CatalogPage() {
     staleTime: 60_000,
   })
   const radioQuery = useQuery({
-    queryKey: ['radio', activeRadio?.video_id],
-    queryFn: () => api.radio(activeRadio!.video_id, { external_limit: 18 }),
+    queryKey: ['radio', activeRadio?.video_id, radioRoll],
+    queryFn: () =>
+      api.radio(activeRadio!.video_id, { external_limit: 18, refresh: radioRoll }),
     enabled: activeRadio !== null,
     staleTime: 60_000,
+    // Keep picks through a same-seed ↻; on a seed change show loading instead,
+    // so the previous radio's tracks don't flash under the new header.
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey[1] === activeRadio?.video_id ? prev : undefined,
   })
   const statsQuery = useQuery({
     queryKey: ['my-stats'],
@@ -219,6 +233,8 @@ export default function CatalogPage() {
             seed={activeRadio}
             feed={radioQuery.data}
             isLoading={radioQuery.isLoading}
+            isRefreshing={radioQuery.isFetching}
+            onRefresh={() => setRadioRoll((r) => r + 1)}
             onBack={() => setActiveRadio(null)}
           />
         ) : activeCategory ? (
@@ -253,7 +269,17 @@ export default function CatalogPage() {
                 skeletons stay put while the Mixes load (~4s). */}
             {!isSearching && !isMine && (suggestionsQuery.isLoading || suggestions.length > 0) && (
               <section className="mb-8">
-                <SectionHeader title="✦ suggestions for you" note="related to the catalog · not downloaded yet" />
+                <SectionHeader
+                  title="✦ suggestions for you"
+                  note="related to the catalog · not downloaded yet"
+                  action={
+                    <RefreshButton
+                      onClick={() => setSuggestRoll((r) => r + 1)}
+                      busy={suggestRefreshing}
+                      title="show a different set of suggestions"
+                    />
+                  }
+                />
                 <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1 snap-x">
                   {suggestionsQuery.isLoading && suggestions.length === 0
                     ? Array.from({ length: 8 }).map((_, i) => (

@@ -42,6 +42,111 @@ def _jitter(day_seed: int, mix_i: int, video_id: str) -> float:
     return int.from_bytes(h.digest(), "big") / 2**64
 
 
+def _unit_hash(*parts: object) -> float:
+    """Stable pseudo-random float in [0, 1) for an arbitrary key tuple. Same
+    reasoning as `_jitter` (blake2b, not hash(), to survive per-process str-hash
+    salting) but generalized for the rotation samplers below."""
+    key = ":".join(str(p) for p in parts)
+    h = hashlib.blake2b(key.encode(), digest_size=8)
+    return int.from_bytes(h.digest(), "big") / 2**64
+
+
+# ── Rotating recommendation seeds ────────────────────────────────────────────
+# The suggestions carousel and the "more like this" radio each take a client
+# `nonce` (refresh counter) that re-rolls the picks reproducibly. Weighting is
+# Efraimidis-Spirakis sampling-without-replacement: key = u**(1/weight).
+
+_SEED_POOL_POPULAR = 200     # candidate seeds pulled by owner_count
+_SEED_POOL_RECENT = 120      # candidate seeds pulled by recency (fresh material)
+_SEED_FAMILIAR_LIMIT = 50    # how many of the viewer's top plays to down-weight
+_SEED_FAMILIAR_PENALTY = 0.35  # × weight for already-worn-out ("less-played" bias)
+_SEED_W_BASE = 0.5           # floor so even a cold track can be sampled
+_SEED_W_POP = 1.0            # × normalized owner_count
+_SEED_W_RECENT = 1.0         # × recency (newest = 1, older = 0)
+_SEED_ARTIST_CAP = 2         # max seeds sharing a primary artist (diversity)
+
+
+def weighted_seed_ids(viewer_id: str, *, count: int = 8, nonce: int = 0) -> list[str]:
+    """Pick `count` seed video_ids for the suggestion radios, biased for variety
+    instead of always taking the top-N most-popular tracks.
+
+    Weighting:
+      - popular *and* recently-added tracks both feed the candidate pool;
+      - weight rises with owner_count and recency;
+      - the viewer's most-played tracks are penalized so suggestions lean on
+        material they haven't already worn out ("less-played");
+      - a per-(day, nonce, video_id) jitter makes a client ↻ refresh re-roll the
+        selection while a given nonce stays reproducible; the day component also
+        drifts the default (nonce=0) pick from one day to the next;
+      - an artist cap keeps `count` seeds from collapsing onto one artist.
+
+    Returns [] on a cold/empty catalog (caller decides the fallback)."""
+    popular = db.popular_catalog(viewer_id, _SEED_POOL_POPULAR)
+    if not popular:
+        return []
+    recent = db.list_catalog(viewer_id, sort="newest", limit=_SEED_POOL_RECENT)
+    familiar = {
+        t["video_id"]
+        for t in db.top_played_tracks(viewer_id, limit=_SEED_FAMILIAR_LIMIT)
+    }
+
+    max_owner = max((c.get("owner_count") or 0) for c in popular) or 1
+    recent_rank = {c["video_id"]: i for i, c in enumerate(recent)}
+    n_recent = max(len(recent), 1)
+
+    candidates: dict[str, dict] = {}
+    for row in (*popular, *recent):
+        candidates.setdefault(row["video_id"], row)
+
+    day_seed = int(datetime.now(timezone.utc).strftime("%Y%m%d"))
+
+    scored: list[tuple[float, str, str]] = []  # (draw key, video_id, primary artist)
+    for vid, row in candidates.items():
+        pop_norm = (row.get("owner_count") or 0) / max_owner
+        rank = recent_rank.get(vid)
+        rec_norm = 0.0 if rank is None else 1.0 - rank / n_recent
+        weight = _SEED_W_BASE + _SEED_W_POP * pop_norm + _SEED_W_RECENT * rec_norm
+        if vid in familiar:
+            weight *= _SEED_FAMILIAR_PENALTY
+        u = _unit_hash(day_seed, nonce, vid)
+        es_key = u ** (1.0 / max(weight, 1e-6))
+        primary = next(iter(_artist_members(row.get("artist"))), "").lower()
+        scored.append((es_key, vid, primary))
+
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+
+    picked: list[str] = []
+    per_artist: dict[str, int] = {}
+    for _key, vid, primary in scored:
+        if primary and per_artist.get(primary, 0) >= _SEED_ARTIST_CAP:
+            continue
+        picked.append(vid)
+        per_artist[primary] = per_artist.get(primary, 0) + 1
+        if len(picked) >= count:
+            break
+    return picked
+
+
+def rotate_pick(
+    ranked_items: list[tuple[int, dict]], count: int, *, nonce: int = 0,
+    rank_falloff: float = 12.0,
+) -> list[dict]:
+    """Pick `count` items from a relevance-ranked `(rank, item)` list, favoring
+    the most-related while re-rolling per `nonce` so a ↻ refresh surfaces
+    different picks. `rank_falloff` sets how fast relevance weight decays with
+    rank (weight = falloff/(rank+falloff): 1.0 at rank 0). Each item must carry a
+    'video_id'. Order of the return is by draw key (already rotated)."""
+    if count <= 0 or not ranked_items:
+        return []
+    scored: list[tuple[float, dict]] = []
+    for rank, item in ranked_items:
+        weight = rank_falloff / (rank + rank_falloff)
+        u = _unit_hash(nonce, item.get("video_id"))
+        scored.append((u ** (1.0 / max(weight, 1e-6)), item))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return [item for _key, item in scored[:count]]
+
+
 def _scene_clusters(neighbors: dict[str, set[str]], day_seed: int) -> list[list[str]]:
     """Group collaborating artists into "scenes" by deterministic label
     propagation over the co-credit graph — a genre-like clustering *without* genre
