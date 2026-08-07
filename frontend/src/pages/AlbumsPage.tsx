@@ -8,10 +8,15 @@ import type { AlbumCard, CatalogItem, LibraryItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { fmtDuration } from '@/shared/lib/format'
 import { useDebouncedValue } from '@/shared/lib/useDebouncedValue'
-import { catalogToLibrary as toLibraryItem } from '@/shared/lib/libraryItem'
+import {
+  catalogToLibrary as toLibraryItem,
+  catalogToPlaylistRow,
+  libraryToPlaylistRow,
+} from '@/shared/lib/libraryItem'
 import { SectionHeader } from '@/shared/ui/SectionHeader'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
-import { CatalogRow, ExternalRow } from '@/features/catalog/rows'
+import { CatalogRow, DownloadAllButton, ExternalRow } from '@/features/catalog/rows'
+import { OfflineDownloadButton } from '@/features/offline/OfflineDownloadButton'
 
 /** A library album: the user's owned tracks grouped under one album title. */
 type LibraryAlbum = {
@@ -397,9 +402,18 @@ function LibraryAlbumView({
   const matchedOwned = remoteTracks.filter((t) => ownedVids.has(t.video_id)).length
   const confident = remoteTracks.length > 0 && matchedOwned === ownedVids.size
 
-  const missingCount = confident
-    ? remoteTracks.filter((t) => !dbById.has(t.video_id)).length
-    : 0
+  // The album's tracks not yet in the catalog — the "download missing" targets.
+  const missingItems = confident
+    ? remoteTracks.filter((t) => !dbById.has(t.video_id))
+    : []
+  const missingCount = missingItems.length
+
+  // Owned tracks as offline-download rows. Only tracks in the DB can be streamed
+  // (and therefore downloaded) offline, which is exactly the ones we own here.
+  const offlineTracks = useMemo(
+    () => album.tracks.map((t, i) => libraryToPlaylistRow(t, i)),
+    [album.tracks],
+  )
 
   const playAlbum = () =>
     confident && dbItems.length > 0
@@ -421,13 +435,27 @@ function LibraryAlbumView({
         ]}
         onBack={onBack}
         actions={
-          <button
-            type="button"
-            onClick={playAlbum}
-            className="font-pixel text-xs uppercase tracking-widest px-4 py-2 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
-          >
-            ▶ play album
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={playAlbum}
+              className="font-pixel text-xs uppercase tracking-widest px-4 py-2 border border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition rounded-xs"
+            >
+              ▶ play album
+            </button>
+            {missingCount > 0 && (
+              <DownloadAllButton
+                items={missingItems}
+                label="download missing"
+                title="download the album's missing tracks to the catalog (mp3 · 320)"
+              />
+            )}
+            <OfflineDownloadButton
+              id={`album:${album.key}`}
+              name={album.title}
+              tracks={offlineTracks}
+            />
+          </>
         }
       />
 
@@ -538,6 +566,11 @@ function RemoteAlbumView({
     for (const it of dbItems) m.set(it.video_id, it)
     return m
   }, [dbItems])
+  // The album's DB tracks as offline-download rows (only these can stream offline).
+  const offlineTracks = useMemo(
+    () => dbItems.map((c, i) => catalogToPlaylistRow(c, i)),
+    [dbItems],
+  )
 
   return (
     <section>
@@ -559,6 +592,11 @@ function RemoteAlbumView({
               </button>
             )}
             <AlbumDownloadButton url={card.url} />
+            <OfflineDownloadButton
+              id={`album:${card.album_id}`}
+              name={card.title ?? card.album_id}
+              tracks={offlineTracks}
+            />
           </>
         }
       />
