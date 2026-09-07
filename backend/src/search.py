@@ -13,6 +13,7 @@ same prefixes constantly and the results don't shift second-by-second.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -38,23 +39,29 @@ class _TTLCache:
         self.ttl = ttl_seconds
         self.max_entries = max_entries
         self._store: dict[str, tuple[Any, float]] = {}
+        # Every caller of these caches fans out over a thread pool, so reads and
+        # evictions race: an unguarded eviction while another thread iterates
+        # raises "dictionary changed size during iteration".
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> Any | None:
-        entry = self._store.get(key)
-        if entry is None:
-            return None
-        value, ts = entry
-        if time.time() - ts > self.ttl:
-            self._store.pop(key, None)
-            return None
-        return value
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            value, ts = entry
+            if time.time() - ts > self.ttl:
+                self._store.pop(key, None)
+                return None
+            return value
 
     def set(self, key: str, value: Any) -> None:
-        # Refresh recency on re-set, then drop the oldest entries over the cap.
-        self._store.pop(key, None)
-        self._store[key] = (value, time.time())
-        while len(self._store) > self.max_entries:
-            self._store.pop(next(iter(self._store)), None)
+        with self._lock:
+            # Refresh recency on re-set, then drop the oldest entries over the cap.
+            self._store.pop(key, None)
+            self._store[key] = (value, time.time())
+            while len(self._store) > self.max_entries:
+                self._store.pop(next(iter(self._store)), None)
 
 
 _SUGGEST_CACHE = _TTLCache(ttl_seconds=60)
@@ -189,7 +196,8 @@ def related(video_id: str, limit: int = 20) -> list[dict]:
         return []
     limit = max(1, min(limit, 50))
 
-    cached = _RELATED_CACHE.get(video_id)
+    cache_key = f"{limit}:{video_id}"
+    cached = _RELATED_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
@@ -219,7 +227,7 @@ def related(video_id: str, limit: int = 20) -> list[dict]:
         for e in entries
         if (shaped := _shape_entry(e)) is not None and shaped["id"] != video_id
     ]
-    _RELATED_CACHE.set(video_id, results)
+    _RELATED_CACHE.set(cache_key, results)
     return results
 
 
@@ -334,11 +342,17 @@ def _album_card(album_id: str) -> dict | None:
     return _album_header(album_id, info, entries)
 
 
+class _AlbumSearchUnavailable(Exception):
+    """Upstream album search failed. Distinct from an empty result so callers
+    don't cache a transient blip as "this query has no albums"."""
+
+
 def _search_album_ids(q: str, limit: int) -> list[str]:
     """The `#albums` YouTube Music search → album browse ids, relevance-ordered.
 
     Flat mode returns ids only (no titles), so callers fetch each album's
-    metadata separately. Returns [] on any upstream failure.
+    metadata separately. Raises `_AlbumSearchUnavailable` if the search itself
+    failed — an empty list means the query genuinely matched no albums.
     """
     ydl_opts = {
         "quiet": True,
@@ -354,7 +368,7 @@ def _search_album_ids(q: str, limit: int) -> list[str]:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
         log.warning("album search failed for q=%r: %s", q, e)
-        return []
+        raise _AlbumSearchUnavailable(str(e)) from e
 
     album_ids: list[str] = []
     for e in (info or {}).get("entries") or []:
@@ -385,7 +399,10 @@ def search_albums(q: str, limit: int = 12) -> list[dict]:
     if cached is not None:
         return cached
 
-    album_ids = _search_album_ids(q, limit)
+    try:
+        album_ids = _search_album_ids(q, limit)
+    except _AlbumSearchUnavailable:
+        return []  # transient — don't poison the 30-minute cache with it
 
     if not album_ids:
         _ALBUM_SEARCH_CACHE.set(cache_key, [])
@@ -454,7 +471,10 @@ def resolve_album(
     owned = set(owned_ids or ())
     limit = max(1, min(limit, 10))
 
-    album_ids = _search_album_ids(q, limit)
+    try:
+        album_ids = _search_album_ids(q, limit)
+    except _AlbumSearchUnavailable:
+        return None
     if not album_ids:
         return None
 

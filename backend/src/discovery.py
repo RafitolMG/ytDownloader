@@ -218,7 +218,11 @@ def rotate_pick(
 # client increments N. Bounded and in-memory, like the radio / lineup caches.
 
 _ROLL_MEMORY_DEPTH = 6   # how many recent rolls to remember per (user, surface)
-_roll_memory: "dict[tuple[str, str], OrderedDict[int, frozenset[str]]]" = {}
+# ...and how many (user, surface) pairs to keep at all. Surfaces are derived from
+# user-supplied ids, so without this cap the outer map grows for the lifetime of
+# the process — one permanent entry per distinct id ever rolled.
+_ROLL_MEMORY_MAX_KEYS = 512
+_roll_memory: "OrderedDict[tuple[str, str], OrderedDict[int, frozenset[str]]]" = OrderedDict()
 _roll_lock = threading.Lock()
 
 
@@ -253,6 +257,9 @@ def record_roll(user_id: str, surface: str, nonce: int, video_ids: Iterable[str]
         hist.move_to_end(nonce)
         while len(hist) > _ROLL_MEMORY_DEPTH:
             hist.popitem(last=False)
+        _roll_memory.move_to_end(key)
+        while len(_roll_memory) > _ROLL_MEMORY_MAX_KEYS:
+            _roll_memory.popitem(last=False)
 
 
 def _scene_clusters(neighbors: dict[str, set[str]], day_seed: int) -> list[list[str]]:

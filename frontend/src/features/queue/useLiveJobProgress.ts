@@ -69,6 +69,11 @@ export function useLiveJobProgress(
         case 'done':
         case 'error':
         case 'cancelled':
+          // Mirror the terminal event into `status`. The server sends `status`
+          // only for the intermediate phases, so consumers that gate on it
+          // (useExternalDownload's "✓ added" / failure states) would otherwise
+          // wait on a value that never arrives and sit disabled forever.
+          setState((s) => ({ ...s, status: data.type }))
           // The server closes the socket right after these; invalidate so the
           // polled job list picks up the terminal state immediately instead
           // of waiting for the next 2s tick.

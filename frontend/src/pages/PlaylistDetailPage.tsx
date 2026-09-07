@@ -6,7 +6,7 @@ import { AppHeader } from '@/shared/ui/AppHeader'
 import { ConfirmButton } from '@/shared/ui/ConfirmButton'
 import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
 import { useToast } from '@/shared/ui/ToastProvider'
-import { api } from '@/shared/api/client'
+import { API_BASE, api } from '@/shared/api/client'
 import type {
   PlaylistTrackRow,
   PlaylistVisibility,
@@ -629,7 +629,10 @@ function ShareButton({ id }: { id: string }) {
     <button
       type="button"
       onClick={async () => {
-        const url = `${window.location.origin}/playlists/${id}`
+        // In the APK the page is served from https://localhost, so the origin
+        // is only shareable on the web build. API_BASE is the public host there.
+        const origin = API_BASE || window.location.origin
+        const url = `${origin}/playlists/${id}`
         try {
           await navigator.clipboard.writeText(url)
           showToast({ message: 'share link copied', variant: 'success' })

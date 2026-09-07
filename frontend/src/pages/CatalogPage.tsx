@@ -55,6 +55,9 @@ export default function CatalogPage() {
     queryFn: () => api.catalog({ sort, limit: 300 }),
     enabled: !isSearching,
     staleTime: 10_000,
+    // Keep the previous sort's rows on screen while the new one loads; without
+    // it the section unmounts and the sort buttons vanish under the finger.
+    placeholderData: (prev) => prev,
   })
   const discoverQuery = useQuery({
     queryKey: ['discover', { q: debouncedQuery }],
@@ -238,6 +241,8 @@ export default function CatalogPage() {
             seed={activeRadio}
             feed={radioQuery.data}
             isLoading={radioQuery.isLoading}
+            isError={radioQuery.isError}
+            onRetry={() => radioQuery.refetch()}
             isRefreshing={radioQuery.isFetching}
             onRefresh={() => setRadioRoll((r) => r + 1)}
             onBack={() => setActiveRadio(null)}
@@ -247,6 +252,8 @@ export default function CatalogPage() {
             category={activeCategory}
             feed={categoryFeedQuery.data}
             isLoading={categoryFeedQuery.isLoading}
+            isError={categoryFeedQuery.isError}
+            onRetry={() => categoryFeedQuery.refetch()}
             onBack={() => setActiveCategory(null)}
           />
         ) : activeMix ? (

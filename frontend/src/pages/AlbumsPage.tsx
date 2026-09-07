@@ -209,13 +209,34 @@ export default function AlbumsPage() {
           {libraryQuery.isLoading && (
             <div className="font-pixel text-ink-mid">··· loading your albums ···</div>
           )}
-          {!libraryQuery.isLoading && libraryAlbums.length === 0 && (
-            <EmptyState
-              glyph="◉"
-              title="no albums yet"
-              hint="search an album above and download it — its tracks group here automatically."
-            />
+          {/* Distinct from the empty state below: a failed fetch is not an
+              empty library, and telling the user it is loses their albums. */}
+          {libraryQuery.isError && (
+            <div className="card-vapor rounded-sm p-8 text-center font-pixel">
+              <div className="text-crit mb-3">
+                couldn't load your albums —{' '}
+                {libraryQuery.error instanceof Error
+                  ? libraryQuery.error.message
+                  : 'unknown'}
+              </div>
+              <button
+                type="button"
+                onClick={() => libraryQuery.refetch()}
+                className="uppercase tracking-widest text-xs px-3 py-1.5 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+              >
+                ↻ retry
+              </button>
+            </div>
           )}
+          {!libraryQuery.isLoading &&
+            !libraryQuery.isError &&
+            libraryAlbums.length === 0 && (
+              <EmptyState
+                glyph="◉"
+                title="no albums yet"
+                hint="search an album above and download it — its tracks group here automatically."
+              />
+            )}
           <AlbumGrid>
             {libraryAlbums.map((a) => (
               <LibraryAlbumCard

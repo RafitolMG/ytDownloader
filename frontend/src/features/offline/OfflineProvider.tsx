@@ -130,6 +130,8 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       tracks: PlaylistTrackRow[],
     ) => runExclusive(async () => {
       if (!supported) return
+      // Rejects if the session/connection is gone. Nothing is registered yet, so
+      // the caller is responsible for surfacing it — see OfflineDownloadButton.
       await ensureMediaToken() // so trackStreamUrl carries the media token
       manifestRef.current.playlists[playlistId] = { name: playlistName }
       // Previews aren't real DB tracks — they can't be streamed offline.

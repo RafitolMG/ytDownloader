@@ -1747,6 +1747,8 @@ async def catalog_radio(
     `rotate_pick`), so each ↻ surfaces different "download more like this" picks
     while a given nonce stays reproducible. Already-owned tracks always surface
     as playable (`db`); only the external picks rotate."""
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="invalid video id")
     external_limit = max(0, min(external_limit, 30))
 
     def work():
@@ -2512,8 +2514,14 @@ def cancel_job(job_id: str, user: CurrentUser = Depends(current_user)):
 
 
 @app.post("/api/jobs/{job_id}/retry")
-def retry_job(job_id: str, user: CurrentUser = Depends(current_user)):
-    """Re-queue a previously completed/interrupted/failed job with its original parameters."""
+def retry_job(
+    job_id: str,
+    user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
+):
+    """Re-queue a previously completed/interrupted/failed job with its original
+    parameters. Carries the extraction budget itself: it re-enters the download
+    handlers as plain Python calls, so *their* rate-limit dependency never runs."""
     row = db.get(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -2638,10 +2646,24 @@ _health_probe_lock = threading.Lock()
 
 
 def _run_extraction_probe() -> dict:
-    """Cached real-extraction check. The 5-min TTL (and lock) means a flood of
-    health hits can't turn into a yt-dlp request flood."""
+    """Cached real-extraction check. The 5-min TTL means a flood of health hits
+    can't turn into a yt-dlp request flood.
+
+    Never blocks. The route is unauthenticated and sync, so it runs on the anyio
+    threadpool that also serves the app's other sync endpoints, and a yt-dlp call
+    has no wall-clock bound — waiting on the mutex would let anyone pin every
+    worker in that pool by opening concurrent health checks while a probe is slow.
+    So: read the cache without the lock, and hand a caller that arrives mid-probe
+    the last known result instead of a queue slot."""
     now = time.time()
-    with _health_probe_lock:
+    snapshot = dict(_health_probe)
+    if snapshot["ok"] is not None and now - snapshot["checked_at"] < _HEALTH_PROBE_TTL:
+        return snapshot
+    if not _health_probe_lock.acquire(blocking=False):
+        return snapshot  # a probe is already in flight — don't queue behind it
+    try:
+        # A probe may have landed between the snapshot and the lock.
+        now = time.time()
         if _health_probe["ok"] is not None and now - _health_probe["checked_at"] < _HEALTH_PROBE_TTL:
             return dict(_health_probe)
         ok = False
@@ -2655,6 +2677,8 @@ def _run_extraction_probe() -> dict:
             error = str(e)
         _health_probe.update(checked_at=now, ok=ok, error=error)
         return dict(_health_probe)
+    finally:
+        _health_probe_lock.release()
 
 
 @app.get("/api/health")
@@ -2670,10 +2694,11 @@ def health_extraction():
     extraction is broken (bad cookies, YouTube change, stale yt-dlp) so it can be
     alerted on."""
     probe = _run_extraction_probe()
+    unknown = probe["ok"] is None
     body = {
-        "status": "ok" if probe["ok"] else "degraded",
+        "status": "ok" if probe["ok"] else ("probing" if unknown else "degraded"),
         "extraction_ok": bool(probe["ok"]),
-        "error": probe["error"],
+        "error": "extraction probe in progress" if unknown else probe["error"],
         "yt_dlp_version": yt_dlp.version.__version__,
         "checked_at": probe["checked_at"],
     }

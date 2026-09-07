@@ -29,6 +29,17 @@ export function useGlobalPlayerHotkeys() {
         el?.isContentEditable
       )
         return
+      // Space and Enter activate whatever the user is focused on. Claiming them
+      // here would preventDefault() the browser's synthesized click, so a
+      // keyboard user on any control would pause the music instead of pressing
+      // it — and on our role="button" rows, do both at once.
+      if (
+        tag === 'BUTTON' ||
+        tag === 'A' ||
+        tag === 'SUMMARY' ||
+        el?.getAttribute('role') === 'button'
+      )
+        return
       if (!p.current) return
 
       switch (e.key) {

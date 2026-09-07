@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 import secrets
+import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -31,6 +33,27 @@ _login_limiter = rate_limit.SlidingWindowLimiter(
 _login_global_limiter = rate_limit.SlidingWindowLimiter(
     config.LOGIN_RATELIMIT_GLOBAL_MAX, config.LOGIN_RATELIMIT_WINDOW_SEC
 )
+
+# Identifiers that have completed a login on this process. They are exempt from
+# the global cap so a username-rotation flood can't lock out the people who
+# actually use the box. Only a *successful* login adds one, so it can't be
+# seeded without valid credentials, and the per-account cap still applies.
+_KNOWN_ACCOUNTS_MAX = 256
+_known_accounts: "OrderedDict[str, None]" = OrderedDict()
+_known_lock = threading.Lock()
+
+
+def _is_known_account(ident: str) -> bool:
+    with _known_lock:
+        return ident in _known_accounts
+
+
+def _remember_account(ident: str) -> None:
+    with _known_lock:
+        _known_accounts[ident] = None
+        _known_accounts.move_to_end(ident)
+        while len(_known_accounts) > _KNOWN_ACCOUNTS_MAX:
+            _known_accounts.popitem(last=False)
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -92,13 +115,23 @@ def login(body: LoginRequest, response: Response):
     # never forwarded upstream. Key on the account (not client IP — the proxy
     # collapses every client to one IP) plus a global cap.
     ident = body.usernameOrEmail.strip().lower()
-    ok_global, retry_g = _login_global_limiter.check("*")
+    # Rotating garbage usernames exhausts the global cap without ever tripping a
+    # per-account one, which used to refuse every real user too. Known accounts
+    # skip it, so a flood now denies only first-time logins.
+    if not _is_known_account(ident):
+        ok_global, retry_g = _login_global_limiter.check("*")
+        if not ok_global:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many login attempts — try again in a moment",
+                headers={"Retry-After": str(retry_g)},
+            )
     ok_account, retry_a = _login_limiter.check(ident)
-    if not ok_global or not ok_account:
+    if not ok_account:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="too many login attempts — try again in a moment",
-            headers={"Retry-After": str(max(retry_g, retry_a))},
+            headers={"Retry-After": str(retry_a)},
         )
     try:
         result = homeauth.login(body.usernameOrEmail, body.password)
@@ -127,6 +160,7 @@ def login(body: LoginRequest, response: Response):
         access_expires_at=_expires_at(result.expires_in),
     )
     _set_session_cookie(response, session_id)
+    _remember_account(ident)
     log.info("login user=%s role=%s", result.user_id, result.role)
     return WhoAmIResponse(user_id=result.user_id, username=result.username, role=result.role)
 
@@ -193,6 +227,8 @@ def auth_ping():
         "api_key_valid": result.api_key_valid,
         "latency_ms": result.latency_ms,
         "status_code": result.status_code,
-        "base_url": result.base_url,
+        # The browser-facing URL, never the internal service-name one the
+        # backend dials — this route is unauthenticated.
+        "base_url": config.HOMEAUTH_PUBLIC_URL,
         "error": result.error,
     }
