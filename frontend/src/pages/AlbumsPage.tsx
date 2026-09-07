@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { useBackClose } from '@/shared/lib/backStack'
 import { EmptyState } from '@/shared/ui/EmptyState'
-import { api } from '@/shared/api/client'
+import { ApiError, api } from '@/shared/api/client'
 import { useMutationErrorToast } from '@/shared/lib/mutationError'
 import type { AlbumCard, CatalogItem, LibraryItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
@@ -404,7 +404,10 @@ function LibraryAlbumView({
     queryKey: ['album-resolve', album.key],
     queryFn: () => api.albumResolve(album.title, album.artist),
     staleTime: 30 * 60_000,
-    retry: false,
+    // A 404 is an answer; a 5xx is youtube music being flaky, which is the
+    // documented failure mode of the box this runs on. Retry only the latter.
+    retry: (count, e) =>
+      count < 2 && e instanceof ApiError && e.status >= 500,
   })
 
   const remoteTracks = resolved.data?.tracks ?? []
@@ -419,13 +422,26 @@ function LibraryAlbumView({
     () => new Set(album.tracks.map((t) => t.video_id)),
     [album.tracks],
   )
-  // Trust the resolved tracklist once a majority of the tracks we own are on it.
-  // Demanding *every* one was too strict: a track grabbed from plain YouTube
-  // carries a different video id than its YouTube Music twin, and one such id
-  // used to hide the missing-tracks view for the whole album. The owned tracks
-  // the edition doesn't list are rendered below it instead of being dropped.
+  // One owned track on the resolved list is the signal that matters: the search
+  // is *steered* by the ids we own, so an edition containing any of them is the
+  // one we downloaded from — while zero overlap means a bare title search picked
+  // something (a karaoke or tribute pressing) we shouldn't trust.
+  //
+  // Requiring more was the bug. A majority reads as looser than "all", but for
+  // the common 2-track group it demands both, exactly like the rule it replaced.
+  // Nothing is lost by relaxing it: owned tracks the edition doesn't list render
+  // under it, which is what the old all-or-nothing gate existed to guarantee.
   const matchedOwned = remoteTracks.filter((t) => ownedVids.has(t.video_id)).length
-  const confident = remoteTracks.length > 0 && matchedOwned * 2 > ownedVids.size
+  const confident = remoteTracks.length > 0 && matchedOwned >= 1
+
+  const resolveError = resolved.error
+  const resolveProblem = !resolved.isError
+    ? "couldn't match this album on youtube music"
+    : resolveError instanceof ApiError && resolveError.status >= 500
+      ? 'youtube music is unreachable right now'
+      : resolveError instanceof ApiError && resolveError.status === 404
+        ? "this album isn't on youtube music"
+        : "couldn't reach youtube music"
 
   const remoteVids = useMemo(
     () => new Set(remoteTracks.map((t) => t.video_id)),
@@ -498,13 +514,16 @@ function LibraryAlbumView({
         </div>
       )}
 
-      {/* Say it out loud: without this the owned tracks read as the full album. */}
+      {/* Say it out loud: without this the owned tracks read as the full album.
+          And say *which* thing failed — an outage is not a failed match, and
+          telling the user the album couldn't be matched when youtube music is
+          simply down sends them looking for the wrong problem. */}
       {!resolved.isFetching && !confident && (
         <div className="font-pixel text-xs text-ink-lo mb-3 flex items-center gap-2 flex-wrap">
           <span>
-            couldn't match this album on youtube music — showing the{' '}
-            {album.tracks.length} track{album.tracks.length === 1 ? '' : 's'} you
-            own, so some may be missing.
+            {resolveProblem} — showing the {album.tracks.length} track
+            {album.tracks.length === 1 ? '' : 's'} you own, so some may be
+            missing.
           </span>
           <button
             type="button"
