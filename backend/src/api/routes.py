@@ -2014,16 +2014,22 @@ async def album_resolve(
         raise HTTPException(status_code=400, detail="title required")
 
     def work():
-        # Owned video_ids under this album title — the overlap signal that steers
-        # resolution to the exact edition the user downloaded from.
+        # What the caller owns under this album title — the overlap signal that
+        # steers resolution to the exact edition they downloaded from. Titles go
+        # along with the ids: a track taken from plain YouTube has a different
+        # video id than its YouTube Music twin, so ids alone see nothing.
         want = title_norm.lower()
-        owned_ids = {
-            r["video_id"]
+        owned = [
+            r
             for r in db.list_library(user.user_id, limit=10000)
             if (r.get("album") or "").strip().lower() == want
-        }
+        ]
+        owned_ids = {r["video_id"] for r in owned}
+        owned_titles = {r.get("title") for r in owned if r.get("title")}
         q = f"{artist} {title_norm}".strip()
-        album = search_mod.resolve_album(q, owned_ids=owned_ids)
+        album = search_mod.resolve_album(
+            q, owned_ids=owned_ids, owned_titles=owned_titles
+        )
         if album is None:
             return None
         return _album_payload(user.user_id, album)

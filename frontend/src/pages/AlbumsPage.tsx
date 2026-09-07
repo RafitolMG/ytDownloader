@@ -5,7 +5,12 @@ import { useBackClose } from '@/shared/lib/backStack'
 import { EmptyState } from '@/shared/ui/EmptyState'
 import { ApiError, api } from '@/shared/api/client'
 import { useMutationErrorToast } from '@/shared/lib/mutationError'
-import type { AlbumCard, CatalogItem, LibraryItem } from '@/shared/api/types'
+import type {
+  AlbumCard,
+  CatalogItem,
+  ExternalCatalogItem,
+  LibraryItem,
+} from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { fmtDuration } from '@/shared/lib/format'
 import { useDebouncedValue } from '@/shared/lib/useDebouncedValue'
@@ -19,6 +24,22 @@ import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { CatalogRow, DownloadAllButton, ExternalRow } from '@/features/catalog/rows'
 import { OfflineDownloadButton } from '@/features/offline/OfflineDownloadButton'
 import { OfflineFallback } from '@/features/offline/OfflineFallback'
+
+/** Comparison key for a track title: accents dropped, bracketed asides removed,
+ *  punctuation flattened, non-Latin scripts kept. Mirrors
+ *  `search.normalize_title` on the backend, which uses the same key to pick the
+ *  right edition in the first place — they have to agree exactly. */
+function normalizeTitle(title: string | null | undefined): string {
+  return (title ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\(.*?\)|\[.*?\]/g, ' ')
+    .replace(/[^\p{L}\p{N} ]/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(' ')
+}
 
 /** A library album: the user's owned tracks grouped under one album title. */
 type LibraryAlbum = {
@@ -418,10 +439,22 @@ function LibraryAlbumView({
     return m
   }, [dbItems])
 
-  const ownedVids = useMemo(
-    () => new Set(album.tracks.map((t) => t.video_id)),
-    [album.tracks],
-  )
+  // A track taken from plain YouTube has a different video id than its YouTube
+  // Music twin, so comparing ids alone can never recognise it on the album's
+  // tracklist — no threshold fixes that. Fall back to the normalized title.
+  const ownedByTitle = useMemo(() => {
+    const m = new Map<string, LibraryItem>()
+    for (const t of album.tracks) {
+      const key = normalizeTitle(t.title)
+      if (key && !m.has(key)) m.set(key, t)
+    }
+    return m
+  }, [album.tracks])
+
+  /** The track we already own that this album entry refers to, if any. */
+  const ownedMatch = (t: ExternalCatalogItem): LibraryItem | undefined =>
+    album.tracks.find((o) => o.video_id === t.video_id) ??
+    ownedByTitle.get(normalizeTitle(t.title))
   // One owned track on the resolved list is the signal that matters: the search
   // is *steered* by the ids we own, so an edition containing any of them is the
   // one we downloaded from — while zero overlap means a bare title search picked
@@ -431,7 +464,7 @@ function LibraryAlbumView({
   // the common 2-track group it demands both, exactly like the rule it replaced.
   // Nothing is lost by relaxing it: owned tracks the edition doesn't list render
   // under it, which is what the old all-or-nothing gate existed to guarantee.
-  const matchedOwned = remoteTracks.filter((t) => ownedVids.has(t.video_id)).length
+  const matchedOwned = remoteTracks.filter((t) => ownedMatch(t) !== undefined).length
   const confident = remoteTracks.length > 0 && matchedOwned >= 1
 
   const resolveError = resolved.error
@@ -443,17 +476,26 @@ function LibraryAlbumView({
         ? "this album isn't on youtube music"
         : "couldn't reach youtube music"
 
-  const remoteVids = useMemo(
-    () => new Set(remoteTracks.map((t) => t.video_id)),
-    [remoteTracks],
-  )
+  // Owned tracks the resolved edition doesn't list at all — by id or by title.
+  const matchedOwnedKeys = useMemo(() => {
+    const keys = new Set<string>()
+    for (const t of remoteTracks) {
+      const owned = ownedMatch(t)
+      if (owned) keys.add(`${owned.video_id}/${owned.codec}/${owned.bitrate}`)
+    }
+    return keys
+  }, [remoteTracks, ownedByTitle, album.tracks])
   const strayOwned = confident
-    ? album.tracks.filter((t) => !remoteVids.has(t.video_id))
+    ? album.tracks.filter(
+        (t) => !matchedOwnedKeys.has(`${t.video_id}/${t.codec}/${t.bitrate}`),
+      )
     : []
 
   // The album's tracks not yet in the catalog — the "download missing" targets.
+  // A track we already own under another id is not missing; offering it would
+  // just add a duplicate.
   const missingItems = confident
-    ? remoteTracks.filter((t) => !dbById.has(t.video_id))
+    ? remoteTracks.filter((t) => !dbById.has(t.video_id) && !ownedMatch(t))
     : []
   const missingCount = missingItems.length
 
@@ -540,16 +582,32 @@ function LibraryAlbumView({
           <ul className="card-vapor rounded-sm divide-y divide-border">
             {remoteTracks.map((t, idx) => {
               const hit = dbById.get(t.video_id)
-              return hit ? (
-                <CatalogRow
-                  key={t.video_id}
-                  item={hit}
-                  position={idx + 1}
-                  allItems={dbItems}
-                />
-              ) : (
-                <ExternalRow key={t.video_id} item={t} position={idx + 1} />
-              )
+              if (hit) {
+                return (
+                  <CatalogRow
+                    key={t.video_id}
+                    item={hit}
+                    position={idx + 1}
+                    allItems={dbItems}
+                  />
+                )
+              }
+              // Same song, different video id — play the copy we have instead
+              // of offering to download it again.
+              const owned = ownedMatch(t)
+              if (owned) {
+                return (
+                  <OwnedTrackRow
+                    key={t.video_id}
+                    track={owned}
+                    position={idx + 1}
+                    onPlay={() =>
+                      player.play(album.tracks, album.tracks.indexOf(owned))
+                    }
+                  />
+                )
+              }
+              return <ExternalRow key={t.video_id} item={t} position={idx + 1} />
             })}
           </ul>
           {strayOwned.length > 0 && (
@@ -569,53 +627,72 @@ function LibraryAlbumView({
 /** A plain list of owned tracks — the whole library album while it resolves (or
  * when it can't be matched), and the owned tracks the resolved edition doesn't
  * list. */
+function OwnedTrackRow({
+  track,
+  position,
+  onPlay,
+}: {
+  track: LibraryItem
+  position: number
+  onPlay: () => void
+}) {
+  const player = useAudioPlayer()
+  const isCurrent =
+    player.current?.video_id === track.video_id &&
+    player.current?.codec === track.codec &&
+    player.current?.bitrate === track.bitrate
+
+  return (
+    <li
+      role="button"
+      tabIndex={0}
+      aria-label={`play ${track.title ?? track.video_id}`}
+      onClick={onPlay}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onPlay()
+        }
+      }}
+      className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition ${
+        isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
+      }`}
+    >
+      <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
+        {isCurrent && player.isPlaying ? (
+          <span className="text-hot">▶</span>
+        ) : (
+          String(position).padStart(2, '0')
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="font-sans text-sm font-medium text-ink-hi leading-snug truncate">
+          {track.title ?? track.video_id}
+        </div>
+        <div className="text-sm text-ink-lo truncate mt-0.5">
+          {track.artist ?? '—'}
+        </div>
+      </div>
+      {track.duration_sec != null && (
+        <div className="font-pixel text-xs text-ink-lo tabular-nums">
+          {fmtDuration(track.duration_sec)}
+        </div>
+      )}
+    </li>
+  )
+}
+
 function OwnedTrackList({ tracks }: { tracks: LibraryItem[] }) {
   const player = useAudioPlayer()
-  const isCurrentAlbum = (t: LibraryItem) =>
-    player.current?.video_id === t.video_id &&
-    player.current?.codec === t.codec &&
-    player.current?.bitrate === t.bitrate
-
   return (
     <ul className="card-vapor rounded-sm divide-y divide-border">
       {tracks.map((t, idx) => (
-        <li
+        <OwnedTrackRow
           key={`${t.video_id}/${t.codec}/${t.bitrate}`}
-          role="button"
-          tabIndex={0}
-          aria-label={`play ${t.title ?? t.video_id}`}
-          onClick={() => player.play(tracks, idx)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault()
-              player.play(tracks, idx)
-            }
-          }}
-          className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition ${
-            isCurrentAlbum(t) ? 'bg-hot/10' : 'hover:bg-violet/10'
-          }`}
-        >
-          <div className="font-pixel text-xs sm:text-sm text-ink-lo w-6 sm:w-8 text-right tabular-nums">
-            {isCurrentAlbum(t) && player.isPlaying ? (
-              <span className="text-hot">▶</span>
-            ) : (
-              String(idx + 1).padStart(2, '0')
-            )}
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="font-sans text-sm font-medium text-ink-hi leading-snug truncate">
-              {t.title ?? t.video_id}
-            </div>
-            <div className="text-sm text-ink-lo truncate mt-0.5">
-              {t.artist ?? '—'}
-            </div>
-          </div>
-          {t.duration_sec != null && (
-            <div className="font-pixel text-xs text-ink-lo tabular-nums">
-              {fmtDuration(t.duration_sec)}
-            </div>
-          )}
-        </li>
+          track={t}
+          position={idx + 1}
+          onPlay={() => player.play(tracks, idx)}
+        />
       ))}
     </ul>
   )

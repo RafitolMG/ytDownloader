@@ -13,8 +13,10 @@ same prefixes constantly and the results don't shift second-by-second.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import quote
@@ -458,8 +460,29 @@ def get_album(album_id: str) -> dict | None:
     return _album_copy(result)
 
 
+_TITLE_STRIP_RE = re.compile(r"\(.*?\)|\[.*?\]")
+
+
+def normalize_title(title: str | None) -> str:
+    """Fold a track title to a comparison key: accents dropped, bracketed asides
+    removed, punctuation flattened. Lets a track we own be recognised on an
+    album's tracklist even when its video id is different.
+
+    Non-Latin scripts are kept — an ASCII-only filter folded every Cyrillic
+    title to the empty string, i.e. to "never matches". The frontend mirrors
+    this exactly; the two keys have to agree."""
+    text = unicodedata.normalize("NFKD", title or "")
+    text = "".join(c for c in text if not unicodedata.combining(c)).lower()
+    text = _TITLE_STRIP_RE.sub(" ", text)
+    text = "".join(c if c.isalnum() else " " for c in text)
+    return " ".join(text.split())
+
+
 def resolve_album(
-    q: str, owned_ids: set[str] | None = None, limit: int = 6
+    q: str,
+    owned_ids: set[str] | None = None,
+    limit: int = 6,
+    owned_titles: set[str] | None = None,
 ) -> dict | None:
     """Resolve a free-text "artist title" query to the best-matching YouTube
     Music album and return its full detail (header + ordered tracklist), same
@@ -467,16 +490,23 @@ def resolve_album(
 
     A *library* album is only a title-grouped bag of the tracks a user owns — it
     carries no album id, so to show the tracks they're *missing* we re-find the
-    album on YTM. When `owned_ids` is given, the candidate whose tracklist
-    overlaps those ids the most wins; this reliably disambiguates the many
-    same-titled editions / re-releases / karaoke versions a search returns. With
-    no overlap signal (or no overlap at all), the most relevant / fullest result
-    is used and the caller decides whether to trust it.
+    album on YTM. The candidate whose tracklist overlaps what the caller owns
+    the most wins; this disambiguates the many same-titled editions /
+    re-releases / karaoke versions a search returns.
+
+    Overlap counts ids *and* normalized titles. Ids alone were blind to the
+    common case: a track grabbed from plain YouTube has a different video id
+    than its YouTube Music twin, so a library built that way scored 0 against
+    every candidate and the fullest unrelated result won — resolving
+    "Dillom Por cesárea" to the 18-track album that merely *contains* that song.
+    With no signal at all the fullest result is still used, and the caller
+    decides whether to trust it.
     """
     q = q.strip()
     if not q:
         return None
     owned = set(owned_ids or ())
+    titles = {t for t in (normalize_title(t) for t in (owned_titles or ())) if t}
     limit = max(1, min(limit, 10))
 
     album_ids = _search_album_ids(q, limit)
@@ -496,8 +526,16 @@ def resolve_album(
         return None
 
     def _score(d: dict) -> tuple[int, int]:
-        ids = {t.get("id") for t in (d.get("tracks") or [])}
-        overlap = len(ids & owned)
-        return (overlap, d.get("track_count") or len(d.get("tracks") or []))
+        tracks = d.get("tracks") or []
+        ids = {t.get("id") for t in tracks}
+        by_id = ids & owned
+        # Don't count a track twice when both signals agree on it.
+        by_title = {
+            normalize_title(t.get("title"))
+            for t in tracks
+            if t.get("id") not in by_id
+        } & titles
+        overlap = len(by_id) + len(by_title)
+        return (overlap, d.get("track_count") or len(tracks))
 
     return max(details, key=_score)
