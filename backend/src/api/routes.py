@@ -62,6 +62,16 @@ def _ensure_owner(job: dict, user: CurrentUser) -> None:
         raise HTTPException(status_code=403, detail="not your job")
 
 
+# Columns kept so retry can replay a job, never part of its API representation.
+# `import_source` is the caller's own pasted track list, and an admin lists
+# every user's jobs.
+_JOB_INTERNAL_COLS = ("import_source",)
+
+
+def _public_job(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k not in _JOB_INTERNAL_COLS}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown. Replaces the deprecated @app.on_event handlers: init the
@@ -510,6 +520,7 @@ def start_download(
         resolution=body.resolution,
         ext=body.ext,
         owner_id=user.user_id,
+        own=body.own,
     )
 
     def run_audio_import():
@@ -1107,6 +1118,14 @@ def start_playlist_download(
     return {"job_id": job_id}
 
 
+# A track-list import has no YouTube url; this sentinel marks the job so retry
+# can tell it apart from a playlist download instead of feeding it to the URL
+# validator. Only sources up to _RETRYABLE_SOURCE_MAX are kept for replay — a
+# pasted list is unbounded, and the jobs table is not the place for it.
+_TRACKLIST_IMPORT_URL = "tracklist-import"
+_RETRYABLE_SOURCE_MAX = 64_000
+
+
 class TrackImportRequest(BaseModel):
     # A Spotify playlist link (read via the public embed, ~100-track cap) OR a
     # pasted list — Exportify CSV / "Artist - Title" lines (unlimited).
@@ -1129,12 +1148,14 @@ def start_tracklist_import(
     job_id = str(uuid.uuid4())
     progress_queue: _ProgressHub = _ProgressHub()
     _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": None}
+    source = body.source
     db.create_job(
         job_id=job_id,
-        url='tracklist-import',
+        url=_TRACKLIST_IMPORT_URL,
         format_code='mp3-320',
         is_playlist=True,
         owner_id=user.user_id,
+        import_source=source if len(source) <= _RETRYABLE_SOURCE_MAX else None,
     )
 
     def run():
@@ -1319,7 +1340,7 @@ async def progress_ws(websocket: WebSocket, job_id: str):
         return
 
     await websocket.accept()
-    await websocket.send_json({"type": "snapshot", "job": row})
+    await websocket.send_json({"type": "snapshot", "job": _public_job(row)})
 
     runtime = _jobs.get(job_id)
     if runtime is None:
@@ -2488,7 +2509,7 @@ async def preview_track(
 @app.get("/api/jobs")
 def list_jobs(user: CurrentUser = Depends(current_user)):
     """Return all jobs ordered by creation time desc. USER scoped to own jobs; ADMIN sees all."""
-    return {"jobs": db.list_jobs(owner_id=user.owner_filter)}
+    return {"jobs": [_public_job(r) for r in db.list_jobs(owner_id=user.owner_filter)]}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -2497,7 +2518,7 @@ def get_job(job_id: str, user: CurrentUser = Depends(current_user)):
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     _ensure_owner(row, user)
-    return row
+    return _public_job(row)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -2530,6 +2551,19 @@ def retry_job(
         raise HTTPException(status_code=409, detail="Job is still active.")
 
     as_file = bool(row["as_file"])
+
+    # A track-list import is flagged is_playlist but has no url of its own, so
+    # dispatching on is_playlist alone sent it to the playlist handler and it
+    # died on URL validation. Check the sentinel first.
+    if row["url"] == _TRACKLIST_IMPORT_URL:
+        source = row["import_source"]
+        if not source:
+            raise HTTPException(
+                status_code=409,
+                detail="this import can't be retried — paste the list again",
+            )
+        return start_tracklist_import(TrackImportRequest(source=source), user=user)
+
     if row["is_playlist"]:
         return start_playlist_download(
             PlaylistDownloadRequest(
@@ -2544,6 +2578,9 @@ def retry_job(
             resolution=row["resolution"],
             ext=row["ext"],
             as_file=as_file,
+            # Defaults to True on the model, so omitting it turned a catalog-only
+            # fetch into a favourite on every retry.
+            own=bool(row["own"]),
         ),
         user=user,
     )

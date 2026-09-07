@@ -272,12 +272,25 @@ def _migrate_jobs_as_file(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN as_file INTEGER NOT NULL DEFAULT 0")
 
 
+def _migrate_jobs_retry_inputs(conn: sqlite3.Connection) -> None:
+    # The rest of what retry needs to replay a job faithfully. `own` was lost, so
+    # retrying a catalog-only fetch silently favourited the track; `import_source`
+    # was never stored at all, so a track-list import had nothing to replay and
+    # was routed to the playlist handler, which rejected its sentinel url.
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "own" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN own INTEGER NOT NULL DEFAULT 1")
+    if "import_source" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN import_source TEXT")
+
+
 # (version, migration_fn) in apply order. Bump past `current` runs only the new ones.
 _MIGRATIONS: list[tuple[int, Any]] = [
     (1, _migrate_jobs_owner_id),
     (2, _migrate_tracks_album),
     (3, _migrate_drop_track_likes),
     (4, _migrate_jobs_as_file),
+    (5, _migrate_jobs_retry_inputs),
 ]
 
 
@@ -331,14 +344,20 @@ def create_job(
     resolution: str | None = None,
     ext: str | None = None,
     owner_id: str | None = None,
+    own: bool = True,
+    import_source: str | None = None,
 ) -> None:
+    """`own` and `import_source` exist so retry can replay the job exactly —
+    see `_migrate_jobs_retry_inputs`. `import_source` is the caller's pasted
+    track list and must not be served back out; the job routes strip it."""
     with _write() as conn:
         conn.execute(
             """
             INSERT INTO jobs (
                 id, url, format_code, status, progress_pct,
-                is_playlist, as_file, resolution, ext, owner_id, created_at
-            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                is_playlist, as_file, resolution, ext, owner_id, own,
+                import_source, created_at
+            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -350,6 +369,8 @@ def create_job(
                 resolution,
                 ext,
                 owner_id,
+                1 if own else 0,
+                import_source,
                 _now(),
             ),
         )

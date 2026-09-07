@@ -114,3 +114,85 @@ def test_known_accounts_map_is_bounded():
     for n in range(auth_routes._KNOWN_ACCOUNTS_MAX + 50):
         auth_routes._remember_account(f"u{n}@example.com")
     assert len(auth_routes._known_accounts) <= auth_routes._KNOWN_ACCOUNTS_MAX
+
+
+# ── retry_job: all three lanes of the audit found a defect in this one function ─
+
+def _job_row(**over):
+    row = {
+        "id": "j1", "url": "https://www.youtube.com/watch?v=abc", "format_code": "mp3-320",
+        "resolution": None, "ext": None, "status": "done", "is_playlist": 0,
+        "as_file": 0, "owner_id": "u1", "own": 1, "import_source": None,
+    }
+    row.update(over)
+    return row
+
+
+def _retry(monkeypatch, row, calls):
+    """Drive retry_job against a canned job row, recording which starter ran."""
+    from src.api import routes
+    from src.auth import CurrentUser
+
+    monkeypatch.setattr(routes.db, "get", lambda job_id: row)
+    monkeypatch.setattr(routes, "_ensure_owner", lambda j, u: None)
+    for name in ("start_download", "start_playlist_download", "start_tracklist_import"):
+        def record(body, user, _name=name):
+            calls.append((_name, body))
+            return {"job_id": "new"}
+        monkeypatch.setattr(routes, name, record)
+
+    user = CurrentUser(session_id="s1", user_id="u1", username="u1", role="USER")
+    return routes.retry_job("j1", user=user, _rl=user)
+
+
+def test_retry_replays_a_tracklist_import_from_its_stored_source(monkeypatch):
+    from src.api import routes
+
+    calls = []
+    _retry(monkeypatch, _job_row(
+        url=routes._TRACKLIST_IMPORT_URL, is_playlist=1, import_source="Artist - Title",
+    ), calls)
+
+    assert [c[0] for c in calls] == ["start_tracklist_import"]
+    assert calls[0][1].source == "Artist - Title"
+
+
+def test_retry_of_an_unreplayable_import_says_so(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+    from src.api import routes
+
+    with pytest.raises(HTTPException) as exc:
+        _retry(monkeypatch, _job_row(
+            url=routes._TRACKLIST_IMPORT_URL, is_playlist=1, import_source=None,
+        ), [])
+    assert exc.value.status_code == 409
+    assert "paste the list again" in exc.value.detail
+
+
+def test_retry_preserves_a_catalog_only_fetch(monkeypatch):
+    """own=False means 'register in the shared catalog but don't favourite it'.
+    The model defaults to True, so dropping it favourited the track on retry."""
+    calls = []
+    _retry(monkeypatch, _job_row(own=0), calls)
+
+    assert calls[0][0] == "start_download"
+    assert calls[0][1].own is False
+
+
+def test_retry_keeps_the_playlist_route_for_a_real_playlist(monkeypatch):
+    calls = []
+    _retry(monkeypatch, _job_row(
+        url="https://www.youtube.com/playlist?list=PL1", is_playlist=1, as_file=1,
+    ), calls)
+
+    assert calls[0][0] == "start_playlist_download"
+    assert calls[0][1].as_file is True
+
+
+def test_job_payloads_never_carry_the_pasted_import_source():
+    from src.api.routes import _public_job
+
+    public = _public_job(_job_row(import_source="a very private track list"))
+    assert "import_source" not in public
+    assert public["id"] == "j1"
