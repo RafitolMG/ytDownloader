@@ -468,8 +468,15 @@ function LibraryAlbumView({
   const confident = remoteTracks.length > 0 && matchedOwned >= 1
 
   const resolveError = resolved.error
+  // Name what actually happened. "couldn't match" on its own can't tell apart
+  // "the search surfaced a different record" from "the right record titles its
+  // tracks differently", and those need opposite fixes — so say which album came
+  // back and let the mismatch be visible.
+  const foundTitle = resolved.data?.album?.title
   const resolveProblem = !resolved.isError
-    ? "couldn't match this album on youtube music"
+    ? foundTitle
+      ? `found "${foundTitle}" on youtube music, but none of your tracks are on it`
+      : "couldn't match this album on youtube music"
     : resolveError instanceof ApiError && resolveError.status >= 500
       ? 'youtube music is unreachable right now'
       : resolveError instanceof ApiError && resolveError.status === 404
