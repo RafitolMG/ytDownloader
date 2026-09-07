@@ -2844,8 +2844,38 @@ def search_history(
 _HEALTH_PROBE_TTL = 300.0
 # yt-dlp's own canonical test video — tiny, public, and effectively permanent.
 _HEALTH_PROBE_URL = "https://www.youtube.com/watch?v=BaW_jenozKc"
-_health_probe: dict = {"checked_at": 0.0, "ok": None, "error": None}
+# The app depends on TWO upstreams, and they fail independently: plain YouTube
+# (downloads, search) and YouTube Music (every album screen). Probing only the
+# first is how this endpoint could report "ok" while albums returned nothing at
+# all — the exact state that sends you looking for a bug in your own code.
+_HEALTH_PROBE_MUSIC_QUERY = "radiohead ok computer"
+_health_probe: dict = {
+    "checked_at": 0.0, "ok": None, "error": None, "video_ok": None, "music_ok": None,
+}
 _health_probe_lock = threading.Lock()
+
+
+def _probe_video() -> tuple[bool, str | None]:
+    try:
+        info = ytDownloaderFunctions.get_basic_info(_HEALTH_PROBE_URL)
+        if not info.get("title"):
+            return False, "youtube: extraction returned no title"
+        return True, None
+    except Exception as e:
+        return False, f"youtube: {safe_error(e)}"
+
+
+def _probe_music() -> tuple[bool, str | None]:
+    """Exercises the music.youtube.com search the album screens are built on —
+    a different extractor from the video probe above, on a host that can be
+    blocked on its own."""
+    try:
+        ids = search_mod._search_album_ids(_HEALTH_PROBE_MUSIC_QUERY, 1)
+        if not ids:
+            return False, "youtube music: album search returned nothing"
+        return True, None
+    except Exception as e:
+        return False, f"youtube music: {safe_error(e)}"
 
 
 def _run_extraction_probe() -> dict:
@@ -2869,16 +2899,15 @@ def _run_extraction_probe() -> dict:
         now = time.time()
         if _health_probe["ok"] is not None and now - _health_probe["checked_at"] < _HEALTH_PROBE_TTL:
             return dict(_health_probe)
-        ok = False
-        error = None
-        try:
-            info = ytDownloaderFunctions.get_basic_info(_HEALTH_PROBE_URL)
-            ok = bool(info.get("title"))
-            if not ok:
-                error = "extraction returned no title"
-        except Exception as e:
-            error = str(e)
-        _health_probe.update(checked_at=now, ok=ok, error=error)
+        video_ok, video_err = _probe_video()
+        music_ok, music_err = _probe_music()
+        _health_probe.update(
+            checked_at=now,
+            ok=video_ok and music_ok,
+            error=video_err or music_err,
+            video_ok=video_ok,
+            music_ok=music_ok,
+        )
         return dict(_health_probe)
     finally:
         _health_probe_lock.release()
@@ -2901,6 +2930,10 @@ def health_extraction():
     body = {
         "status": "ok" if probe["ok"] else ("probing" if unknown else "degraded"),
         "extraction_ok": bool(probe["ok"]),
+        # Broken out because they fail apart: albums die with youtube music while
+        # downloads keep working, and one number can't say that.
+        "youtube_ok": probe.get("video_ok"),
+        "youtube_music_ok": probe.get("music_ok"),
         "error": "extraction probe in progress" if unknown else probe["error"],
         "yt_dlp_version": yt_dlp.version.__version__,
         "checked_at": probe["checked_at"],
