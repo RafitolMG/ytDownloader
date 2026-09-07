@@ -6,6 +6,11 @@ import { AppHeader } from '@/shared/ui/AppHeader'
 import { ConfirmButton } from '@/shared/ui/ConfirmButton'
 import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
 import { useToast } from '@/shared/ui/ToastProvider'
+import {
+  SAVE_LOCATION,
+  saveTextToDevice,
+  savesNatively,
+} from '@/shared/lib/fileSaver'
 import { API_BASE, api } from '@/shared/api/client'
 import type {
   PlaylistTrackRow,
@@ -658,6 +663,7 @@ function ExportButton({
   description: string | null
   tracks: PlaylistTrackRow[]
 }) {
+  const showToast = useToast()
   const onExport = () => {
     const data = {
       name,
@@ -670,15 +676,20 @@ function ExportButton({
         artist: t.artist,
       })),
     }
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${name.replace(/[^\w.-]+/g, '_').slice(0, 80) || 'playlist'}.json`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
+    const filename = `${name.replace(/[^\w.-]+/g, '_').slice(0, 80) || 'playlist'}.json`
+    saveTextToDevice(filename, JSON.stringify(data, null, 2), 'application/json')
+      .then(() => {
+        if (savesNatively()) {
+          showToast({ message: `saved to ${SAVE_LOCATION}`, variant: 'success' })
+        }
+      })
+      .catch((e) =>
+        showToast({
+          message:
+            e instanceof Error ? `export failed — ${e.message}` : 'export failed',
+          variant: 'err',
+        }),
+      )
   }
   return (
     <button

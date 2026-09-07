@@ -44,6 +44,16 @@ type OfflineCtx = {
   offlineTracksFor: (playlistId: string) => PlaylistTrackRow[]
   /** Saved name of a downloaded playlist, or null. */
   playlistName: (playlistId: string) => string | null
+  /** Everything on disk, for browsing with no network. Ids are playlist ids or
+   *  the synthetic `album:<key>` used for downloaded albums. */
+  downloadedCollections: () => DownloadedCollection[]
+}
+
+export type DownloadedCollection = {
+  id: string
+  name: string
+  trackCount: number
+  isAlbum: boolean
 }
 
 const Ctx = createContext<OfflineCtx | null>(null)
@@ -249,6 +259,19 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
     [],
   )
 
+  const downloadedCollections = useCallback((): DownloadedCollection[] => {
+    const { playlists, tracks } = manifestRef.current
+    return Object.entries(playlists)
+      .map(([id, meta]) => ({
+        id,
+        name: meta.name,
+        trackCount: tracks.filter((t) => t.playlistIds.includes(id)).length,
+        isAlbum: id.startsWith('album:'),
+      }))
+      .filter((c) => c.trackCount > 0)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [])
+
   const value = useMemo<OfflineCtx>(
     () => ({
       supported,
@@ -260,6 +283,7 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       removePlaylist,
       offlineTracksFor,
       playlistName,
+      downloadedCollections,
     }),
     [
       supported,
@@ -271,6 +295,7 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       removePlaylist,
       offlineTracksFor,
       playlistName,
+      downloadedCollections,
     ],
   )
 

@@ -7,6 +7,8 @@ import { useToast } from '@/shared/ui/ToastProvider'
 import { api } from '@/shared/api/client'
 import type { PlaylistSummary, PlaylistVisibility } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
+import type { DownloadedCollection } from '@/features/offline/OfflineProvider'
+import { useOffline } from '@/features/offline/OfflineProvider'
 
 /** Pinned "Liked Songs" tile — the user's saved tracks, Spotify-style, living
  * here in Playlists rather than in the catalog. */
@@ -59,6 +61,13 @@ export default function PlaylistsPage() {
   })
   const likedCount = libraryQuery.data?.items.length ?? 0
 
+  // This page is the only way to *reach* a playlist, so when the fetch fails it
+  // has to offer what's on the device — otherwise a downloaded-for-the-flight
+  // playlist is unbrowsable in exactly the situation it was downloaded for.
+  const off = useOffline()
+  const offlineCollections =
+    playlistsQuery.isError && off.ready ? off.downloadedCollections() : []
+
   // Splitting at render-time keeps a single query in cache covering both tabs
   // (the "all" call includes mine + public).
   const items = playlistsQuery.data?.items ?? []
@@ -97,10 +106,34 @@ export default function PlaylistsPage() {
           <div className="font-pixel text-ink-mid">··· loading playlists ···</div>
         )}
         {playlistsQuery.isError && (
-          <div className="font-pixel text-crit">
-            failed to load playlists:{' '}
-            {playlistsQuery.error instanceof Error ? playlistsQuery.error.message : 'unknown'}
+          <div className="font-pixel text-crit mb-4 flex items-center gap-3 flex-wrap">
+            <span>
+              failed to load playlists:{' '}
+              {playlistsQuery.error instanceof Error
+                ? playlistsQuery.error.message
+                : 'unknown'}
+            </span>
+            <button
+              type="button"
+              onClick={() => playlistsQuery.refetch()}
+              className="uppercase tracking-widest text-xs px-2 py-1 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+            >
+              ↻ retry
+            </button>
           </div>
+        )}
+
+        {offlineCollections.length > 0 && (
+          <section className="mb-6">
+            <div className="font-pixel text-xs text-cool uppercase tracking-[0.2em] mb-3">
+              ▤ on this device
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+              {offlineCollections.map((c) => (
+                <OfflineCollectionCard key={c.id} collection={c} />
+              ))}
+            </div>
+          </section>
         )}
 
         {tab === 'public' && playlistsQuery.data && visible.length === 0 && (
@@ -222,6 +255,32 @@ function TabButton({
     >
       {children}
     </button>
+  )
+}
+
+function OfflineCollectionCard({ collection }: { collection: DownloadedCollection }) {
+  return (
+    <Link
+      to={`/playlists/${encodeURIComponent(collection.id)}`}
+      className="card-vapor rounded-sm overflow-hidden flex flex-col group hover:border-cool/60 transition"
+    >
+      <div className="relative aspect-video overflow-hidden bg-gradient-to-br from-cool/40 via-violet/25 to-hot/20 flex items-center justify-center">
+        <span className="text-4xl text-ink-hi" style={{ textShadow: '0 0 16px var(--color-cool)' }}>
+          ⤓
+        </span>
+        <div className="absolute top-1 right-1 font-pixel text-[10px] uppercase tracking-widest px-1.5 py-0.5 bg-page/80 text-cool rounded-xs">
+          {collection.isAlbum ? '◉ album' : '⤓ offline'}
+        </div>
+      </div>
+      <div className="p-3 flex-1">
+        <div className="font-sans text-sm font-semibold text-ink-hi line-clamp-2 leading-snug">
+          {collection.name}
+        </div>
+        <div className="font-pixel text-sm text-ink-mid uppercase tracking-widest mt-1">
+          {collection.trackCount} track{collection.trackCount === 1 ? '' : 's'}
+        </div>
+      </div>
+    </Link>
   )
 }
 
