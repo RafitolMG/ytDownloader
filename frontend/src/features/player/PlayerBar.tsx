@@ -12,12 +12,88 @@ import { api } from '@/shared/api/client'
 import { G } from '@/shared/ui/glyphs'
 import { fmtTime } from '@/shared/lib/format'
 
+/** Marks "loading, not playing yet". Without it a tap on ▶ over a slow
+ *  connection showed ❚❚ and silence, which only reads as broken — and tapping
+ *  again killed the load that was in flight. */
+function BufferingMark() {
+  return (
+    <span
+      aria-label="buffering"
+      className="inline-block w-3 h-3 rounded-full border-2 border-ink-hi/30 border-t-ink-hi motion-safe:animate-spin"
+    />
+  )
+}
+
+/** The scrubber. Its own component so the ≥4 Hz time subscription stops here
+ *  instead of re-rendering the bar and everything mounted under it. */
+function SeekBar({ fallbackDuration }: { fallbackDuration: number }) {
+  const p = useAudioPlayer()
+  const { position, duration } = usePlaybackTime()
+  const dur = Number.isFinite(duration) && duration > 0 ? duration : fallbackDuration
+  const pct = dur > 0 ? Math.min(100, (position / dur) * 100) : 0
+
+  return (
+    <div
+      role="slider"
+      tabIndex={0}
+      aria-label="seek"
+      aria-valuemin={0}
+      aria-valuemax={Math.floor(dur)}
+      aria-valuenow={Math.floor(position)}
+      aria-valuetext={`${fmtTime(position)} of ${fmtTime(dur)}`}
+      onKeyDown={(e) => {
+        if (e.key === 'ArrowLeft') p.seek(Math.max(0, position - 5))
+        else if (e.key === 'ArrowRight') p.seek(position + 5)
+      }}
+      className="focus-vis relative h-1.5 bg-page cursor-pointer group"
+      onClick={(e) => {
+        if (dur <= 0) return
+        const r = e.currentTarget.getBoundingClientRect()
+        const ratio = (e.clientX - r.left) / r.width
+        p.seek(ratio * dur)
+      }}
+    >
+      <div
+        className="absolute inset-y-0 left-0 bg-gradient-to-r from-violet via-hot to-cool transition-[width]"
+        style={{ width: `${pct}%` }}
+      />
+      <div
+        className="absolute inset-y-0 w-2 -ml-1 bg-ink-hi shadow-[var(--shadow-glow-hot)] opacity-0 group-hover:opacity-100 transition"
+        style={{ left: `${pct}%` }}
+      />
+    </div>
+  )
+}
+
+/** Prev is enabled once you are a few seconds in (it restarts the track), so it
+ *  needs the clock — but only this button does. */
+function PrevButton() {
+  const p = useAudioPlayer()
+  const { position } = usePlaybackTime()
+  return (
+    <PlayerButton onClick={p.prev} disabled={!p.canGoPrev && position < 3} title="prev">
+      {G.prev}
+    </PlayerButton>
+  )
+}
+
+function TimeReadout({ fallbackDuration }: { fallbackDuration: number }) {
+  const { position, duration } = usePlaybackTime()
+  const dur = Number.isFinite(duration) && duration > 0 ? duration : fallbackDuration
+  return (
+    <div className="hidden sm:block font-pixel text-sm text-ink-lo tabular-nums min-w-[5.5rem] text-right">
+      {fmtTime(position)} / {fmtTime(dur)}
+    </div>
+  )
+}
+
 export function PlayerBar() {
   const { user } = useAuth()
   const p = useAudioPlayer()
-  // Subscribes this bar to the high-frequency time store — the scrubber ticks
-  // here without re-rendering the rest of the app.
-  const { position, duration } = usePlaybackTime()
+  // Deliberately NOT usePlaybackTime() here. Subscribing at this level re-ran
+  // the whole bar on every timeupdate, and PlayQueuePanel / NowPlayingView hang
+  // off it — a 300-row queue reconciled several times a second. The three parts
+  // that need the clock subscribe on their own below.
   useGlobalPlayerHotkeys()
   const [queueOpen, setQueueOpen] = useState(false)
   const [expanded, setExpanded] = useState(false)
@@ -34,44 +110,15 @@ export function PlayerBar() {
   if (!user || !p.current) return null
 
   const t = p.current
-  const dur = Number.isFinite(duration) ? duration : t.duration_sec ?? 0
-  const pct = dur > 0 ? Math.min(100, (position / dur) * 100) : 0
+  // Only while the user expects sound — a paused track loading in the
+  // background is not something to report.
+  const loading = p.isBuffering && p.isPlaying
 
   return (
     <div className="fixed bottom-[calc(3.5rem+env(safe-area-inset-bottom))] sm:bottom-0 left-0 right-0 z-40 border-t border-border bg-page-mid shadow-[0_-8px_32px_rgba(0,0,0,0.6)]">
       {queueOpen && <PlayQueuePanel onClose={() => setQueueOpen(false)} />}
       {expanded && <NowPlayingView onClose={() => setExpanded(false)} />}
-      {/* Seek bar — clickable strip across the top of the player. A wrapper adds
-          a taller hit area and keyboard/ARIA slider semantics. */}
-      <div
-        role="slider"
-        tabIndex={0}
-        aria-label="seek"
-        aria-valuemin={0}
-        aria-valuemax={Math.floor(dur)}
-        aria-valuenow={Math.floor(position)}
-        aria-valuetext={`${fmtTime(position)} of ${fmtTime(dur)}`}
-        onKeyDown={(e) => {
-          if (e.key === 'ArrowLeft') p.seek(Math.max(0, position - 5))
-          else if (e.key === 'ArrowRight') p.seek(position + 5)
-        }}
-        className="focus-vis relative h-1.5 bg-page cursor-pointer group"
-        onClick={(e) => {
-          if (dur <= 0) return
-          const r = e.currentTarget.getBoundingClientRect()
-          const ratio = (e.clientX - r.left) / r.width
-          p.seek(ratio * dur)
-        }}
-      >
-        <div
-          className="absolute inset-y-0 left-0 bg-gradient-to-r from-violet via-hot to-cool transition-[width]"
-          style={{ width: `${pct}%` }}
-        />
-        <div
-          className="absolute inset-y-0 w-2 -ml-1 bg-ink-hi shadow-[var(--shadow-glow-hot)] opacity-0 group-hover:opacity-100 transition"
-          style={{ left: `${pct}%` }}
-        />
-      </div>
+      <SeekBar fallbackDuration={t.duration_sec ?? 0} />
 
       <div className="max-w-6xl mx-auto px-2 sm:px-4 py-2 sm:py-3 flex items-center gap-2 sm:gap-4">
         {/* Cover + title — click to open the expanded "now playing" view. */}
@@ -122,24 +169,22 @@ export function PlayerBar() {
             title={p.shuffle ? 'shuffle on' : 'shuffle off'}
             hideOnMobile
           >
-            ⇄
+            {G.shuffle}
           </PlayerToggle>
+          <PrevButton />
           <PlayerButton
-            onClick={p.prev}
-            disabled={!p.canGoPrev && position < 3}
-            title="prev"
+            onClick={p.togglePlay}
+            primary
+            title={loading ? 'buffering' : p.isPlaying ? 'pause' : 'play'}
           >
-            |◀
-          </PlayerButton>
-          <PlayerButton onClick={p.togglePlay} primary title={p.isPlaying ? 'pause' : 'play'}>
-            {p.isPlaying ? '❚❚' : '▶'}
+            {loading ? <BufferingMark /> : p.isPlaying ? G.pause : G.play}
           </PlayerButton>
           <PlayerButton
             onClick={p.next}
             disabled={!p.canGoNext}
             title="next"
           >
-            ▶|
+            {G.next}
           </PlayerButton>
           <PlayerToggle
             onClick={p.cycleRepeat}
@@ -147,7 +192,7 @@ export function PlayerBar() {
             title={`repeat: ${p.repeat}`}
             hideOnMobile
           >
-            {p.repeat === 'one' ? '↻¹' : '↻'}
+            {p.repeat === 'one' ? G.repeatOne : G.repeat}
           </PlayerToggle>
         </div>
 
@@ -155,9 +200,7 @@ export function PlayerBar() {
             consistent gap and shrink-0 so the controls never collide. */}
         <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
           {/* Time */}
-          <div className="hidden sm:block font-pixel text-sm text-ink-lo tabular-nums min-w-[5.5rem] text-right">
-            {fmtTime(position)} / {fmtTime(dur)}
-          </div>
+          <TimeReadout fallbackDuration={t.duration_sec ?? 0} />
 
           {/* Volume */}
           <div className="hidden md:flex items-center gap-1.5 w-24 flex-shrink-0">
@@ -170,7 +213,7 @@ export function PlayerBar() {
                 p.volume === 0 ? 'text-crit' : 'text-ink-lo hover:text-cool'
               }`}
             >
-              {p.volume === 0 ? '♪̸' : '♪'}
+              {p.volume === 0 ? G.mute : G.volume}
             </button>
             <input
               type="range"
@@ -200,7 +243,7 @@ export function PlayerBar() {
                 : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
             }`}
           >
-            ≣
+            {G.queue}
           </button>
           <button
             type="button"
@@ -209,7 +252,7 @@ export function PlayerBar() {
             title="close player"
             aria-label="close player"
           >
-            ✕
+            {G.close}
           </button>
         </div>
       </div>
@@ -349,7 +392,7 @@ function PlayQueuePanel({ onClose }: { onClose: () => void }) {
                 title="remove from queue"
                 className="focus-vis font-pixel text-sm w-10 h-10 lg:w-8 lg:h-8 flex items-center justify-center text-ink-lo opacity-100 lg:opacity-0 lg:group-hover:opacity-100 hover:text-crit transition"
               >
-                ✕
+                {G.close}
               </button>
             )}
           </li>

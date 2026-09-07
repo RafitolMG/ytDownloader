@@ -14,6 +14,7 @@ import { useBackClose } from '@/shared/lib/backStack'
  * the ✕ close it; body scroll is locked while open. */
 export function NowPlayingView({ onClose }: { onClose: () => void }) {
   const p = useAudioPlayer()
+  const loading = p.isBuffering && p.isPlaying
   const { position, duration } = usePlaybackTime()
   useBackClose(true, onClose)
 
@@ -155,11 +156,17 @@ export function NowPlayingView({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={p.togglePlay}
-            title={p.isPlaying ? 'pause' : 'play'}
-            aria-label={p.isPlaying ? 'pause' : 'play'}
+            title={loading ? 'buffering' : p.isPlaying ? 'pause' : 'play'}
+            aria-label={loading ? 'buffering' : p.isPlaying ? 'pause' : 'play'}
             className="focus-vis w-16 h-16 flex items-center justify-center rounded-full border border-hot bg-hot/15 text-ink-hi text-xl shadow-[var(--shadow-glow-hot)] hover:bg-hot/25 transition"
           >
-            {p.isPlaying ? G.pause : G.play}
+            {loading ? (
+              <span className="inline-block w-5 h-5 rounded-full border-2 border-ink-hi/30 border-t-ink-hi motion-safe:animate-spin" />
+            ) : p.isPlaying ? (
+              G.pause
+            ) : (
+              G.play
+            )}
           </button>
           <NPButton onClick={p.next} disabled={!p.canGoNext} title="next">
             {G.next}
