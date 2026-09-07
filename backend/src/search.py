@@ -64,6 +64,13 @@ class _TTLCache:
                 self._store.pop(next(iter(self._store)), None)
 
 
+class UpstreamUnavailable(Exception):
+    """The upstream extraction failed — as opposed to succeeding with no
+    results. Endpoints on a user-initiated path surface this as a 502 so the
+    client can tell an outage from an empty catalog; at-rest feeds may still
+    degrade to an empty list. It must never be cached."""
+
+
 _SUGGEST_CACHE = _TTLCache(ttl_seconds=60)
 _SEARCH_CACHE = _TTLCache(ttl_seconds=300)
 # Mixes barely shift over a session and each call is a 1-3s yt-dlp round-trip,
@@ -108,8 +115,10 @@ def suggest(q: str, hl: str = "es") -> list[str]:
         suggestions = data[1] if isinstance(data, list) and len(data) > 1 else []
         suggestions = [s for s in suggestions if isinstance(s, str)]
     except Exception as e:
+        # Best-effort (it's a typeahead), but don't cache the miss — that kept
+        # the dropdown empty for a minute after the upstream recovered.
         log.warning("suggest failed for q=%r: %s", q, e)
-        suggestions = []
+        return []
 
     _SUGGEST_CACHE.set(cache_key, suggestions)
     return suggestions
@@ -302,7 +311,9 @@ def _entry_thumb(entry: dict) -> str | None:
 
 
 def _extract_album_raw(album_id: str) -> dict | None:
-    """Flat-extract an album's track playlist. Returns the raw yt-dlp info."""
+    """Flat-extract an album's track playlist. Returns the raw yt-dlp info, or
+    raises `UpstreamUnavailable` — `None` from here used to be indistinguishable
+    from "no such album", which the API then reported as a 404."""
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -316,7 +327,7 @@ def _extract_album_raw(album_id: str) -> dict | None:
             return ydl.extract_info(album_browse_url(album_id), download=False)
     except Exception as e:
         log.warning("album extract failed for %r: %s", album_id, e)
-        return None
+        raise UpstreamUnavailable(str(e)) from e
 
 
 def _album_header(album_id: str, info: dict, entries: list[dict]) -> dict:
@@ -342,16 +353,14 @@ def _album_card(album_id: str) -> dict | None:
     return _album_header(album_id, info, entries)
 
 
-class _AlbumSearchUnavailable(Exception):
-    """Upstream album search failed. Distinct from an empty result so callers
-    don't cache a transient blip as "this query has no albums"."""
+
 
 
 def _search_album_ids(q: str, limit: int) -> list[str]:
     """The `#albums` YouTube Music search → album browse ids, relevance-ordered.
 
     Flat mode returns ids only (no titles), so callers fetch each album's
-    metadata separately. Raises `_AlbumSearchUnavailable` if the search itself
+    metadata separately. Raises `UpstreamUnavailable` if the search itself
     failed — an empty list means the query genuinely matched no albums.
     """
     ydl_opts = {
@@ -368,7 +377,7 @@ def _search_album_ids(q: str, limit: int) -> list[str]:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
         log.warning("album search failed for q=%r: %s", q, e)
-        raise _AlbumSearchUnavailable(str(e)) from e
+        raise UpstreamUnavailable(str(e)) from e
 
     album_ids: list[str] = []
     for e in (info or {}).get("entries") or []:
@@ -399,10 +408,9 @@ def search_albums(q: str, limit: int = 12) -> list[dict]:
     if cached is not None:
         return cached
 
-    try:
-        album_ids = _search_album_ids(q, limit)
-    except _AlbumSearchUnavailable:
-        return []  # transient — don't poison the 30-minute cache with it
+    # Not cached and not swallowed: the caller needs to tell "youtube music is
+    # unreachable" from "this query has no albums".
+    album_ids = _search_album_ids(q, limit)
 
     if not album_ids:
         _ALBUM_SEARCH_CACHE.set(cache_key, [])
@@ -471,10 +479,7 @@ def resolve_album(
     owned = set(owned_ids or ())
     limit = max(1, min(limit, 10))
 
-    try:
-        album_ids = _search_album_ids(q, limit)
-    except _AlbumSearchUnavailable:
-        return None
+    album_ids = _search_album_ids(q, limit)
     if not album_ids:
         return None
 

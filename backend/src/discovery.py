@@ -465,11 +465,14 @@ def _discover_feed(
         # Music is disabled or comes up empty. Both return the same shape.
         raw = ytmusic.search_songs(q_norm, limit=fetch)
         if not raw:
+            # Deliberately not swallowed: with the upstream down this used to
+            # return an empty feed, indistinguishable from "nothing matched", and
+            # the client rendered a no-results empty state for an outage.
             try:
                 raw = search_mod.search(q_norm, limit=fetch)
-            except Exception:
+            except Exception as e:
                 traceback.print_exc()
-                raw = []
+                raise search_mod.UpstreamUnavailable(str(e)) from e
         # Some search hits are already in the catalog but didn't match the text
         # query (different stored title/artist). Pull those in as catalog rows
         # so they render as "add to library" (adopt, no re-download) instead of

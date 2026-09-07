@@ -12,6 +12,7 @@ import os
 import sqlite3
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
@@ -33,6 +34,28 @@ _write_lock = threading.Lock()
 
 # ── Connection / schema ───────────────────────────────────────────────────────
 
+def _fold(value: "str | None") -> "str | None":
+    """Lowercase and strip diacritics. SQLite's LIKE only case-folds ASCII, so
+    without this a catalog full of Spanish titles answers `cancion` with nothing
+    and `ЗАВОД` only to an exact-case query."""
+    if value is None:
+        return None
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+# `%` and `_` are LIKE metacharacters: a user typing `%` in the search box
+# matched every row. Escape them (and the escape character itself) so the term
+# is matched literally.
+_LIKE_SPECIALS = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
+
+
+def _like_contains(query: str) -> str:
+    """A `LIKE ? ESCAPE '\\'` term matching `query` as a literal substring of a
+    `fold()`-ed column."""
+    return f"%{(_fold(query) or '').translate(_LIKE_SPECIALS)}%"
+
+
 def _connect() -> sqlite3.Connection:
     os.makedirs(_DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10)
@@ -40,6 +63,7 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.create_function("fold", 1, _fold, deterministic=True)
     return conn
 
 
@@ -844,7 +868,8 @@ def list_catalog(
     """Return every track in the shared registry, annotated with social state
     relative to `viewer_id`: `is_owned`, `owner_count`.
 
-    `query` is a case-insensitive substring match against title/artist.
+    `query` is an accent- and case-insensitive literal substring match against
+    title/artist.
     `sort` is one of `_CATALOG_SORTS` keys; unknown values fall back to 'newest'.
     `owned_only` restricts results to tracks `viewer_id` has in their library —
     this is what powers the catalog's "mine" view (the former Library page).
@@ -862,9 +887,11 @@ def list_catalog(
     conditions: list[str] = []
     where_params: list[Any] = []
     if query:
-        conditions.append("(t.title LIKE ? OR t.artist LIKE ?)")
-        wildcard = f"%{query}%"
-        where_params.extend([wildcard, wildcard])
+        conditions.append(
+            r"(fold(t.title) LIKE ? ESCAPE '\' OR fold(t.artist) LIKE ? ESCAPE '\')"
+        )
+        term = _like_contains(query)
+        where_params.extend([term, term])
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
 
     having = ""
@@ -1295,7 +1322,9 @@ def update_playlist(
     visibility: str | None = None,
     cover_url: str | None = None,
 ) -> bool:
-    """Partial update. Returns True iff a row was modified."""
+    """Partial update. Returns True iff a row was modified — False means the
+    patch was empty. Raises ValueError on an invalid `visibility`; returning
+    False for that used to discard the valid fields alongside it."""
     updates: list[str] = []
     params: list[Any] = []
     if name is not None:
@@ -1306,7 +1335,7 @@ def update_playlist(
         params.append(description)
     if visibility is not None:
         if visibility not in _VISIBILITIES:
-            return False
+            raise ValueError(f"invalid visibility: {visibility!r}")
         updates.append("visibility = ?")
         params.append(visibility)
     if cover_url is not None:

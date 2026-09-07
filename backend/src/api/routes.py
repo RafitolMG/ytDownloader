@@ -13,7 +13,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Literal
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -1533,6 +1533,8 @@ async def catalog_discover(
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="search timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube search unavailable: {e}")
 
 
 @app.get("/api/catalog/suggestions")
@@ -1745,6 +1747,8 @@ async def catalog_category(
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="category timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube search unavailable: {e}")
     return {
         "category": {k: cat[k] for k in ("slug", "title", "accent")},
         **feed,
@@ -1843,6 +1847,8 @@ async def albums_search(
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="album search timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {e}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"album search failed: {e}")
     return {"albums": albums}
@@ -1910,6 +1916,8 @@ async def album_resolve(
         result = await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="album resolve timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {e}")
     if result is None:
         raise HTTPException(status_code=404, detail="album not found")
     return result
@@ -1938,6 +1946,8 @@ async def album_detail(
         result = await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="album load timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {e}")
     if result is None:
         raise HTTPException(status_code=404, detail="album not found")
     return result
@@ -2033,7 +2043,10 @@ class PlaylistCreate(BaseModel):
 class PlaylistUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
-    visibility: str | None = None
+    # Constrained here so a bad value is a 422 naming the field. Untyped, it
+    # reached the DB layer, which answered "nothing applied" by dropping every
+    # other field in the patch too, and the route reported success anyway.
+    visibility: Literal["public", "private"] | None = None
     cover_url: str | None = None
 
 
@@ -2131,13 +2144,17 @@ def patch_playlist(
     if playlist is None:
         raise HTTPException(status_code=404, detail="playlist not found")
     _ensure_playlist_owner(playlist, user)
-    db.update_playlist(
+    applied = db.update_playlist(
         playlist_id,
         name=body.name.strip() if body.name is not None else None,
         description=body.description,
         visibility=body.visibility,
         cover_url=body.cover_url,
     )
+    # False here means the patch carried no fields at all — say so rather than
+    # letting the client believe a change landed.
+    if not applied:
+        raise HTTPException(status_code=400, detail="no changes in this update")
     return {"ok": True}
 
 

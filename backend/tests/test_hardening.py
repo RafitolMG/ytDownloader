@@ -25,13 +25,18 @@ def test_retry_carries_the_extraction_budget():
 def test_album_search_does_not_cache_an_upstream_failure(monkeypatch):
     monkeypatch.setattr(search, "_ALBUM_SEARCH_CACHE", search._TTLCache(ttl_seconds=1800))
 
+    import pytest
+
     def boom(q, limit):
-        raise search._AlbumSearchUnavailable("upstream blip")
+        raise search.UpstreamUnavailable("upstream blip")
 
     monkeypatch.setattr(search, "_search_album_ids", boom)
-    assert search.search_albums("nine inch nails") == []
+    # Surfaced, not swallowed — the route turns this into a 502 so the client
+    # can tell an outage from "this query has no albums".
+    with pytest.raises(search.UpstreamUnavailable):
+        search.search_albums("nine inch nails")
 
-    # Upstream recovers: the next call must hit it again, not the cached [].
+    # Upstream recovers: nothing was cached, so the next call hits it again.
     monkeypatch.setattr(search, "_search_album_ids", lambda q, limit: ["MPREbOk"])
     monkeypatch.setattr(search, "_album_card", lambda aid: {"album_id": aid})
     assert search.search_albums("nine inch nails") == [{"album_id": "MPREbOk"}]

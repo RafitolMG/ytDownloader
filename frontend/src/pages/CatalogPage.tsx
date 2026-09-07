@@ -310,9 +310,20 @@ export default function CatalogPage() {
               <div className="font-pixel text-ink-mid">··· loading catalog ···</div>
             )}
             {activeQuery.isError && (
-              <div className="font-pixel text-crit">
-                failed to load:{' '}
-                {activeQuery.error instanceof Error ? activeQuery.error.message : 'unknown'}
+              <div className="font-pixel text-crit flex items-center gap-3 flex-wrap">
+                <span>
+                  failed to load:{' '}
+                  {activeQuery.error instanceof Error
+                    ? activeQuery.error.message
+                    : 'unknown'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => activeQuery.refetch()}
+                  className="uppercase tracking-widest text-xs px-2 py-1 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+                >
+                  ↻ retry
+                </button>
               </div>
             )}
             {showEmpty && (
