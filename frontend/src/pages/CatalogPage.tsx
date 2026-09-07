@@ -3,6 +3,7 @@ import { useCallback, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { useBackClose } from '@/shared/lib/backStack'
 import { api } from '@/shared/api/client'
+import { OfflineFallback } from '@/features/offline/OfflineFallback'
 import type {
   CatalogItem,
   CatalogSort,
@@ -326,6 +327,7 @@ export default function CatalogPage() {
                 </button>
               </div>
             )}
+            {activeQuery.isError && <OfflineFallback />}
             {showEmpty && (
               <div className="card-vapor rounded-sm p-8 text-center">
                 <div className="font-pixel text-lg text-ink-mid mb-2">

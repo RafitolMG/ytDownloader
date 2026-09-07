@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useToast } from '@/shared/ui/ToastProvider'
+import { useMutationErrorToast } from '@/shared/lib/mutationError'
 import { api } from '@/shared/api/client'
 import type { JobRow as Job, JobStatus } from '@/shared/api/types'
 import { ConfirmButton } from '@/shared/ui/ConfirmButton'
@@ -37,15 +37,10 @@ function fmtDate(iso: string | null): string {
 
 export function JobRow({ job }: { job: Job }) {
   const qc = useQueryClient()
-  const showToast = useToast()
   const invalidate = () => qc.invalidateQueries({ queryKey: ['jobs'] })
-  // Without this a refused action — a retry the server can't replay, a cancel
-  // that raced the job finishing — looks exactly like a button that did nothing.
-  const onError = (verb: string) => (e: unknown) =>
-    showToast({
-      message: e instanceof Error ? `${verb} failed — ${e.message}` : `${verb} failed`,
-      variant: 'err',
-    })
+  // A refused action — a retry the server can't replay, a cancel that raced the
+  // job finishing — must not look like a button that did nothing.
+  const onError = useMutationErrorToast()
 
   const cancel = useMutation({
     mutationFn: () => api.cancel(job.id),

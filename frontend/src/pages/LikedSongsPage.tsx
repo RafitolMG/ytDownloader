@@ -5,7 +5,9 @@ import { Link } from 'react-router-dom'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { EmptyState } from '@/shared/ui/EmptyState'
 import { useToast } from '@/shared/ui/ToastProvider'
+import { useMutationErrorToast } from '@/shared/lib/mutationError'
 import { api } from '@/shared/api/client'
+import { OfflineFallback } from '@/features/offline/OfflineFallback'
 import type { LibraryItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
@@ -171,10 +173,24 @@ export default function LikedSongsPage() {
         )}
 
         {libraryQuery.isError && (
-          <div className="font-pixel text-crit">
-            ⚠ couldn't load your songs:{' '}
-            {libraryQuery.error instanceof Error ? libraryQuery.error.message : 'unknown'}
-          </div>
+          <>
+            <div className="font-pixel text-crit flex items-center gap-3 flex-wrap">
+              <span>
+                ⚠ couldn't load your songs:{' '}
+                {libraryQuery.error instanceof Error
+                  ? libraryQuery.error.message
+                  : 'unknown'}
+              </span>
+              <button
+                type="button"
+                onClick={() => libraryQuery.refetch()}
+                className="uppercase tracking-widest text-xs px-2 py-1 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+              >
+                ↻ retry
+              </button>
+            </div>
+            <OfflineFallback />
+          </>
         )}
 
         {libraryQuery.data && items.length === 0 && (
@@ -237,10 +253,14 @@ function LikedRow({
   const player = useAudioPlayer()
   const queryClient = useQueryClient()
   const showToast = useToast()
+  const onMutationError = useMutationErrorToast()
   const remove = useMutation({
     mutationFn: () =>
       api.removeFromLibrary(track.video_id, track.codec, track.bitrate),
     onSuccess: () => {
+      // Only now — stopping first cost the user their listening session for an
+      // action that might not have happened.
+      if (isCurrent) player.stop()
       queryClient.invalidateQueries({ queryKey: ['library'] })
       queryClient.invalidateQueries({ queryKey: ['catalog'] })
       showToast({
@@ -259,6 +279,7 @@ function LikedRow({
         },
       })
     },
+    onError: onMutationError('remove'),
   })
   const isCurrent =
     player.current?.video_id === track.video_id &&
@@ -334,10 +355,7 @@ function LikedRow({
         type="button"
         onClick={(e) => {
           e.stopPropagation()
-          if (!remove.isPending) {
-            if (isCurrent) player.stop()
-            remove.mutate()
-          }
+          if (!remove.isPending) remove.mutate()
         }}
         disabled={remove.isPending}
         aria-label="remove from liked songs"

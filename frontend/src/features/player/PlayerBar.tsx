@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
+import { useMutationErrorToast } from '@/shared/lib/mutationError'
 import { useAudioPlayer } from './AudioPlayerProvider'
 import { usePlaybackTime } from './playbackStore'
 import { useGlobalPlayerHotkeys } from './useGlobalPlayerHotkeys'
@@ -395,6 +396,7 @@ function SaveQueueButton() {
       setEditing(false)
       navigate(`/playlists/${id}`)
     },
+    onError: useMutationErrorToast()('save queue'),
   })
 
   if (realTracks.length === 0) return null

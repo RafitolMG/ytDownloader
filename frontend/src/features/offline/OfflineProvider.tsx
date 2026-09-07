@@ -47,6 +47,10 @@ type OfflineCtx = {
   /** Everything on disk, for browsing with no network. Ids are playlist ids or
    *  the synthetic `album:<key>` used for downloaded albums. */
   downloadedCollections: () => DownloadedCollection[]
+  /** Every downloaded track, playable with no network. The fallback the online
+   *  views fall back *to* — deliberately not a cached copy of the catalog,
+   *  which would list tracks that can't play offline. */
+  downloadedTracks: () => PlaylistTrackRow[]
 }
 
 export type DownloadedCollection = {
@@ -233,23 +237,30 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
     [supported, recomputeBytes, runExclusive],
   )
 
+  const toRow = (e: ManifestEntry, i: number): PlaylistTrackRow => ({
+    video_id: e.video_id,
+    codec: e.codec,
+    bitrate: e.bitrate,
+    title: e.title,
+    artist: e.artist,
+    duration_sec: e.duration_sec,
+    thumbnail_url: e.thumbnail_url,
+    source_url: e.source_url,
+    file_size: null,
+    position: i,
+    added_at: '',
+  })
+
   const offlineTracksFor = useCallback(
     (playlistId: string): PlaylistTrackRow[] =>
       manifestRef.current.tracks
         .filter((e) => e.playlistIds.includes(playlistId))
-        .map((e, i) => ({
-          video_id: e.video_id,
-          codec: e.codec,
-          bitrate: e.bitrate,
-          title: e.title,
-          artist: e.artist,
-          duration_sec: e.duration_sec,
-          thumbnail_url: e.thumbnail_url,
-          source_url: e.source_url,
-          file_size: null,
-          position: i,
-          added_at: '',
-        })),
+        .map(toRow),
+    [],
+  )
+
+  const downloadedTracks = useCallback(
+    (): PlaylistTrackRow[] => manifestRef.current.tracks.map(toRow),
     [],
   )
 
@@ -284,6 +295,7 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       offlineTracksFor,
       playlistName,
       downloadedCollections,
+      downloadedTracks,
     }),
     [
       supported,
@@ -296,6 +308,7 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       offlineTracksFor,
       playlistName,
       downloadedCollections,
+      downloadedTracks,
     ],
   )
 

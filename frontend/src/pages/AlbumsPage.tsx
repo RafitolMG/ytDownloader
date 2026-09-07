@@ -4,6 +4,7 @@ import { AppHeader } from '@/shared/ui/AppHeader'
 import { useBackClose } from '@/shared/lib/backStack'
 import { EmptyState } from '@/shared/ui/EmptyState'
 import { api } from '@/shared/api/client'
+import { useMutationErrorToast } from '@/shared/lib/mutationError'
 import type { AlbumCard, CatalogItem, LibraryItem } from '@/shared/api/types'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { fmtDuration } from '@/shared/lib/format'
@@ -17,6 +18,7 @@ import { SectionHeader } from '@/shared/ui/SectionHeader'
 import { useAudioPlayer } from '@/features/player/AudioPlayerProvider'
 import { CatalogRow, DownloadAllButton, ExternalRow } from '@/features/catalog/rows'
 import { OfflineDownloadButton } from '@/features/offline/OfflineDownloadButton'
+import { OfflineFallback } from '@/features/offline/OfflineFallback'
 
 /** A library album: the user's owned tracks grouped under one album title. */
 type LibraryAlbum = {
@@ -228,6 +230,7 @@ export default function AlbumsPage() {
               </button>
             </div>
           )}
+          {libraryQuery.isError && <OfflineFallback />}
           {!libraryQuery.isLoading &&
             !libraryQuery.isError &&
             libraryAlbums.length === 0 && (
@@ -771,6 +774,7 @@ function AlbumDownloadButton({ url }: { url: string }) {
       qc.invalidateQueries({ queryKey: ['library'] })
       qc.invalidateQueries({ queryKey: ['playlists'] })
     },
+    onError: useMutationErrorToast()('album download'),
   })
 
   return (

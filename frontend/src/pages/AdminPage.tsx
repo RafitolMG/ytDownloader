@@ -7,6 +7,7 @@ import {
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { ConfirmButton } from '@/shared/ui/ConfirmButton'
 import { api } from '@/shared/api/client'
+import { useMutationErrorToast } from '@/shared/lib/mutationError'
 import { countActive, useJobs } from '@/shared/api/useJobs'
 import { fmtDuration } from '@/shared/lib/format'
 import type {
@@ -300,17 +301,21 @@ function JobsView() {
     queryClient.invalidateQueries({ queryKey: ['admin', 'overview'] })
   }
 
+  const onError = useMutationErrorToast()
   const cancel = useMutation({
     mutationFn: (id: string) => api.cancel(id),
     onSuccess: invalidate,
+    onError: onError('cancel'),
   })
   const retry = useMutation({
     mutationFn: (id: string) => api.retry(id),
     onSuccess: invalidate,
+    onError: onError('retry'),
   })
   const del = useMutation({
     mutationFn: (id: string) => api.delete(id),
     onSuccess: invalidate,
+    onError: onError('delete'),
   })
 
   if (q.isLoading) return <Loading what="jobs" />
@@ -464,6 +469,7 @@ function StorageView() {
         force: args.force,
       }),
     onSuccess: invalidate,
+    onError: useMutationErrorToast()('delete'),
   })
 
   const tracks = q.data?.tracks ?? []
@@ -614,6 +620,7 @@ function BackfillButton({ onDone }: { onDone: () => void }) {
     onSuccess: () => {
       onDone()
     },
+    onError: useMutationErrorToast()('backfill'),
   })
   const r = backfill.data
 
@@ -645,6 +652,7 @@ function NormalizeArtistsButton({ onDone }: { onDone: () => void }) {
     onSuccess: () => {
       onDone()
     },
+    onError: useMutationErrorToast()('tidy artists'),
   })
   const r = normalize.data
 
@@ -673,6 +681,7 @@ function RefetchArtistsButton({ onDone }: { onDone: () => void }) {
     onSuccess: () => {
       onDone()
     },
+    onError: useMutationErrorToast()('refetch artists'),
   })
   const r = refetch.data
 
