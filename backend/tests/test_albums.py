@@ -125,3 +125,87 @@ def test_title_overlap_does_not_double_count_a_track_matched_by_id(monkeypatch):
 
     a = search.resolve_album("x", owned_ids={"v1"}, owned_titles={"Only Song"})
     assert len(a["tracks"]) == 1
+
+
+def test_resolve_widens_when_the_artist_buries_the_album(monkeypatch):
+    """Naming the artist sharpens most searches but narrows against anything
+    YouTube Music credits to someone else. The reported case: an Elden Ring DLC
+    soundtrack, where "<composer> <album>" returned only the base game's album
+    and the bare title returned the right one."""
+    dlc = {
+        "title": "Album - SHADOW OF THE ERDTREE OST", "playlist_count": 2,
+        "entries": [
+            {"id": "ytm-a", "title": "Messmer, the Impaler", "channel": "Tsukasa Saitoh"},
+            {"id": "ytm-b", "title": "Bayle the Dread", "channel": "Tai Tomisawa"},
+        ],
+    }
+    base = {
+        "title": "Album - ELDEN RING OST", "playlist_count": 3,
+        "entries": [
+            {"id": f"base{i}", "title": f"Base Track {i}", "channel": "Tsukasa Saitoh"}
+            for i in range(3)
+        ],
+    }
+    monkeypatch.setattr(search, "_ALBUM_CACHE", search._TTLCache(ttl_seconds=1800))
+    monkeypatch.setattr(
+        search, "_extract_album_raw", lambda aid: dlc if aid == "MPREbDlc" else base
+    )
+    searched: list[str] = []
+
+    def fake_search(q, limit):
+        searched.append(q)
+        # The artist-prefixed query only surfaces the base game's album.
+        return ["MPREbBase"] if q.startswith("Tsukasa Saitoh") else ["MPREbBase", "MPREbDlc"]
+
+    monkeypatch.setattr(search, "_search_album_ids", fake_search)
+
+    owned = {"Messmer, the Impaler", "Bayle the Dread"}
+    narrow = search.resolve_album(
+        "Tsukasa Saitoh SHADOW OF THE ERDTREE OST", owned_titles=owned
+    )
+    assert narrow["title"] == "ELDEN RING OST"  # the failure being fixed
+
+    searched.clear()
+    widened = search.resolve_album(
+        "Tsukasa Saitoh SHADOW OF THE ERDTREE OST",
+        owned_titles=owned,
+        fallback_q="SHADOW OF THE ERDTREE OST",
+    )
+    assert widened["title"] == "SHADOW OF THE ERDTREE OST"
+    assert len(searched) == 2, "the precise query runs first"
+
+
+def test_resolve_does_not_widen_once_it_has_a_hit(monkeypatch):
+    """The second search is a round-trip; skip it when the first query already
+    found an album holding something we own."""
+    info = {
+        "title": "Album - Right", "playlist_count": 1,
+        "entries": [{"id": "v1", "title": "Song", "channel": "A"}],
+    }
+    monkeypatch.setattr(search, "_ALBUM_CACHE", search._TTLCache(ttl_seconds=1800))
+    monkeypatch.setattr(search, "_extract_album_raw", lambda aid: info)
+    searched: list[str] = []
+    monkeypatch.setattr(
+        search, "_search_album_ids", lambda q, limit: (searched.append(q), ["MPREbR"])[1]
+    )
+
+    search.resolve_album("A Right", owned_ids={"v1"}, fallback_q="Right")
+    assert searched == ["A Right"]
+
+
+def test_resolve_does_not_widen_with_nothing_to_match_against(monkeypatch):
+    """No ids and no titles means every candidate scores 0 — a second search
+    could not tell them apart, so it would only cost a round-trip."""
+    info = {
+        "title": "Album - X", "playlist_count": 1,
+        "entries": [{"id": "v1", "title": "Song", "channel": "A"}],
+    }
+    monkeypatch.setattr(search, "_ALBUM_CACHE", search._TTLCache(ttl_seconds=1800))
+    monkeypatch.setattr(search, "_extract_album_raw", lambda aid: info)
+    searched: list[str] = []
+    monkeypatch.setattr(
+        search, "_search_album_ids", lambda q, limit: (searched.append(q), ["MPREbX"])[1]
+    )
+
+    search.resolve_album("A X", fallback_q="X")
+    assert searched == ["A X"]
