@@ -22,7 +22,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, W
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src import (
     catalog_categories as categories_mod,
@@ -87,6 +87,77 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="YT Downloader", lifespan=lifespan)
+
+
+class _BodySizeLimit:
+    """Reject oversized request bodies. Neither FastAPI nor uvicorn caps this.
+
+    Pure ASGI rather than an http middleware: the body must stay a stream for
+    the handler, and `BaseHTTPMiddleware` gives no way to read it and put it
+    back. `content-length` is only a claim, so the bytes are counted as they
+    arrive — a chunked request can omit the header entirely."""
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        for key, value in scope.get("headers") or ():
+            if key == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    break
+                if declared > self.max_bytes:
+                    await self._too_large(send)
+                    return
+                break
+
+        state = {"received": 0, "exceeded": False}
+
+        async def guarded_receive():
+            message = await receive()
+            if message.get("type") == "http.request":
+                state["received"] += len(message.get("body", b""))
+                if state["received"] > self.max_bytes:
+                    state["exceeded"] = True
+                    # Cut the stream short; the handler unwinds and our own
+                    # response goes out instead of whatever it was writing.
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message) -> None:
+            if state["exceeded"]:
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, guarded_receive, guarded_send)
+        except Exception:
+            if not state["exceeded"]:
+                raise
+        if state["exceeded"]:
+            await self._too_large(send)
+
+    @staticmethod
+    async def _too_large(send) -> None:
+        body = b'{"detail":"request too large"}'
+        await send({
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(_BodySizeLimit, max_bytes=config.MAX_REQUEST_BYTES)
 
 if config.FRONTEND_ORIGIN:
     app.add_middleware(
@@ -338,14 +409,14 @@ async def _reaper_loop() -> None:
 # ── Request models ────────────────────────────────────────────────────────────
 
 class ResolutionsRequest(BaseModel):
-    url: str
+    url: str = Field(max_length=2048)
 
 
 class DownloadRequest(BaseModel):
-    url: str
-    format_code: str
-    resolution: str | None = None
-    ext: str | None = None
+    url: str = Field(max_length=2048)
+    format_code: str = Field(max_length=64)
+    resolution: str | None = Field(default=None, max_length=32)
+    ext: str | None = Field(default=None, max_length=16)
     # When true and `format_code` is an audio preset, write the result to a
     # tmp_dir and serve it via /api/file like a video instead of importing
     # into the user's library.
@@ -358,11 +429,11 @@ class DownloadRequest(BaseModel):
 
 
 class PlaylistDownloadRequest(BaseModel):
-    url: str
+    url: str = Field(max_length=2048)
     # `quality` only applies when `as_file=True` (zip-to-device flow). In-app
     # imports are always mp3-320 regardless of what the client sends — see
     # the route body.
-    quality: str = 'mp3-320'
+    quality: str = Field(default='mp3-320', max_length=64)
     as_file: bool = False
 
 
@@ -1128,8 +1199,10 @@ _RETRYABLE_SOURCE_MAX = 64_000
 
 class TrackImportRequest(BaseModel):
     # A Spotify playlist link (read via the public embed, ~100-track cap) OR a
-    # pasted list — Exportify CSV / "Artist - Title" lines (unlimited).
-    source: str
+    # pasted list — Exportify CSV / "Artist - Title" lines. Bounded because
+    # `spotify.from_text` parses the whole string in memory before
+    # MAX_IMPORT_TRACKS ever trims the result.
+    source: str = Field(max_length=config.MAX_IMPORT_SOURCE_CHARS)
 
 
 @app.post("/api/import/tracklist")
@@ -1340,17 +1413,30 @@ async def progress_ws(websocket: WebSocket, job_id: str):
         return
 
     await websocket.accept()
+
+    # Subscribe *before* taking the snapshot. The hub drops events with no
+    # subscribers, so reading the snapshot first left a window in which the
+    # worker's terminal event was published to nobody: the client got a snapshot
+    # saying "downloading" and then silence.
+    loop = asyncio.get_running_loop()
+    runtime = _jobs.get(job_id)
+    hub: "_ProgressHub | None" = runtime["queue"] if runtime else None
+    sub = hub.subscribe(loop) if hub is not None else None
+
+    # Re-read now that nothing can be lost. Anything published from here on is
+    # queued behind the snapshot.
+    row = db.get(job_id) or row
     await websocket.send_json({"type": "snapshot", "job": _public_job(row)})
 
-    runtime = _jobs.get(job_id)
-    if runtime is None:
-        # Already finished, failed, interrupted, or cancelled — nothing live to stream.
+    # The DB row is the authority on whether the job is still running — not the
+    # presence of a runtime entry. A finished file job keeps its entry until the
+    # file is fetched (serve_file needs the path), and subscribing to its dead
+    # hub used to hang the client until it gave up.
+    if sub is None or row["status"] not in db.ACTIVE_STATUSES:
+        if hub is not None and sub is not None:
+            hub.unsubscribe(sub)
         await websocket.close()
         return
-
-    hub: _ProgressHub = runtime["queue"]
-    loop = asyncio.get_running_loop()
-    sub = hub.subscribe(loop)
 
     # The progress channel is server→client only, so a receive() completes only
     # when the socket closes. Race it against the next event: a disconnect frees
@@ -2035,29 +2121,29 @@ def catalog_unown(
 # ── Playlists ────────────────────────────────────────────────────────────────
 
 class PlaylistCreate(BaseModel):
-    name: str
-    description: str | None = None
-    visibility: str = "private"  # 'private' | 'public'
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    visibility: Literal["public", "private"] = "private"
 
 
 class PlaylistUpdate(BaseModel):
-    name: str | None = None
-    description: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
     # Constrained here so a bad value is a 422 naming the field. Untyped, it
     # reached the DB layer, which answered "nothing applied" by dropping every
     # other field in the patch too, and the route reported success anyway.
     visibility: Literal["public", "private"] | None = None
-    cover_url: str | None = None
+    cover_url: str | None = Field(default=None, max_length=2048)
 
 
 class PlaylistTrackKey(BaseModel):
-    video_id: str
-    codec: str
-    bitrate: str
+    video_id: str = Field(max_length=64)
+    codec: str = Field(max_length=32)
+    bitrate: str = Field(max_length=32)
 
 
 class PlaylistReorder(BaseModel):
-    order: list[PlaylistTrackKey]
+    order: list[PlaylistTrackKey] = Field(max_length=config.MAX_IMPORT_TRACKS * 4)
 
 
 def _ensure_playlist_visible(playlist: dict, user: CurrentUser) -> None:
@@ -2106,6 +2192,11 @@ def create_playlist(
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
+    if db.count_playlists(user.user_id) >= config.MAX_PLAYLISTS_PER_USER:
+        raise HTTPException(
+            status_code=409,
+            detail=f"playlist limit reached ({config.MAX_PLAYLISTS_PER_USER})",
+        )
     playlist_id = str(uuid.uuid4())
     db.create_playlist(
         playlist_id=playlist_id,
@@ -2188,7 +2279,7 @@ def add_track(
 
 
 class PlaylistTracksBulk(BaseModel):
-    tracks: list[PlaylistTrackKey]
+    tracks: list[PlaylistTrackKey] = Field(max_length=config.MAX_IMPORT_TRACKS * 4)
 
 
 @app.post("/api/playlists/{playlist_id}/tracks/bulk")

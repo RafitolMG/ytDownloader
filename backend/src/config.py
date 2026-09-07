@@ -173,6 +173,18 @@ MAX_CONCURRENT_DOWNLOADS: int = int(_env("YTDL_MAX_CONCURRENT_DOWNLOADS", "0")) 
 # hours. Beyond the cap the import is truncated (and flagged to the client).
 MAX_IMPORT_TRACKS: int = int(_env("YTDL_MAX_IMPORT_TRACKS", "500"))
 
+# Nothing bounded request bodies: neither FastAPI nor uvicorn imposes a default,
+# and the only middleware was CORS. A single authenticated user could POST a
+# multi-megabyte playlist name straight into SQLite, or a pasted list that
+# `spotify.from_text` parses in full *before* MAX_IMPORT_TRACKS applies — on a
+# shared DB file and a small ARM box that degrades everyone.
+MAX_REQUEST_BYTES: int = int(_env("YTDL_MAX_REQUEST_BYTES", str(1024 * 1024)))
+# Generous next to MAX_IMPORT_TRACKS (500 lines is ~40 KB) while keeping the
+# in-memory parse bounded.
+MAX_IMPORT_SOURCE_CHARS: int = int(_env("YTDL_MAX_IMPORT_SOURCE_CHARS", "262144"))
+# One user cannot fill the data volume with empty playlists either.
+MAX_PLAYLISTS_PER_USER: int = int(_env("YTDL_MAX_PLAYLISTS_PER_USER", "500"))
+
 # Hard ceiling on a single ffmpeg merge/transcode pass. A hung ffmpeg (rare, but
 # it can wedge on a corrupt stream) would otherwise block its download worker
 # forever, permanently consuming one of the MAX_CONCURRENT_DOWNLOADS slots.

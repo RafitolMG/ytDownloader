@@ -1360,6 +1360,16 @@ def delete_playlist(playlist_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def count_playlists(owner_id: str) -> int:
+    """How many playlists this user owns — the create route caps it so one
+    account can't fill the data volume with rows."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM playlists WHERE owner_id = ?", (owner_id,)
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
 def list_playlists(
     viewer_id: str,
     *,
