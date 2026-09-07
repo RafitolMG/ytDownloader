@@ -160,3 +160,27 @@ def test_error_text_loses_paths_and_signed_urls_but_keeps_the_message():
         "Sign in to confirm you're not a bot"
     )
     assert len(safe_error("x" * 5000)) <= 300
+
+
+def test_extraction_health_reports_each_upstream_separately(monkeypatch):
+    """Albums die with youtube music while downloads keep working, so one
+    aggregate flag can't describe the failure — it used to say "ok" while every
+    album screen came back empty."""
+    from src.api import routes
+
+    monkeypatch.setattr(routes, "_probe_video", lambda: (True, None))
+    monkeypatch.setattr(
+        routes, "_probe_music", lambda: (False, "youtube music: blocked")
+    )
+    monkeypatch.setattr(
+        routes, "_health_probe",
+        {"checked_at": 0.0, "ok": None, "error": None, "video_ok": None, "music_ok": None},
+    )
+
+    r = client.get("/api/health/extraction")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["youtube_ok"] is True
+    assert body["youtube_music_ok"] is False
+    assert body["status"] == "degraded"
+    assert "youtube music" in body["error"]
