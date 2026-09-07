@@ -29,6 +29,27 @@ same shape. Attack it as a class, not as twelve tickets.
 snapshot before subscribing, and the success paths never pop `_jobs`) used to be
 theoretical — nothing depended on the terminal event. Now the ⬇ buttons do.
 
+## Status
+
+**All 16 items are closed** (commits `b16f7ac` … `91924ec`). The table below is
+kept as the record of what was found and how it was ranked once the three lanes
+were merged, not as an open backlog.
+
+Two remedies were deliberately not the ones proposed:
+
+- **#8** asked for a React Query persister. A persisted cache restores the whole
+  catalog — hundreds of rows that need the network to stream — so every one
+  would look available and do nothing when tapped, which is the defect class
+  this audit exists to remove. The on-disk offline manifest backs those views
+  instead; it lists only what actually plays.
+- **#6**'s `_jobs` "leak" is not a leak: the reaper collects those entries inside
+  its grace window. The real defect was the other half — a finished file job
+  keeps its runtime entry until the file is fetched, so a late subscriber hung
+  on a dead hub. The DB row is the authority now.
+
+Not verified by running: every UI change (no browser here) and the Android
+FileSaver plugin (compiles and the manifest merges; no device available).
+
 ## Re-ranked remaining work
 
 | # | Finding | Lane rank | Now | Why it moved |
