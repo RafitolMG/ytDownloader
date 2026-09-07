@@ -232,6 +232,20 @@ def current_user(ytdl_session: str | None = Cookie(default=None, alias=config.SE
     )
 
 
+def media_user_for(scope: str):
+    """Build a media-auth dependency for one token scope. `/api/file` accepts
+    only file-scoped tokens, so a streaming `mt` lifted from an access log can't
+    fetch the caller's finished downloads."""
+
+    def dependency(
+        mt: str | None = Query(default=None),
+        ytdl_session: str | None = Cookie(default=None, alias=config.SESSION_COOKIE_NAME),
+    ) -> CurrentUser:
+        return _resolve_media_user(mt, ytdl_session, scope)
+
+    return dependency
+
+
 def media_user(
     mt: str | None = Query(default=None),
     ytdl_session: str | None = Cookie(default=None, alias=config.SESSION_COOKIE_NAME),
@@ -246,10 +260,16 @@ def media_user(
     leaked URL be replayed as a session, and expires on its own. The cookie path
     (with full refresh/role/expiry) still applies for the web app, where `mt` is
     absent."""
+    return _resolve_media_user(mt, ytdl_session, media_token.SCOPE_STREAM)
+
+
+def _resolve_media_user(
+    mt: str | None, ytdl_session: str | None, scope: str
+) -> CurrentUser:
     if config.DEV_AUTH_BYPASS:
         return _DEV_USER
     if mt:
-        claims = media_token.verify(mt)
+        claims = media_token.verify(mt, scope=scope)
         if claims is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

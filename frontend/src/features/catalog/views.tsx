@@ -11,15 +11,42 @@ import { ACCENT, toPreviewItem } from './lib'
 import { CatalogRow, DownloadAllButton, ExternalRow } from './rows'
 
 /** Expanded category feed: playable catalog tracks + downloadable candidates. */
+function FeedError({
+  message,
+  onRetry,
+}: {
+  message: string
+  onRetry?: () => void
+}) {
+  return (
+    <div className="card-vapor rounded-sm p-8 text-center font-pixel">
+      <div className="text-crit mb-3">{message} — the feed failed to load.</div>
+      {onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="uppercase tracking-widest text-xs px-3 py-1.5 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+        >
+          ↻ retry
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function CategoryView({
   category,
   feed,
   isLoading,
+  isError = false,
+  onRetry,
   onBack,
 }: {
   category: Category
   feed: { db: CatalogItem[]; external: ExternalCatalogItem[] } | undefined
   isLoading: boolean
+  isError?: boolean
+  onRetry?: () => void
   onBack: () => void
 }) {
   const player = useAudioPlayer()
@@ -87,7 +114,9 @@ export function CategoryView({
         </>
       )}
 
-      {!isLoading && db.length === 0 && external.length === 0 && (
+      {isError && <FeedError message="couldn't load this category" onRetry={onRetry} />}
+
+      {!isLoading && !isError && db.length === 0 && external.length === 0 && (
         <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
           nothing found for this category right now.
         </div>
@@ -189,6 +218,8 @@ export function RadioView({
   feed,
   isLoading,
   isRefreshing = false,
+  isError = false,
+  onRetry,
   onRefresh,
   onBack,
 }: {
@@ -196,6 +227,8 @@ export function RadioView({
   feed: { db: CatalogItem[]; external: ExternalCatalogItem[] } | undefined
   isLoading: boolean
   isRefreshing?: boolean
+  isError?: boolean
+  onRetry?: () => void
   onRefresh?: () => void
   onBack: () => void
 }) {
@@ -287,7 +320,9 @@ export function RadioView({
         </>
       )}
 
-      {!isLoading && db.length === 0 && external.length === 0 && (
+      {isError && <FeedError message="couldn't tune a radio" onRetry={onRetry} />}
+
+      {!isLoading && !isError && db.length === 0 && external.length === 0 && (
         <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
           couldn't tune a radio for this track right now.
         </div>

@@ -13,7 +13,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Literal
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -22,12 +22,13 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, W
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from src import (
     catalog_categories as categories_mod,
     config,
     db,
+    media_token as media_token_mod,
     rate_limit,
     search as search_mod,
     spotify,
@@ -36,7 +37,7 @@ from src import (
 )
 from src.api.admin_routes import router as admin_router
 from src.api.auth_routes import router as auth_router
-from src.auth import CurrentUser, current_user, media_user
+from src.auth import CurrentUser, current_user, media_user, media_user_for
 from src.extraction_pool import run_extraction
 from src.discovery import (
     _daily_mixes_impl,
@@ -62,6 +63,41 @@ def _ensure_owner(job: dict, user: CurrentUser) -> None:
         raise HTTPException(status_code=403, detail="not your job")
 
 
+# Columns kept so retry can replay a job, never part of its API representation.
+# `import_source` is the caller's own pasted track list, and an admin lists
+# every user's jobs.
+_JOB_INTERNAL_COLS = ("import_source",)
+
+
+def _public_job(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k not in _JOB_INTERNAL_COLS}
+
+
+# yt-dlp and httpx error strings routinely carry the resolved cookiefile path
+# (`/tmp/yt-cookies-*.txt`), the cache dir, and signed googlevideo URLs. Those
+# used to be handed straight to the client and persisted in `jobs.error_message`,
+# disclosing the server's filesystem layout to any authenticated user. The full
+# text still goes to the server log.
+_REDACTIONS = (
+    (re.compile(r"""https?://[^\s"']*googlevideo\.com[^\s"']*"""), "<media-url>"),
+    (re.compile(r"""(?<![\w.])/(?:tmp|home|root|app|var|usr|etc)/[^\s"':,)]*"""), "<path>"),
+    (re.compile(r"""[A-Za-z]:\\[^\s"':,)]*"""), "<path>"),
+)
+_ERROR_MAX_CHARS = 300
+
+
+def safe_error(e: object) -> str:
+    """User-facing text for an upstream failure: paths and signed URLs stripped,
+    length bounded. Log the original separately when you need it."""
+    text = str(e).strip() or "unexpected error"
+    for pattern, replacement in _REDACTIONS:
+        text = pattern.sub(replacement, text)
+    text = " ".join(text.split())
+    if len(text) > _ERROR_MAX_CHARS:
+        text = text[: _ERROR_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown. Replaces the deprecated @app.on_event handlers: init the
@@ -76,7 +112,82 @@ async def lifespan(app: FastAPI):
         reaper.cancel()
 
 
+# `/api/file` serves a completed job's own bytes, so it takes the narrow,
+# seconds-long token rather than the hour-long streaming one.
+file_media_user = media_user_for(media_token_mod.SCOPE_FILE)
+
 app = FastAPI(title="YT Downloader", lifespan=lifespan)
+
+
+class _BodySizeLimit:
+    """Reject oversized request bodies. Neither FastAPI nor uvicorn caps this.
+
+    Pure ASGI rather than an http middleware: the body must stay a stream for
+    the handler, and `BaseHTTPMiddleware` gives no way to read it and put it
+    back. `content-length` is only a claim, so the bytes are counted as they
+    arrive — a chunked request can omit the header entirely."""
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        for key, value in scope.get("headers") or ():
+            if key == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    break
+                if declared > self.max_bytes:
+                    await self._too_large(send)
+                    return
+                break
+
+        state = {"received": 0, "exceeded": False}
+
+        async def guarded_receive():
+            message = await receive()
+            if message.get("type") == "http.request":
+                state["received"] += len(message.get("body", b""))
+                if state["received"] > self.max_bytes:
+                    state["exceeded"] = True
+                    # Cut the stream short; the handler unwinds and our own
+                    # response goes out instead of whatever it was writing.
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message) -> None:
+            if state["exceeded"]:
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, guarded_receive, guarded_send)
+        except Exception:
+            if not state["exceeded"]:
+                raise
+        if state["exceeded"]:
+            await self._too_large(send)
+
+    @staticmethod
+    async def _too_large(send) -> None:
+        body = b'{"detail":"request too large"}'
+        await send({
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(_BodySizeLimit, max_bytes=config.MAX_REQUEST_BYTES)
 
 if config.FRONTEND_ORIGIN:
     app.add_middleware(
@@ -328,14 +439,14 @@ async def _reaper_loop() -> None:
 # ── Request models ────────────────────────────────────────────────────────────
 
 class ResolutionsRequest(BaseModel):
-    url: str
+    url: str = Field(max_length=2048)
 
 
 class DownloadRequest(BaseModel):
-    url: str
-    format_code: str
-    resolution: str | None = None
-    ext: str | None = None
+    url: str = Field(max_length=2048)
+    format_code: str = Field(max_length=64)
+    resolution: str | None = Field(default=None, max_length=32)
+    ext: str | None = Field(default=None, max_length=16)
     # When true and `format_code` is an audio preset, write the result to a
     # tmp_dir and serve it via /api/file like a video instead of importing
     # into the user's library.
@@ -348,11 +459,11 @@ class DownloadRequest(BaseModel):
 
 
 class PlaylistDownloadRequest(BaseModel):
-    url: str
+    url: str = Field(max_length=2048)
     # `quality` only applies when `as_file=True` (zip-to-device flow). In-app
     # imports are always mp3-320 regardless of what the client sends — see
     # the route body.
-    quality: str = 'mp3-320'
+    quality: str = Field(default='mp3-320', max_length=64)
     as_file: bool = False
 
 
@@ -445,7 +556,7 @@ async def get_resolutions(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=safe_error(e))
 
 
 def _throttled_progress(job_id: str, progress_queue: _ProgressHub):
@@ -510,6 +621,7 @@ def start_download(
         resolution=body.resolution,
         ext=body.ext,
         owner_id=user.user_id,
+        own=body.own,
     )
 
     def run_audio_import():
@@ -623,8 +735,8 @@ def start_download(
         except Exception as e:
             traceback.print_exc()
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     def run():
         try:
@@ -694,8 +806,8 @@ def start_download(
             traceback.print_exc()
             shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     def run_audio_file():
         try:
@@ -730,8 +842,8 @@ def start_download(
             traceback.print_exc()
             shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     if is_audio_import:
         target = run_audio_import
@@ -801,7 +913,7 @@ def start_playlist_download(
     try:
         codec, bitrate, ext = ytDownloaderFunctions.parse_audio_quality(effective_quality)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=safe_error(e))
 
     job_id = str(uuid.uuid4())
     progress_queue: _ProgressHub = _ProgressHub()
@@ -962,7 +1074,7 @@ def start_playlist_download(
                         "index": idx,
                         "total": total,
                         "title": title,
-                        "message": str(track_err),
+                        "message": safe_error(track_err),
                     })
 
                 db.update_progress(job_id, idx / total * 100)
@@ -985,8 +1097,8 @@ def start_playlist_download(
         except Exception as e:
             traceback.print_exc()
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     def run_zip():
         # Stage every track audio file in tmp_dir, then zip them as a single
@@ -1060,7 +1172,7 @@ def start_playlist_download(
                         "index": idx,
                         "total": total,
                         "title": title,
-                        "message": str(track_err),
+                        "message": safe_error(track_err),
                     })
 
                 db.update_progress(job_id, idx / total * 100)
@@ -1099,18 +1211,28 @@ def start_playlist_download(
             traceback.print_exc()
             shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     target = run_zip if body.as_file else run
     _submit_job(target)
     return {"job_id": job_id}
 
 
+# A track-list import has no YouTube url; this sentinel marks the job so retry
+# can tell it apart from a playlist download instead of feeding it to the URL
+# validator. Only sources up to _RETRYABLE_SOURCE_MAX are kept for replay — a
+# pasted list is unbounded, and the jobs table is not the place for it.
+_TRACKLIST_IMPORT_URL = "tracklist-import"
+_RETRYABLE_SOURCE_MAX = 64_000
+
+
 class TrackImportRequest(BaseModel):
     # A Spotify playlist link (read via the public embed, ~100-track cap) OR a
-    # pasted list — Exportify CSV / "Artist - Title" lines (unlimited).
-    source: str
+    # pasted list — Exportify CSV / "Artist - Title" lines. Bounded because
+    # `spotify.from_text` parses the whole string in memory before
+    # MAX_IMPORT_TRACKS ever trims the result.
+    source: str = Field(max_length=config.MAX_IMPORT_SOURCE_CHARS)
 
 
 @app.post("/api/import/tracklist")
@@ -1129,12 +1251,14 @@ def start_tracklist_import(
     job_id = str(uuid.uuid4())
     progress_queue: _ProgressHub = _ProgressHub()
     _jobs[job_id] = {"queue": progress_queue, "file_path": None, "tmp_dir": None}
+    source = body.source
     db.create_job(
         job_id=job_id,
-        url='tracklist-import',
+        url=_TRACKLIST_IMPORT_URL,
         format_code='mp3-320',
         is_playlist=True,
         owner_id=user.user_id,
+        import_source=source if len(source) <= _RETRYABLE_SOURCE_MAX else None,
     )
 
     def run():
@@ -1245,7 +1369,7 @@ def start_tracklist_import(
                     skipped += 1
                     progress_queue.put({
                         "type": "track_skipped", "index": idx, "total": total,
-                        "title": label, "message": str(track_err),
+                        "title": label, "message": safe_error(track_err),
                     })
 
                 db.update_progress(job_id, idx / total * 100)
@@ -1266,8 +1390,8 @@ def start_tracklist_import(
         except Exception as e:
             traceback.print_exc()
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     _submit_job(run)
     return {"job_id": job_id}
@@ -1319,17 +1443,30 @@ async def progress_ws(websocket: WebSocket, job_id: str):
         return
 
     await websocket.accept()
-    await websocket.send_json({"type": "snapshot", "job": row})
 
+    # Subscribe *before* taking the snapshot. The hub drops events with no
+    # subscribers, so reading the snapshot first left a window in which the
+    # worker's terminal event was published to nobody: the client got a snapshot
+    # saying "downloading" and then silence.
+    loop = asyncio.get_running_loop()
     runtime = _jobs.get(job_id)
-    if runtime is None:
-        # Already finished, failed, interrupted, or cancelled — nothing live to stream.
+    hub: "_ProgressHub | None" = runtime["queue"] if runtime else None
+    sub = hub.subscribe(loop) if hub is not None else None
+
+    # Re-read now that nothing can be lost. Anything published from here on is
+    # queued behind the snapshot.
+    row = db.get(job_id) or row
+    await websocket.send_json({"type": "snapshot", "job": _public_job(row)})
+
+    # The DB row is the authority on whether the job is still running — not the
+    # presence of a runtime entry. A finished file job keeps its entry until the
+    # file is fetched (serve_file needs the path), and subscribing to its dead
+    # hub used to hang the client until it gave up.
+    if sub is None or row["status"] not in db.ACTIVE_STATUSES:
+        if hub is not None and sub is not None:
+            hub.unsubscribe(sub)
         await websocket.close()
         return
-
-    hub: _ProgressHub = runtime["queue"]
-    loop = asyncio.get_running_loop()
-    sub = hub.subscribe(loop)
 
     # The progress channel is server→client only, so a receive() completes only
     # when the socket closes. Race it against the next event: a disconnect frees
@@ -1372,7 +1509,7 @@ async def progress_ws(websocket: WebSocket, job_id: str):
 def serve_file(
     job_id: str,
     background_tasks: BackgroundTasks,
-    user: CurrentUser = Depends(media_user),
+    user: CurrentUser = Depends(file_media_user),
 ):
     """Serve the downloaded file and clean up the temp directory afterwards."""
     row = db.get(job_id)
@@ -1512,6 +1649,8 @@ async def catalog_discover(
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="search timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube search unavailable: {safe_error(e)}")
 
 
 @app.get("/api/catalog/suggestions")
@@ -1724,6 +1863,8 @@ async def catalog_category(
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="category timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube search unavailable: {safe_error(e)}")
     return {
         "category": {k: cat[k] for k in ("slug", "title", "accent")},
         **feed,
@@ -1747,6 +1888,8 @@ async def catalog_radio(
     `rotate_pick`), so each ↻ surfaces different "download more like this" picks
     while a given nonce stays reproducible. Already-owned tracks always surface
     as playable (`db`); only the external picks rotate."""
+    if not _VIDEO_ID_RE.match(video_id):
+        raise HTTPException(status_code=400, detail="invalid video id")
     external_limit = max(0, min(external_limit, 30))
 
     def work():
@@ -1820,8 +1963,10 @@ async def albums_search(
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="album search timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {safe_error(e)}")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"album search failed: {e}")
+        raise HTTPException(status_code=502, detail=f"album search failed: {safe_error(e)}")
     return {"albums": albums}
 
 
@@ -1887,6 +2032,8 @@ async def album_resolve(
         result = await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="album resolve timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {safe_error(e)}")
     if result is None:
         raise HTTPException(status_code=404, detail="album not found")
     return result
@@ -1915,6 +2062,8 @@ async def album_detail(
         result = await run_extraction(work, timeout=config.EXTRACTION_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="album load timed out")
+    except search_mod.UpstreamUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {safe_error(e)}")
     if result is None:
         raise HTTPException(status_code=404, detail="album not found")
     return result
@@ -2002,26 +2151,57 @@ def catalog_unown(
 # ── Playlists ────────────────────────────────────────────────────────────────
 
 class PlaylistCreate(BaseModel):
-    name: str
-    description: str | None = None
-    visibility: str = "private"  # 'private' | 'public'
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    visibility: Literal["public", "private"] = "private"
+
+
+# A playlist cover is always a thumbnail from the track it came from, and the UI
+# has no field to type one — but `cover_url` was writable over the API, stored
+# verbatim, and rendered by every viewer of a public playlist. That made it a
+# cross-user beacon: point it at your own host and collect the IP, User-Agent and
+# Referer of everyone who opens the Playlists page.
+_COVER_HOSTS = (
+    "i.ytimg.com",
+    "i9.ytimg.com",
+    "yt3.googleusercontent.com",
+    "lh3.googleusercontent.com",
+    "music.youtube.com",
+)
+
+
+def _validate_cover_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (
+        host in _COVER_HOSTS or host.endswith(".ggpht.com")
+    ):
+        raise ValueError("cover_url must be an https image from youtube")
+    return value
 
 
 class PlaylistUpdate(BaseModel):
-    name: str | None = None
-    description: str | None = None
-    visibility: str | None = None
-    cover_url: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    # Constrained here so a bad value is a 422 naming the field. Untyped, it
+    # reached the DB layer, which answered "nothing applied" by dropping every
+    # other field in the patch too, and the route reported success anyway.
+    visibility: Literal["public", "private"] | None = None
+    cover_url: str | None = Field(default=None, max_length=2048)
+
+    _check_cover = field_validator("cover_url")(_validate_cover_url)
 
 
 class PlaylistTrackKey(BaseModel):
-    video_id: str
-    codec: str
-    bitrate: str
+    video_id: str = Field(max_length=64)
+    codec: str = Field(max_length=32)
+    bitrate: str = Field(max_length=32)
 
 
 class PlaylistReorder(BaseModel):
-    order: list[PlaylistTrackKey]
+    order: list[PlaylistTrackKey] = Field(max_length=config.MAX_IMPORT_TRACKS * 4)
 
 
 def _ensure_playlist_visible(playlist: dict, user: CurrentUser) -> None:
@@ -2070,6 +2250,11 @@ def create_playlist(
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
+    if db.count_playlists(user.user_id) >= config.MAX_PLAYLISTS_PER_USER:
+        raise HTTPException(
+            status_code=409,
+            detail=f"playlist limit reached ({config.MAX_PLAYLISTS_PER_USER})",
+        )
     playlist_id = str(uuid.uuid4())
     db.create_playlist(
         playlist_id=playlist_id,
@@ -2108,13 +2293,17 @@ def patch_playlist(
     if playlist is None:
         raise HTTPException(status_code=404, detail="playlist not found")
     _ensure_playlist_owner(playlist, user)
-    db.update_playlist(
+    applied = db.update_playlist(
         playlist_id,
         name=body.name.strip() if body.name is not None else None,
         description=body.description,
         visibility=body.visibility,
         cover_url=body.cover_url,
     )
+    # False here means the patch carried no fields at all — say so rather than
+    # letting the client believe a change landed.
+    if not applied:
+        raise HTTPException(status_code=400, detail="no changes in this update")
     return {"ok": True}
 
 
@@ -2148,7 +2337,7 @@ def add_track(
 
 
 class PlaylistTracksBulk(BaseModel):
-    tracks: list[PlaylistTrackKey]
+    tracks: list[PlaylistTrackKey] = Field(max_length=config.MAX_IMPORT_TRACKS * 4)
 
 
 @app.post("/api/playlists/{playlist_id}/tracks/bulk")
@@ -2486,7 +2675,7 @@ async def preview_track(
 @app.get("/api/jobs")
 def list_jobs(user: CurrentUser = Depends(current_user)):
     """Return all jobs ordered by creation time desc. USER scoped to own jobs; ADMIN sees all."""
-    return {"jobs": db.list_jobs(owner_id=user.owner_filter)}
+    return {"jobs": [_public_job(r) for r in db.list_jobs(owner_id=user.owner_filter)]}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -2495,7 +2684,7 @@ def get_job(job_id: str, user: CurrentUser = Depends(current_user)):
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     _ensure_owner(row, user)
-    return row
+    return _public_job(row)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -2512,8 +2701,14 @@ def cancel_job(job_id: str, user: CurrentUser = Depends(current_user)):
 
 
 @app.post("/api/jobs/{job_id}/retry")
-def retry_job(job_id: str, user: CurrentUser = Depends(current_user)):
-    """Re-queue a previously completed/interrupted/failed job with its original parameters."""
+def retry_job(
+    job_id: str,
+    user: CurrentUser = Depends(current_user),
+    _rl: CurrentUser = Depends(rate_limit_extraction),
+):
+    """Re-queue a previously completed/interrupted/failed job with its original
+    parameters. Carries the extraction budget itself: it re-enters the download
+    handlers as plain Python calls, so *their* rate-limit dependency never runs."""
     row = db.get(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -2522,6 +2717,19 @@ def retry_job(job_id: str, user: CurrentUser = Depends(current_user)):
         raise HTTPException(status_code=409, detail="Job is still active.")
 
     as_file = bool(row["as_file"])
+
+    # A track-list import is flagged is_playlist but has no url of its own, so
+    # dispatching on is_playlist alone sent it to the playlist handler and it
+    # died on URL validation. Check the sentinel first.
+    if row["url"] == _TRACKLIST_IMPORT_URL:
+        source = row["import_source"]
+        if not source:
+            raise HTTPException(
+                status_code=409,
+                detail="this import can't be retried — paste the list again",
+            )
+        return start_tracklist_import(TrackImportRequest(source=source), user=user)
+
     if row["is_playlist"]:
         return start_playlist_download(
             PlaylistDownloadRequest(
@@ -2536,6 +2744,9 @@ def retry_job(job_id: str, user: CurrentUser = Depends(current_user)):
             resolution=row["resolution"],
             ext=row["ext"],
             as_file=as_file,
+            # Defaults to True on the model, so omitting it turned a catalog-only
+            # fetch into a favourite on every retry.
+            own=bool(row["own"]),
         ),
         user=user,
     )
@@ -2591,7 +2802,7 @@ async def search_videos(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="search timed out")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"search failed: {e}")
+        raise HTTPException(status_code=502, detail=f"search failed: {safe_error(e)}")
 
 
 @app.get("/api/history")
@@ -2638,10 +2849,24 @@ _health_probe_lock = threading.Lock()
 
 
 def _run_extraction_probe() -> dict:
-    """Cached real-extraction check. The 5-min TTL (and lock) means a flood of
-    health hits can't turn into a yt-dlp request flood."""
+    """Cached real-extraction check. The 5-min TTL means a flood of health hits
+    can't turn into a yt-dlp request flood.
+
+    Never blocks. The route is unauthenticated and sync, so it runs on the anyio
+    threadpool that also serves the app's other sync endpoints, and a yt-dlp call
+    has no wall-clock bound — waiting on the mutex would let anyone pin every
+    worker in that pool by opening concurrent health checks while a probe is slow.
+    So: read the cache without the lock, and hand a caller that arrives mid-probe
+    the last known result instead of a queue slot."""
     now = time.time()
-    with _health_probe_lock:
+    snapshot = dict(_health_probe)
+    if snapshot["ok"] is not None and now - snapshot["checked_at"] < _HEALTH_PROBE_TTL:
+        return snapshot
+    if not _health_probe_lock.acquire(blocking=False):
+        return snapshot  # a probe is already in flight — don't queue behind it
+    try:
+        # A probe may have landed between the snapshot and the lock.
+        now = time.time()
         if _health_probe["ok"] is not None and now - _health_probe["checked_at"] < _HEALTH_PROBE_TTL:
             return dict(_health_probe)
         ok = False
@@ -2655,6 +2880,8 @@ def _run_extraction_probe() -> dict:
             error = str(e)
         _health_probe.update(checked_at=now, ok=ok, error=error)
         return dict(_health_probe)
+    finally:
+        _health_probe_lock.release()
 
 
 @app.get("/api/health")
@@ -2670,10 +2897,11 @@ def health_extraction():
     extraction is broken (bad cookies, YouTube change, stale yt-dlp) so it can be
     alerted on."""
     probe = _run_extraction_probe()
+    unknown = probe["ok"] is None
     body = {
-        "status": "ok" if probe["ok"] else "degraded",
+        "status": "ok" if probe["ok"] else ("probing" if unknown else "degraded"),
         "extraction_ok": bool(probe["ok"]),
-        "error": probe["error"],
+        "error": "extraction probe in progress" if unknown else probe["error"],
         "yt_dlp_version": yt_dlp.version.__version__,
         "checked_at": probe["checked_at"],
     }

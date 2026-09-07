@@ -241,7 +241,7 @@ export function AddToPlaylistMenu({ trackKey, track, onRadio, trigger }: Props) 
             <button
               type="submit"
               disabled={!newName.trim() || createAndAdd.isPending}
-              className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-hot text-hot hover:bg-hot/15 disabled:opacity-30 rounded-xs transition"
+              className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-hot text-hot-ink hover:bg-hot/15 disabled:opacity-30 rounded-xs transition"
             >
               + new
             </button>

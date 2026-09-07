@@ -6,7 +6,12 @@ import { AppHeader } from '@/shared/ui/AppHeader'
 import { ConfirmButton } from '@/shared/ui/ConfirmButton'
 import { NowPlayingTick } from '@/shared/ui/NowPlayingTick'
 import { useToast } from '@/shared/ui/ToastProvider'
-import { api } from '@/shared/api/client'
+import {
+  SAVE_LOCATION,
+  saveTextToDevice,
+  savesNatively,
+} from '@/shared/lib/fileSaver'
+import { API_BASE, api } from '@/shared/api/client'
 import type {
   PlaylistTrackRow,
   PlaylistVisibility,
@@ -159,6 +164,13 @@ function PlaylistDetailView() {
     reorder.mutate(next)
   }
 
+  function moveBy(from: number, delta: number) {
+    if (!tracks) return
+    const to = from + delta
+    if (to < 0 || to >= tracks.length) return
+    handleDrop(from, to)
+  }
+
   function playAll(startAt = 0) {
     const queue = tracks.map(toLibraryItem)
     if (queue.length > 0) player.play(queue, Math.max(0, startAt))
@@ -255,6 +267,9 @@ function PlaylistDetailView() {
                 isOwner={playlist.is_owner}
                 onPlay={() => playAll(i)}
                 onDropAt={(from) => handleDrop(from, i)}
+                onMove={(delta) => moveBy(i, delta)}
+                canMoveUp={i > 0}
+                canMoveDown={i < tracks.length - 1}
                 onRemove={() =>
                   remove.mutate({
                     video_id: t.video_id,
@@ -305,7 +320,7 @@ function OfflinePlaylistView({
 
         <header className="card-vapor rounded-sm p-5 mb-6 flex items-center gap-4 flex-wrap">
           <div className="flex-1 min-w-0">
-            <div className="font-pixel text-xs uppercase tracking-[0.2em] text-hot mb-1">
+            <div className="font-pixel text-xs uppercase tracking-[0.2em] text-hot-ink mb-1">
               ⬇ offline · no connection
             </div>
             <h1 className="font-sans text-2xl font-bold text-ink-hi">{name}</h1>
@@ -340,12 +355,40 @@ function OfflinePlaylistView({
   )
 }
 
+/** Touch/keyboard reorder. HTML5 drag-and-drop is mouse-only, so the phone had
+ *  no way at all to change a playlist's order. */
+function MoveButton({
+  dir,
+  disabled,
+  onMove,
+}: {
+  dir: 'up' | 'down'
+  disabled: boolean
+  onMove: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onMove}
+      disabled={disabled}
+      aria-label={`move ${dir}`}
+      title={`move ${dir}`}
+      className="focus-vis font-pixel text-xs w-8 h-5 flex items-center justify-center text-ink-lo hover:text-cool disabled:opacity-20 transition"
+    >
+      {dir === 'up' ? '▲' : '▼'}
+    </button>
+  )
+}
+
 function TrackRow({
   track,
   position,
   isOwner,
   onPlay,
   onDropAt,
+  onMove,
+  canMoveUp = false,
+  canMoveDown = false,
   onRemove,
 }: {
   track: PlaylistTrackRow
@@ -353,6 +396,9 @@ function TrackRow({
   isOwner: boolean
   onPlay: () => void
   onDropAt: (fromIndex: number) => void
+  onMove?: (delta: number) => void
+  canMoveUp?: boolean
+  canMoveDown?: boolean
   onRemove: () => void
 }) {
   const player = useAudioPlayer()
@@ -401,6 +447,15 @@ function TrackRow({
         isCurrent ? 'bg-hot/10' : 'hover:bg-violet/10'
       } ${over ? 'border-t-2 border-cool' : ''}`}
     >
+      {isOwner && onMove && (
+        <div
+          className="flex flex-col flex-shrink-0 sm:hidden"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <MoveButton dir="up" disabled={!canMoveUp} onMove={() => onMove(-1)} />
+          <MoveButton dir="down" disabled={!canMoveDown} onMove={() => onMove(1)} />
+        </div>
+      )}
       {isOwner && (
         <span
           className="font-pixel text-sm text-ink-lo/60 cursor-grab select-none hidden sm:inline"
@@ -437,7 +492,7 @@ function TrackRow({
         {isOffline && (
           <span
             title="downloaded for offline"
-            className="absolute top-0.5 left-0.5 font-pixel text-[10px] leading-none bg-page/80 text-hot px-1 py-0.5 rounded-xs"
+            className="absolute top-0.5 left-0.5 font-pixel text-[10px] leading-none bg-page/80 text-hot-ink px-1 py-0.5 rounded-xs"
           >
             ⬇
           </span>
@@ -629,7 +684,10 @@ function ShareButton({ id }: { id: string }) {
     <button
       type="button"
       onClick={async () => {
-        const url = `${window.location.origin}/playlists/${id}`
+        // In the APK the page is served from https://localhost, so the origin
+        // is only shareable on the web build. API_BASE is the public host there.
+        const origin = API_BASE || window.location.origin
+        const url = `${origin}/playlists/${id}`
         try {
           await navigator.clipboard.writeText(url)
           showToast({ message: 'share link copied', variant: 'success' })
@@ -655,6 +713,7 @@ function ExportButton({
   description: string | null
   tracks: PlaylistTrackRow[]
 }) {
+  const showToast = useToast()
   const onExport = () => {
     const data = {
       name,
@@ -667,15 +726,20 @@ function ExportButton({
         artist: t.artist,
       })),
     }
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${name.replace(/[^\w.-]+/g, '_').slice(0, 80) || 'playlist'}.json`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
+    const filename = `${name.replace(/[^\w.-]+/g, '_').slice(0, 80) || 'playlist'}.json`
+    saveTextToDevice(filename, JSON.stringify(data, null, 2), 'application/json')
+      .then(() => {
+        if (savesNatively()) {
+          showToast({ message: `saved to ${SAVE_LOCATION}`, variant: 'success' })
+        }
+      })
+      .catch((e) =>
+        showToast({
+          message:
+            e instanceof Error ? `export failed — ${e.message}` : 'export failed',
+          variant: 'err',
+        }),
+      )
   }
   return (
     <button

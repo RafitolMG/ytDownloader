@@ -3,6 +3,7 @@ import { useCallback, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { useBackClose } from '@/shared/lib/backStack'
 import { api } from '@/shared/api/client'
+import { OfflineFallback } from '@/features/offline/OfflineFallback'
 import type {
   CatalogItem,
   CatalogSort,
@@ -55,6 +56,9 @@ export default function CatalogPage() {
     queryFn: () => api.catalog({ sort, limit: 300 }),
     enabled: !isSearching,
     staleTime: 10_000,
+    // Keep the previous sort's rows on screen while the new one loads; without
+    // it the section unmounts and the sort buttons vanish under the finger.
+    placeholderData: (prev) => prev,
   })
   const discoverQuery = useQuery({
     queryKey: ['discover', { q: debouncedQuery }],
@@ -238,6 +242,8 @@ export default function CatalogPage() {
             seed={activeRadio}
             feed={radioQuery.data}
             isLoading={radioQuery.isLoading}
+            isError={radioQuery.isError}
+            onRetry={() => radioQuery.refetch()}
             isRefreshing={radioQuery.isFetching}
             onRefresh={() => setRadioRoll((r) => r + 1)}
             onBack={() => setActiveRadio(null)}
@@ -247,6 +253,8 @@ export default function CatalogPage() {
             category={activeCategory}
             feed={categoryFeedQuery.data}
             isLoading={categoryFeedQuery.isLoading}
+            isError={categoryFeedQuery.isError}
+            onRetry={() => categoryFeedQuery.refetch()}
             onBack={() => setActiveCategory(null)}
           />
         ) : activeMix ? (
@@ -303,11 +311,23 @@ export default function CatalogPage() {
               <div className="font-pixel text-ink-mid">··· loading catalog ···</div>
             )}
             {activeQuery.isError && (
-              <div className="font-pixel text-crit">
-                failed to load:{' '}
-                {activeQuery.error instanceof Error ? activeQuery.error.message : 'unknown'}
+              <div className="font-pixel text-crit flex items-center gap-3 flex-wrap">
+                <span>
+                  failed to load:{' '}
+                  {activeQuery.error instanceof Error
+                    ? activeQuery.error.message
+                    : 'unknown'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => activeQuery.refetch()}
+                  className="uppercase tracking-widest text-xs px-2 py-1 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+                >
+                  ↻ retry
+                </button>
               </div>
             )}
+            {activeQuery.isError && <OfflineFallback />}
             {showEmpty && (
               <div className="card-vapor rounded-sm p-8 text-center">
                 <div className="font-pixel text-lg text-ink-mid mb-2">

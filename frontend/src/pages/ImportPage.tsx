@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AppHeader } from '@/shared/ui/AppHeader'
 import { api, wsUrl } from '@/shared/api/client'
 import { ApiError } from '@/shared/api/client'
@@ -32,6 +32,8 @@ export default function ImportPage() {
 
   const wsRef = useRef<WebSocket | null>(null)
 
+  useEffect(() => () => wsRef.current?.close(), [])
+
   const reset = () => {
     setPlaylistName(null)
     setCapped(false)
@@ -47,6 +49,10 @@ export default function ImportPage() {
     wsRef.current?.close()
     const ws = new WebSocket(wsUrl(`/ws/progress/${jobId}`))
     wsRef.current = ws
+    // Distinguishes "the server finished and closed" from "the connection
+    // dropped mid-import", which otherwise leaves the page stuck on progress
+    // that will never advance (same guard as useCapture).
+    let terminated = false
     ws.onmessage = (ev) => {
       const d = JSON.parse(ev.data) as Record<string, unknown>
       switch (d.type) {
@@ -82,18 +88,34 @@ export default function ImportPage() {
           setPct(100)
           setCurrentTitle(null)
           setPhase('done')
+          terminated = true
           ws.close()
           break
         case 'error':
           setErrorMsg((d.message as string) ?? 'import failed')
           setPhase('error')
+          terminated = true
           ws.close()
           break
         case 'cancelled':
           setPhase('idle')
+          terminated = true
           ws.close()
           break
       }
+    }
+    ws.onerror = () => {
+      // Always followed by onclose, which decides the phase.
+      setErrorMsg('lost connection to backend')
+    }
+    ws.onclose = () => {
+      if (wsRef.current === ws) wsRef.current = null
+      if (terminated) return
+      // The import is still running server-side; we just can't follow it.
+      setErrorMsg(
+        (m) => m ?? 'lost connection — the import may still be running, check the queue',
+      )
+      setPhase((p) => (p === 'running' ? 'error' : p))
     }
   }, [])
 

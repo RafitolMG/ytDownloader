@@ -44,6 +44,20 @@ type OfflineCtx = {
   offlineTracksFor: (playlistId: string) => PlaylistTrackRow[]
   /** Saved name of a downloaded playlist, or null. */
   playlistName: (playlistId: string) => string | null
+  /** Everything on disk, for browsing with no network. Ids are playlist ids or
+   *  the synthetic `album:<key>` used for downloaded albums. */
+  downloadedCollections: () => DownloadedCollection[]
+  /** Every downloaded track, playable with no network. The fallback the online
+   *  views fall back *to* — deliberately not a cached copy of the catalog,
+   *  which would list tracks that can't play offline. */
+  downloadedTracks: () => PlaylistTrackRow[]
+}
+
+export type DownloadedCollection = {
+  id: string
+  name: string
+  trackCount: number
+  isAlbum: boolean
 }
 
 const Ctx = createContext<OfflineCtx | null>(null)
@@ -130,6 +144,8 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       tracks: PlaylistTrackRow[],
     ) => runExclusive(async () => {
       if (!supported) return
+      // Rejects if the session/connection is gone. Nothing is registered yet, so
+      // the caller is responsible for surfacing it — see OfflineDownloadButton.
       await ensureMediaToken() // so trackStreamUrl carries the media token
       manifestRef.current.playlists[playlistId] = { name: playlistName }
       // Previews aren't real DB tracks — they can't be streamed offline.
@@ -221,23 +237,30 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
     [supported, recomputeBytes, runExclusive],
   )
 
+  const toRow = (e: ManifestEntry, i: number): PlaylistTrackRow => ({
+    video_id: e.video_id,
+    codec: e.codec,
+    bitrate: e.bitrate,
+    title: e.title,
+    artist: e.artist,
+    duration_sec: e.duration_sec,
+    thumbnail_url: e.thumbnail_url,
+    source_url: e.source_url,
+    file_size: null,
+    position: i,
+    added_at: '',
+  })
+
   const offlineTracksFor = useCallback(
     (playlistId: string): PlaylistTrackRow[] =>
       manifestRef.current.tracks
         .filter((e) => e.playlistIds.includes(playlistId))
-        .map((e, i) => ({
-          video_id: e.video_id,
-          codec: e.codec,
-          bitrate: e.bitrate,
-          title: e.title,
-          artist: e.artist,
-          duration_sec: e.duration_sec,
-          thumbnail_url: e.thumbnail_url,
-          source_url: e.source_url,
-          file_size: null,
-          position: i,
-          added_at: '',
-        })),
+        .map(toRow),
+    [],
+  )
+
+  const downloadedTracks = useCallback(
+    (): PlaylistTrackRow[] => manifestRef.current.tracks.map(toRow),
     [],
   )
 
@@ -246,6 +269,19 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       manifestRef.current.playlists[playlistId]?.name ?? null,
     [],
   )
+
+  const downloadedCollections = useCallback((): DownloadedCollection[] => {
+    const { playlists, tracks } = manifestRef.current
+    return Object.entries(playlists)
+      .map(([id, meta]) => ({
+        id,
+        name: meta.name,
+        trackCount: tracks.filter((t) => t.playlistIds.includes(id)).length,
+        isAlbum: id.startsWith('album:'),
+      }))
+      .filter((c) => c.trackCount > 0)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [])
 
   const value = useMemo<OfflineCtx>(
     () => ({
@@ -258,6 +294,8 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       removePlaylist,
       offlineTracksFor,
       playlistName,
+      downloadedCollections,
+      downloadedTracks,
     }),
     [
       supported,
@@ -269,6 +307,8 @@ export function OfflineProvider({ children }: { children: ReactNode }) {
       removePlaylist,
       offlineTracksFor,
       playlistName,
+      downloadedCollections,
+      downloadedTracks,
     ],
   )
 

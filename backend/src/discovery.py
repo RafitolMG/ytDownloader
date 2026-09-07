@@ -218,7 +218,11 @@ def rotate_pick(
 # client increments N. Bounded and in-memory, like the radio / lineup caches.
 
 _ROLL_MEMORY_DEPTH = 6   # how many recent rolls to remember per (user, surface)
-_roll_memory: "dict[tuple[str, str], OrderedDict[int, frozenset[str]]]" = {}
+# ...and how many (user, surface) pairs to keep at all. Surfaces are derived from
+# user-supplied ids, so without this cap the outer map grows for the lifetime of
+# the process — one permanent entry per distinct id ever rolled.
+_ROLL_MEMORY_MAX_KEYS = 512
+_roll_memory: "OrderedDict[tuple[str, str], OrderedDict[int, frozenset[str]]]" = OrderedDict()
 _roll_lock = threading.Lock()
 
 
@@ -253,6 +257,9 @@ def record_roll(user_id: str, surface: str, nonce: int, video_ids: Iterable[str]
         hist.move_to_end(nonce)
         while len(hist) > _ROLL_MEMORY_DEPTH:
             hist.popitem(last=False)
+        _roll_memory.move_to_end(key)
+        while len(_roll_memory) > _ROLL_MEMORY_MAX_KEYS:
+            _roll_memory.popitem(last=False)
 
 
 def _scene_clusters(neighbors: dict[str, set[str]], day_seed: int) -> list[list[str]]:
@@ -458,11 +465,14 @@ def _discover_feed(
         # Music is disabled or comes up empty. Both return the same shape.
         raw = ytmusic.search_songs(q_norm, limit=fetch)
         if not raw:
+            # Deliberately not swallowed: with the upstream down this used to
+            # return an empty feed, indistinguishable from "nothing matched", and
+            # the client rendered a no-results empty state for an outage.
             try:
                 raw = search_mod.search(q_norm, limit=fetch)
-            except Exception:
+            except Exception as e:
                 traceback.print_exc()
-                raw = []
+                raise search_mod.UpstreamUnavailable(str(e)) from e
         # Some search hits are already in the catalog but didn't match the text
         # query (different stored title/artist). Pull those in as catalog rows
         # so they render as "add to library" (adopt, no re-download) instead of

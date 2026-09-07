@@ -98,6 +98,18 @@ export async function ensureMediaToken(force = false): Promise<string | null> {
   return mediaToken
 }
 
+/** One-shot token for /api/file. Not cached: it is used immediately and expires
+ *  in seconds, so there is nothing to reuse. */
+async function mintFileToken(): Promise<string | null> {
+  if (!IS_REMOTE) return null
+  try {
+    const r = await json('/api/auth/media-token?scope=file', undefined, mediaTokenSchema)
+    return r.token
+  } catch {
+    return null
+  }
+}
+
 /** Drop the cached media token (call on logout). */
 export function clearMediaToken(): void {
   mediaToken = null
@@ -217,7 +229,15 @@ export const api = {
   delete: (jobId: string) =>
     json<{ ok: true }>(`/api/jobs/${jobId}`, { method: 'DELETE' }),
 
-  fileUrl: (jobId: string) => mediaUrl(`/api/file/${jobId}`),
+  /** URL for a finished job's file. Async because /api/file takes its own
+   *  narrow, seconds-long token — a streaming `mt` is not accepted there, so a
+   *  leaked media URL can't pull down someone's downloads. */
+  fileUrl: async (jobId: string): Promise<string> => {
+    const path = `/api/file/${jobId}`
+    if (!IS_REMOTE) return apiUrl(path)
+    const token = await mintFileToken()
+    return token ? apiUrl(`${path}?mt=${encodeURIComponent(token)}`) : apiUrl(path)
+  },
 
   // ── auth ──
   login: (usernameOrEmail: string, password: string) =>

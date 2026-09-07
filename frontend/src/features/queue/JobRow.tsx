@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutationErrorToast } from '@/shared/lib/mutationError'
 import { api } from '@/shared/api/client'
 import type { JobRow as Job, JobStatus } from '@/shared/api/types'
 import { ConfirmButton } from '@/shared/ui/ConfirmButton'
@@ -37,10 +38,25 @@ function fmtDate(iso: string | null): string {
 export function JobRow({ job }: { job: Job }) {
   const qc = useQueryClient()
   const invalidate = () => qc.invalidateQueries({ queryKey: ['jobs'] })
+  // A refused action — a retry the server can't replay, a cancel that raced the
+  // job finishing — must not look like a button that did nothing.
+  const onError = useMutationErrorToast()
 
-  const cancel = useMutation({ mutationFn: () => api.cancel(job.id), onSuccess: invalidate })
-  const retry = useMutation({ mutationFn: () => api.retry(job.id), onSuccess: invalidate })
-  const del = useMutation({ mutationFn: () => api.delete(job.id), onSuccess: invalidate })
+  const cancel = useMutation({
+    mutationFn: () => api.cancel(job.id),
+    onSuccess: invalidate,
+    onError: onError('cancel'),
+  })
+  const retry = useMutation({
+    mutationFn: () => api.retry(job.id),
+    onSuccess: invalidate,
+    onError: onError('retry'),
+  })
+  const del = useMutation({
+    mutationFn: () => api.delete(job.id),
+    onSuccess: invalidate,
+    onError: onError('delete'),
+  })
 
   const active = job.status === 'queued' || job.status === 'downloading' || job.status === 'merging' || job.status === 'transcoding'
   // Live overlay only when the job is active — closed sockets reset their

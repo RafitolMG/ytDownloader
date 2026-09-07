@@ -32,6 +32,12 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Saving to the public Downloads folder. Only needed up to API 28; from
+         API 29 DownloadManager and MediaStore handle it without a permission. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
     <!-- Background audio: the media-session plugin runs a mediaPlayback
          foreground service. FOREGROUND_SERVICE_MEDIA_PLAYBACK is required from
          Android 14 (API 34) and the plugin (built for an older target) doesn't

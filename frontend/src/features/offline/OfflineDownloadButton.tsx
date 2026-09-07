@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { PlaylistTrackRow } from '@/shared/api/types'
+import { useToast } from '@/shared/ui/ToastProvider'
 import { useOffline } from './OfflineProvider'
 
 /** Download every track of a collection (playlist or album) to the device for
@@ -16,6 +17,7 @@ export function OfflineDownloadButton({
   tracks: PlaylistTrackRow[]
 }) {
   const off = useOffline()
+  const showToast = useToast()
   const [armedRemove, setArmedRemove] = useState(false)
 
   if (!off.supported) return null
@@ -79,7 +81,17 @@ export function OfflineDownloadButton({
   return (
     <button
       type="button"
-      onClick={() => void off.downloadPlaylist(id, name, tracks)}
+      onClick={() => {
+        off.downloadPlaylist(id, name, tracks).catch((e) =>
+          showToast({
+            message:
+              e instanceof Error
+                ? `offline download failed — ${e.message}`
+                : 'offline download failed',
+            variant: 'err',
+          }),
+        )
+      }}
       title="download for offline playback"
       className="font-pixel text-sm uppercase tracking-widest px-4 py-1 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
     >

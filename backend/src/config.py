@@ -47,7 +47,13 @@ MEDIA_TOKEN_SECRET: str = _env("MEDIA_TOKEN_SECRET", "")
 # Bound to a session (see media_token.py), so logout revokes it immediately; the
 # TTL is now just a backstop and re-fetch cadence, kept short. The web client
 # re-fetches ahead of expiry and AuthProvider polls it while signed in.
+# Long because the <audio> element re-uses the URL it was handed for the whole
+# track (Range requests included) — expiring mid-song would break playback.
 MEDIA_TOKEN_TTL_SEC: int = int(_env("MEDIA_TOKEN_TTL_SEC", "3600"))  # 1h
+# A file token is used once, right after the job finishes, so it needs none of
+# that headroom. Keeping it separate is what stops a leaked streaming token from
+# reaching the caller's completed downloads.
+FILE_TOKEN_TTL_SEC: int = int(_env("FILE_TOKEN_TTL_SEC", "120"))
 
 # CORS allow-list for the SPA dev server. Leave empty (or unset) in production
 # when the backend serves the SPA from the same origin — CORS is a no-op then.
@@ -172,6 +178,18 @@ MAX_CONCURRENT_DOWNLOADS: int = int(_env("YTDL_MAX_CONCURRENT_DOWNLOADS", "0")) 
 # playlist (or a pasted 10k-line list) could fill the library volume and run for
 # hours. Beyond the cap the import is truncated (and flagged to the client).
 MAX_IMPORT_TRACKS: int = int(_env("YTDL_MAX_IMPORT_TRACKS", "500"))
+
+# Nothing bounded request bodies: neither FastAPI nor uvicorn imposes a default,
+# and the only middleware was CORS. A single authenticated user could POST a
+# multi-megabyte playlist name straight into SQLite, or a pasted list that
+# `spotify.from_text` parses in full *before* MAX_IMPORT_TRACKS applies — on a
+# shared DB file and a small ARM box that degrades everyone.
+MAX_REQUEST_BYTES: int = int(_env("YTDL_MAX_REQUEST_BYTES", str(1024 * 1024)))
+# Generous next to MAX_IMPORT_TRACKS (500 lines is ~40 KB) while keeping the
+# in-memory parse bounded.
+MAX_IMPORT_SOURCE_CHARS: int = int(_env("YTDL_MAX_IMPORT_SOURCE_CHARS", "262144"))
+# One user cannot fill the data volume with empty playlists either.
+MAX_PLAYLISTS_PER_USER: int = int(_env("YTDL_MAX_PLAYLISTS_PER_USER", "500"))
 
 # Hard ceiling on a single ffmpeg merge/transcode pass. A hung ffmpeg (rare, but
 # it can wedge on a corrupt stream) would otherwise block its download worker

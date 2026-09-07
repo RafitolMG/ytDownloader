@@ -13,6 +13,7 @@ same prefixes constantly and the results don't shift second-by-second.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -38,23 +39,36 @@ class _TTLCache:
         self.ttl = ttl_seconds
         self.max_entries = max_entries
         self._store: dict[str, tuple[Any, float]] = {}
+        # Every caller of these caches fans out over a thread pool, so reads and
+        # evictions race: an unguarded eviction while another thread iterates
+        # raises "dictionary changed size during iteration".
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> Any | None:
-        entry = self._store.get(key)
-        if entry is None:
-            return None
-        value, ts = entry
-        if time.time() - ts > self.ttl:
-            self._store.pop(key, None)
-            return None
-        return value
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            value, ts = entry
+            if time.time() - ts > self.ttl:
+                self._store.pop(key, None)
+                return None
+            return value
 
     def set(self, key: str, value: Any) -> None:
-        # Refresh recency on re-set, then drop the oldest entries over the cap.
-        self._store.pop(key, None)
-        self._store[key] = (value, time.time())
-        while len(self._store) > self.max_entries:
-            self._store.pop(next(iter(self._store)), None)
+        with self._lock:
+            # Refresh recency on re-set, then drop the oldest entries over the cap.
+            self._store.pop(key, None)
+            self._store[key] = (value, time.time())
+            while len(self._store) > self.max_entries:
+                self._store.pop(next(iter(self._store)), None)
+
+
+class UpstreamUnavailable(Exception):
+    """The upstream extraction failed — as opposed to succeeding with no
+    results. Endpoints on a user-initiated path surface this as a 502 so the
+    client can tell an outage from an empty catalog; at-rest feeds may still
+    degrade to an empty list. It must never be cached."""
 
 
 _SUGGEST_CACHE = _TTLCache(ttl_seconds=60)
@@ -101,8 +115,10 @@ def suggest(q: str, hl: str = "es") -> list[str]:
         suggestions = data[1] if isinstance(data, list) and len(data) > 1 else []
         suggestions = [s for s in suggestions if isinstance(s, str)]
     except Exception as e:
+        # Best-effort (it's a typeahead), but don't cache the miss — that kept
+        # the dropdown empty for a minute after the upstream recovered.
         log.warning("suggest failed for q=%r: %s", q, e)
-        suggestions = []
+        return []
 
     _SUGGEST_CACHE.set(cache_key, suggestions)
     return suggestions
@@ -189,7 +205,8 @@ def related(video_id: str, limit: int = 20) -> list[dict]:
         return []
     limit = max(1, min(limit, 50))
 
-    cached = _RELATED_CACHE.get(video_id)
+    cache_key = f"{limit}:{video_id}"
+    cached = _RELATED_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
@@ -219,7 +236,7 @@ def related(video_id: str, limit: int = 20) -> list[dict]:
         for e in entries
         if (shaped := _shape_entry(e)) is not None and shaped["id"] != video_id
     ]
-    _RELATED_CACHE.set(video_id, results)
+    _RELATED_CACHE.set(cache_key, results)
     return results
 
 
@@ -294,7 +311,9 @@ def _entry_thumb(entry: dict) -> str | None:
 
 
 def _extract_album_raw(album_id: str) -> dict | None:
-    """Flat-extract an album's track playlist. Returns the raw yt-dlp info."""
+    """Flat-extract an album's track playlist. Returns the raw yt-dlp info, or
+    raises `UpstreamUnavailable` — `None` from here used to be indistinguishable
+    from "no such album", which the API then reported as a 404."""
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -308,7 +327,7 @@ def _extract_album_raw(album_id: str) -> dict | None:
             return ydl.extract_info(album_browse_url(album_id), download=False)
     except Exception as e:
         log.warning("album extract failed for %r: %s", album_id, e)
-        return None
+        raise UpstreamUnavailable(str(e)) from e
 
 
 def _album_header(album_id: str, info: dict, entries: list[dict]) -> dict:
@@ -334,11 +353,15 @@ def _album_card(album_id: str) -> dict | None:
     return _album_header(album_id, info, entries)
 
 
+
+
+
 def _search_album_ids(q: str, limit: int) -> list[str]:
     """The `#albums` YouTube Music search → album browse ids, relevance-ordered.
 
     Flat mode returns ids only (no titles), so callers fetch each album's
-    metadata separately. Returns [] on any upstream failure.
+    metadata separately. Raises `UpstreamUnavailable` if the search itself
+    failed — an empty list means the query genuinely matched no albums.
     """
     ydl_opts = {
         "quiet": True,
@@ -354,7 +377,7 @@ def _search_album_ids(q: str, limit: int) -> list[str]:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
         log.warning("album search failed for q=%r: %s", q, e)
-        return []
+        raise UpstreamUnavailable(str(e)) from e
 
     album_ids: list[str] = []
     for e in (info or {}).get("entries") or []:
@@ -385,6 +408,8 @@ def search_albums(q: str, limit: int = 12) -> list[dict]:
     if cached is not None:
         return cached
 
+    # Not cached and not swallowed: the caller needs to tell "youtube music is
+    # unreachable" from "this query has no albums".
     album_ids = _search_album_ids(q, limit)
 
     if not album_ids:

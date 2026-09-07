@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, wsUrl } from '@/shared/api/client'
+import { saveUrlToDevice } from '@/shared/lib/fileSaver'
 import type {
   FormatInfo,
   JobStatus,
@@ -29,21 +30,6 @@ const EMPTY_META: CaptureMetadata = {
   is_playlist: false,
   playlist_title: null,
   playlist_count: null,
-}
-
-// Programmatic anchor-click is more reliable than `window.location.href`:
-// setting `location.href` is treated as a navigation that the browser may
-// silently cancel (popup blockers, race with React re-renders, reverse
-// proxies that strip Content-Disposition). The `download` attribute on a
-// same-origin <a> guarantees the response is saved as a file.
-function triggerFileDownload(url: string, suggestedName: string) {
-  const a = document.createElement('a')
-  a.href = url
-  a.download = suggestedName
-  a.style.display = 'none'
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
 }
 
 export function useCapture() {
@@ -233,7 +219,23 @@ export function useCapture() {
             // emit `filename: null` — the page surfaces a "View library" CTA
             // instead of a browser download.
             if (data.filename) {
-              triggerFileDownload(api.fileUrl(id), data.filename)
+              const filename = data.filename
+              void (async () => {
+                try {
+                  // /api/file is media-token authed and the native saver fetches
+                  // outside the WebView (no cookie jar), so the URL has to carry
+                  // a token — fileUrl mints the file-scoped one.
+                  await saveUrlToDevice(await api.fileUrl(id), filename)
+                } catch (e) {
+                  setStatus('error')
+                  setPhase('error')
+                  setErrorMsg(
+                    e instanceof Error
+                      ? `couldn't save the file — ${e.message}`
+                      : "couldn't save the file",
+                  )
+                }
+              })()
             } else {
               setCompletedAsImport(true)
               setImportSummary({

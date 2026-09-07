@@ -58,6 +58,9 @@ type PlayerCtx = {
    * the current one). */
   canGoPrev: boolean
   isPlaying: boolean
+  /** Media is loading and cannot play yet. `isPlaying` alone can't say this:
+   *  the `play` event fires before the first frame is buffered. */
+  isBuffering: boolean
   // Live position/duration are NOT here — they tick many times a second and
   // would re-render every consumer. Read them from `usePlaybackTime()` instead.
   shuffle: boolean
@@ -127,6 +130,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
   /** Position within `order`. -1 when nothing is loaded. */
   const [pos, setPos] = useState(-1)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [isBuffering, setIsBuffering] = useState(false)
   // position/duration live in the external playbackStore, not React state — see
   // playbackStore.ts. The <audio> element itself remains the source of truth and
   // is read directly where a precise current value is needed (seek, mediaSession).
@@ -572,9 +576,19 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         setQueue([...curQueue, ...fresh])
         setOrder([...curOrder, ...fresh.map((_, i) => startIdx + i)])
         setPos(curOrder.length) // first newly-appended track's order position
+      } else {
+        // Settings promises radio is always on, so an unexplained stop reads as
+        // a bug. Say the queue is finished instead of just falling silent.
+        showToast({
+          message: "that's the end of the queue — no more like this to play",
+          variant: 'info',
+        })
       }
     } catch {
-      /* best-effort — radio is non-critical */
+      showToast({
+        message: "couldn't find more music to play — end of the queue",
+        variant: 'info',
+      })
     } finally {
       autoRadioBusyRef.current = false
     }
@@ -687,6 +701,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       canGoNext,
       canGoPrev,
       isPlaying,
+      isBuffering,
       shuffle,
       repeat,
       volume,
@@ -706,7 +721,7 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
       orderedQueue,
     }),
     [
-      current, coverUrl, queue, index, pos, canGoNext, canGoPrev, isPlaying,
+      current, coverUrl, queue, index, pos, canGoNext, canGoPrev, isPlaying, isBuffering,
       shuffle, repeat, volume, setVolume,
       play, togglePlay, next, prev, stop, seek, toggleShuffle, cycleRepeat,
       playNext, enqueue, removeFromQueueAt, jumpTo, orderedQueue,
@@ -720,6 +735,14 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
         ref={audioRef}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
+        // `play` fires before the first frame is buffered, so these are the only
+        // events that can tell "loading" from "playing". loadstart covers the
+        // first load, where `waiting` may never fire at all.
+        onLoadStart={() => setIsBuffering(true)}
+        onWaiting={() => setIsBuffering(true)}
+        onStalled={() => setIsBuffering(true)}
+        onPlaying={() => setIsBuffering(false)}
+        onCanPlay={() => setIsBuffering(false)}
         onTimeUpdate={(e) => setPlaybackTime({ position: e.currentTarget.currentTime })}
         onLoadedMetadata={(e) => {
           const el = e.currentTarget
@@ -752,12 +775,14 @@ export function AudioPlayerProvider({ children }: { children: ReactNode }) {
           // playable tracks (auto-radio is always on) instead of stopping.
           const atTail = pos + 1 >= order.length
           if (atTail && !(shuffle && queue.length > 1) && repeat !== 'all') {
-            void triggerAutoRadio()
+            setIsBuffering(true) // the tail is a fetch, not a stop — show it
+            void triggerAutoRadio().finally(() => setIsBuffering(false))
             return
           }
           advanceOrReshuffle()
         }}
         onError={() => {
+          setIsBuffering(false)
           const el = audioRef.current
           const cur = current
           // Ignore spurious errors when nothing is genuinely loaded (e.g. the

@@ -12,6 +12,7 @@ import os
 import sqlite3
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
@@ -33,6 +34,28 @@ _write_lock = threading.Lock()
 
 # ── Connection / schema ───────────────────────────────────────────────────────
 
+def _fold(value: "str | None") -> "str | None":
+    """Lowercase and strip diacritics. SQLite's LIKE only case-folds ASCII, so
+    without this a catalog full of Spanish titles answers `cancion` with nothing
+    and `ЗАВОД` only to an exact-case query."""
+    if value is None:
+        return None
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+# `%` and `_` are LIKE metacharacters: a user typing `%` in the search box
+# matched every row. Escape them (and the escape character itself) so the term
+# is matched literally.
+_LIKE_SPECIALS = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
+
+
+def _like_contains(query: str) -> str:
+    """A `LIKE ? ESCAPE '\\'` term matching `query` as a literal substring of a
+    `fold()`-ed column."""
+    return f"%{(_fold(query) or '').translate(_LIKE_SPECIALS)}%"
+
+
 def _connect() -> sqlite3.Connection:
     os.makedirs(_DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10)
@@ -40,6 +63,7 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.create_function("fold", 1, _fold, deterministic=True)
     return conn
 
 
@@ -272,12 +296,25 @@ def _migrate_jobs_as_file(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN as_file INTEGER NOT NULL DEFAULT 0")
 
 
+def _migrate_jobs_retry_inputs(conn: sqlite3.Connection) -> None:
+    # The rest of what retry needs to replay a job faithfully. `own` was lost, so
+    # retrying a catalog-only fetch silently favourited the track; `import_source`
+    # was never stored at all, so a track-list import had nothing to replay and
+    # was routed to the playlist handler, which rejected its sentinel url.
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "own" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN own INTEGER NOT NULL DEFAULT 1")
+    if "import_source" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN import_source TEXT")
+
+
 # (version, migration_fn) in apply order. Bump past `current` runs only the new ones.
 _MIGRATIONS: list[tuple[int, Any]] = [
     (1, _migrate_jobs_owner_id),
     (2, _migrate_tracks_album),
     (3, _migrate_drop_track_likes),
     (4, _migrate_jobs_as_file),
+    (5, _migrate_jobs_retry_inputs),
 ]
 
 
@@ -331,14 +368,20 @@ def create_job(
     resolution: str | None = None,
     ext: str | None = None,
     owner_id: str | None = None,
+    own: bool = True,
+    import_source: str | None = None,
 ) -> None:
+    """`own` and `import_source` exist so retry can replay the job exactly —
+    see `_migrate_jobs_retry_inputs`. `import_source` is the caller's pasted
+    track list and must not be served back out; the job routes strip it."""
     with _write() as conn:
         conn.execute(
             """
             INSERT INTO jobs (
                 id, url, format_code, status, progress_pct,
-                is_playlist, as_file, resolution, ext, owner_id, created_at
-            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                is_playlist, as_file, resolution, ext, owner_id, own,
+                import_source, created_at
+            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -350,6 +393,8 @@ def create_job(
                 resolution,
                 ext,
                 owner_id,
+                1 if own else 0,
+                import_source,
                 _now(),
             ),
         )
@@ -823,7 +868,8 @@ def list_catalog(
     """Return every track in the shared registry, annotated with social state
     relative to `viewer_id`: `is_owned`, `owner_count`.
 
-    `query` is a case-insensitive substring match against title/artist.
+    `query` is an accent- and case-insensitive literal substring match against
+    title/artist.
     `sort` is one of `_CATALOG_SORTS` keys; unknown values fall back to 'newest'.
     `owned_only` restricts results to tracks `viewer_id` has in their library —
     this is what powers the catalog's "mine" view (the former Library page).
@@ -841,9 +887,11 @@ def list_catalog(
     conditions: list[str] = []
     where_params: list[Any] = []
     if query:
-        conditions.append("(t.title LIKE ? OR t.artist LIKE ?)")
-        wildcard = f"%{query}%"
-        where_params.extend([wildcard, wildcard])
+        conditions.append(
+            r"(fold(t.title) LIKE ? ESCAPE '\' OR fold(t.artist) LIKE ? ESCAPE '\')"
+        )
+        term = _like_contains(query)
+        where_params.extend([term, term])
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
 
     having = ""
@@ -1274,7 +1322,9 @@ def update_playlist(
     visibility: str | None = None,
     cover_url: str | None = None,
 ) -> bool:
-    """Partial update. Returns True iff a row was modified."""
+    """Partial update. Returns True iff a row was modified — False means the
+    patch was empty. Raises ValueError on an invalid `visibility`; returning
+    False for that used to discard the valid fields alongside it."""
     updates: list[str] = []
     params: list[Any] = []
     if name is not None:
@@ -1285,7 +1335,7 @@ def update_playlist(
         params.append(description)
     if visibility is not None:
         if visibility not in _VISIBILITIES:
-            return False
+            raise ValueError(f"invalid visibility: {visibility!r}")
         updates.append("visibility = ?")
         params.append(visibility)
     if cover_url is not None:
@@ -1308,6 +1358,16 @@ def delete_playlist(playlist_id: str) -> bool:
     with _write() as conn:
         cur = conn.execute("DELETE FROM playlists WHERE id = ?", (playlist_id,))
         return cur.rowcount > 0
+
+
+def count_playlists(owner_id: str) -> int:
+    """How many playlists this user owns — the create route caps it so one
+    account can't fill the data volume with rows."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM playlists WHERE owner_id = ?", (owner_id,)
+    ).fetchone()
+    return int(row["n"]) if row else 0
 
 
 def list_playlists(
