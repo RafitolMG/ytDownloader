@@ -2028,7 +2028,12 @@ async def album_resolve(
         owned_titles = {r.get("title") for r in owned if r.get("title")}
         q = f"{artist} {title_norm}".strip()
         album = search_mod.resolve_album(
-            q, owned_ids=owned_ids, owned_titles=owned_titles
+            q,
+            owned_ids=owned_ids,
+            owned_titles=owned_titles,
+            # The artist sharpens most searches but buries anything YouTube
+            # Music credits to someone else (game soundtracks, compilations).
+            fallback_q=title_norm,
         )
         if album is None:
             return None

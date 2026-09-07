@@ -483,6 +483,7 @@ def resolve_album(
     owned_ids: set[str] | None = None,
     limit: int = 6,
     owned_titles: set[str] | None = None,
+    fallback_q: str | None = None,
 ) -> dict | None:
     """Resolve a free-text "artist title" query to the best-matching YouTube
     Music album and return its full detail (header + ordered tracklist), same
@@ -501,6 +502,13 @@ def resolve_album(
     "Dillom Por cesárea" to the 18-track album that merely *contains* that song.
     With no signal at all the fullest result is still used, and the caller
     decides whether to trust it.
+
+    `fallback_q` is tried when the first query turns up nothing we own. Naming
+    the artist normally sharpens the search, but it narrows it against anything
+    YouTube Music credits differently: "Tsukasa Saitoh ELDEN RING SHADOW OF THE
+    ERDTREE ORIGINAL SOUND TRACK" returned exactly one album — the base game's,
+    with none of the DLC tracks — while the bare title returned the right one,
+    36 tracks, holding both the caller owned.
     """
     q = q.strip()
     if not q:
@@ -509,21 +517,12 @@ def resolve_album(
     titles = {t for t in (normalize_title(t) for t in (owned_titles or ())) if t}
     limit = max(1, min(limit, 10))
 
-    album_ids = _search_album_ids(q, limit)
-    if not album_ids:
-        return None
-
     def _one(aid: str) -> dict | None:
         try:
             return get_album(aid)  # per-album cached (30min)
         except Exception:
             log.warning("resolve: album fetch failed for %r", aid, exc_info=True)
             return None
-
-    with ThreadPoolExecutor(max_workers=min(6, len(album_ids))) as ex:
-        details = [d for d in ex.map(_one, album_ids) if d]
-    if not details:
-        return None
 
     def _score(d: dict) -> tuple[int, int]:
         tracks = d.get("tracks") or []
@@ -538,4 +537,23 @@ def resolve_album(
         overlap = len(by_id) + len(by_title)
         return (overlap, d.get("track_count") or len(tracks))
 
-    return max(details, key=_score)
+    # Widen only when the precise query found nothing we own, and only when
+    # there is something to recognise — with no signal every candidate scores 0
+    # and a second search would just cost a round-trip.
+    queries = [q]
+    if fallback_q and fallback_q != q and (owned or titles):
+        queries.append(fallback_q)
+
+    best: dict | None = None
+    for query in queries:
+        album_ids = _search_album_ids(query, limit)
+        if not album_ids:
+            continue
+        with ThreadPoolExecutor(max_workers=min(6, len(album_ids))) as ex:
+            details = [d for d in ex.map(_one, album_ids) if d]
+        for d in details:
+            if best is None or _score(d) > _score(best):
+                best = d
+        if best is not None and _score(best)[0] > 0:
+            break  # it holds something we own — no need to widen
+    return best
