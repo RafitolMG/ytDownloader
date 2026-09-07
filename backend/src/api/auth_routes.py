@@ -185,7 +185,10 @@ def whoami(user: CurrentUser = Depends(current_user)):
 
 
 @router.get("/media-token")
-def media_token(user: CurrentUser = Depends(current_user)):
+def media_token(
+    scope: str = media_token_mod.SCOPE_STREAM,
+    user: CurrentUser = Depends(current_user),
+):
     """Hand the authenticated client a short-lived, signed, media-scoped token to
     append to media URLs.
 
@@ -195,8 +198,15 @@ def media_token(user: CurrentUser = Depends(current_user)):
     request — for a token to put in the `mt` query param. The token is NOT the
     session id: it's HMAC-signed, carries only user/role + an expiry, and dies on
     its own, so a leaked media URL can't be replayed as a session. The client
-    re-fetches before it expires. The web app never calls this (cookie suffices)."""
-    token, expires_in = media_token_mod.mint(user.user_id, user.session_id)
+    re-fetches before it expires. The web app never calls this (cookie suffices).
+
+    `scope` picks the route class: "stream" (default, an hour — the <audio>
+    element re-uses one URL for a whole track) or "file", a seconds-long token
+    for fetching one finished job, so a leaked streaming token can't reach it."""
+    try:
+        token, expires_in = media_token_mod.mint(user.user_id, user.session_id, scope)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="unknown media token scope")
     return {"token": token, "expires_in": expires_in}
 
 

@@ -22,12 +22,13 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, W
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src import (
     catalog_categories as categories_mod,
     config,
     db,
+    media_token as media_token_mod,
     rate_limit,
     search as search_mod,
     spotify,
@@ -36,7 +37,7 @@ from src import (
 )
 from src.api.admin_routes import router as admin_router
 from src.api.auth_routes import router as auth_router
-from src.auth import CurrentUser, current_user, media_user
+from src.auth import CurrentUser, current_user, media_user, media_user_for
 from src.extraction_pool import run_extraction
 from src.discovery import (
     _daily_mixes_impl,
@@ -72,6 +73,31 @@ def _public_job(row: dict) -> dict:
     return {k: v for k, v in row.items() if k not in _JOB_INTERNAL_COLS}
 
 
+# yt-dlp and httpx error strings routinely carry the resolved cookiefile path
+# (`/tmp/yt-cookies-*.txt`), the cache dir, and signed googlevideo URLs. Those
+# used to be handed straight to the client and persisted in `jobs.error_message`,
+# disclosing the server's filesystem layout to any authenticated user. The full
+# text still goes to the server log.
+_REDACTIONS = (
+    (re.compile(r"""https?://[^\s"']*googlevideo\.com[^\s"']*"""), "<media-url>"),
+    (re.compile(r"""(?<![\w.])/(?:tmp|home|root|app|var|usr|etc)/[^\s"':,)]*"""), "<path>"),
+    (re.compile(r"""[A-Za-z]:\\[^\s"':,)]*"""), "<path>"),
+)
+_ERROR_MAX_CHARS = 300
+
+
+def safe_error(e: object) -> str:
+    """User-facing text for an upstream failure: paths and signed URLs stripped,
+    length bounded. Log the original separately when you need it."""
+    text = str(e).strip() or "unexpected error"
+    for pattern, replacement in _REDACTIONS:
+        text = pattern.sub(replacement, text)
+    text = " ".join(text.split())
+    if len(text) > _ERROR_MAX_CHARS:
+        text = text[: _ERROR_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown. Replaces the deprecated @app.on_event handlers: init the
@@ -85,6 +111,10 @@ async def lifespan(app: FastAPI):
     finally:
         reaper.cancel()
 
+
+# `/api/file` serves a completed job's own bytes, so it takes the narrow,
+# seconds-long token rather than the hour-long streaming one.
+file_media_user = media_user_for(media_token_mod.SCOPE_FILE)
 
 app = FastAPI(title="YT Downloader", lifespan=lifespan)
 
@@ -526,7 +556,7 @@ async def get_resolutions(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=safe_error(e))
 
 
 def _throttled_progress(job_id: str, progress_queue: _ProgressHub):
@@ -705,8 +735,8 @@ def start_download(
         except Exception as e:
             traceback.print_exc()
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     def run():
         try:
@@ -776,8 +806,8 @@ def start_download(
             traceback.print_exc()
             shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     def run_audio_file():
         try:
@@ -812,8 +842,8 @@ def start_download(
             traceback.print_exc()
             shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     if is_audio_import:
         target = run_audio_import
@@ -883,7 +913,7 @@ def start_playlist_download(
     try:
         codec, bitrate, ext = ytDownloaderFunctions.parse_audio_quality(effective_quality)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=safe_error(e))
 
     job_id = str(uuid.uuid4())
     progress_queue: _ProgressHub = _ProgressHub()
@@ -1044,7 +1074,7 @@ def start_playlist_download(
                         "index": idx,
                         "total": total,
                         "title": title,
-                        "message": str(track_err),
+                        "message": safe_error(track_err),
                     })
 
                 db.update_progress(job_id, idx / total * 100)
@@ -1067,8 +1097,8 @@ def start_playlist_download(
         except Exception as e:
             traceback.print_exc()
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     def run_zip():
         # Stage every track audio file in tmp_dir, then zip them as a single
@@ -1142,7 +1172,7 @@ def start_playlist_download(
                         "index": idx,
                         "total": total,
                         "title": title,
-                        "message": str(track_err),
+                        "message": safe_error(track_err),
                     })
 
                 db.update_progress(job_id, idx / total * 100)
@@ -1181,8 +1211,8 @@ def start_playlist_download(
             traceback.print_exc()
             shutil.rmtree(tmp_dir, ignore_errors=True)
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     target = run_zip if body.as_file else run
     _submit_job(target)
@@ -1339,7 +1369,7 @@ def start_tracklist_import(
                     skipped += 1
                     progress_queue.put({
                         "type": "track_skipped", "index": idx, "total": total,
-                        "title": label, "message": str(track_err),
+                        "title": label, "message": safe_error(track_err),
                     })
 
                 db.update_progress(job_id, idx / total * 100)
@@ -1360,8 +1390,8 @@ def start_tracklist_import(
         except Exception as e:
             traceback.print_exc()
             _jobs.pop(job_id, None)
-            db.fail(job_id, str(e))
-            progress_queue.put({"type": "error", "message": str(e)})
+            db.fail(job_id, safe_error(e))
+            progress_queue.put({"type": "error", "message": safe_error(e)})
 
     _submit_job(run)
     return {"job_id": job_id}
@@ -1479,7 +1509,7 @@ async def progress_ws(websocket: WebSocket, job_id: str):
 def serve_file(
     job_id: str,
     background_tasks: BackgroundTasks,
-    user: CurrentUser = Depends(media_user),
+    user: CurrentUser = Depends(file_media_user),
 ):
     """Serve the downloaded file and clean up the temp directory afterwards."""
     row = db.get(job_id)
@@ -1620,7 +1650,7 @@ async def catalog_discover(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="search timed out")
     except search_mod.UpstreamUnavailable as e:
-        raise HTTPException(status_code=502, detail=f"youtube search unavailable: {e}")
+        raise HTTPException(status_code=502, detail=f"youtube search unavailable: {safe_error(e)}")
 
 
 @app.get("/api/catalog/suggestions")
@@ -1834,7 +1864,7 @@ async def catalog_category(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="category timed out")
     except search_mod.UpstreamUnavailable as e:
-        raise HTTPException(status_code=502, detail=f"youtube search unavailable: {e}")
+        raise HTTPException(status_code=502, detail=f"youtube search unavailable: {safe_error(e)}")
     return {
         "category": {k: cat[k] for k in ("slug", "title", "accent")},
         **feed,
@@ -1934,9 +1964,9 @@ async def albums_search(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="album search timed out")
     except search_mod.UpstreamUnavailable as e:
-        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {e}")
+        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {safe_error(e)}")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"album search failed: {e}")
+        raise HTTPException(status_code=502, detail=f"album search failed: {safe_error(e)}")
     return {"albums": albums}
 
 
@@ -2003,7 +2033,7 @@ async def album_resolve(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="album resolve timed out")
     except search_mod.UpstreamUnavailable as e:
-        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {e}")
+        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {safe_error(e)}")
     if result is None:
         raise HTTPException(status_code=404, detail="album not found")
     return result
@@ -2033,7 +2063,7 @@ async def album_detail(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="album load timed out")
     except search_mod.UpstreamUnavailable as e:
-        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {e}")
+        raise HTTPException(status_code=502, detail=f"youtube music unavailable: {safe_error(e)}")
     if result is None:
         raise HTTPException(status_code=404, detail="album not found")
     return result
@@ -2126,6 +2156,32 @@ class PlaylistCreate(BaseModel):
     visibility: Literal["public", "private"] = "private"
 
 
+# A playlist cover is always a thumbnail from the track it came from, and the UI
+# has no field to type one — but `cover_url` was writable over the API, stored
+# verbatim, and rendered by every viewer of a public playlist. That made it a
+# cross-user beacon: point it at your own host and collect the IP, User-Agent and
+# Referer of everyone who opens the Playlists page.
+_COVER_HOSTS = (
+    "i.ytimg.com",
+    "i9.ytimg.com",
+    "yt3.googleusercontent.com",
+    "lh3.googleusercontent.com",
+    "music.youtube.com",
+)
+
+
+def _validate_cover_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (
+        host in _COVER_HOSTS or host.endswith(".ggpht.com")
+    ):
+        raise ValueError("cover_url must be an https image from youtube")
+    return value
+
+
 class PlaylistUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
@@ -2134,6 +2190,8 @@ class PlaylistUpdate(BaseModel):
     # other field in the patch too, and the route reported success anyway.
     visibility: Literal["public", "private"] | None = None
     cover_url: str | None = Field(default=None, max_length=2048)
+
+    _check_cover = field_validator("cover_url")(_validate_cover_url)
 
 
 class PlaylistTrackKey(BaseModel):
@@ -2744,7 +2802,7 @@ async def search_videos(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="search timed out")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"search failed: {e}")
+        raise HTTPException(status_code=502, detail=f"search failed: {safe_error(e)}")
 
 
 @app.get("/api/history")

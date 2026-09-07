@@ -47,7 +47,13 @@ MEDIA_TOKEN_SECRET: str = _env("MEDIA_TOKEN_SECRET", "")
 # Bound to a session (see media_token.py), so logout revokes it immediately; the
 # TTL is now just a backstop and re-fetch cadence, kept short. The web client
 # re-fetches ahead of expiry and AuthProvider polls it while signed in.
+# Long because the <audio> element re-uses the URL it was handed for the whole
+# track (Range requests included) — expiring mid-song would break playback.
 MEDIA_TOKEN_TTL_SEC: int = int(_env("MEDIA_TOKEN_TTL_SEC", "3600"))  # 1h
+# A file token is used once, right after the job finishes, so it needs none of
+# that headroom. Keeping it separate is what stops a leaked streaming token from
+# reaching the caller's completed downloads.
+FILE_TOKEN_TTL_SEC: int = int(_env("FILE_TOKEN_TTL_SEC", "120"))
 
 # CORS allow-list for the SPA dev server. Leave empty (or unset) in production
 # when the backend serves the SPA from the same origin — CORS is a no-op then.

@@ -91,3 +91,72 @@ def test_progress_hub_drops_events_published_before_subscribing():
         assert sub.get_nowait() == {"type": "done"}
 
     asyncio.run(scenario())
+
+
+# ── Media token scoping, cover allowlist, error redaction ────────────────────
+
+def test_a_streaming_token_cannot_fetch_a_job_file():
+    """A `mt` lifted from an access log buys catalog streaming — not the
+    caller's finished downloads."""
+    from src import media_token
+
+    stream, _ = media_token.mint("u1", "s1", media_token.SCOPE_STREAM)
+    assert media_token.verify(stream, scope=media_token.SCOPE_STREAM) is not None
+    assert media_token.verify(stream, scope=media_token.SCOPE_FILE) is None
+
+    file_token, ttl = media_token.mint("u1", "s1", media_token.SCOPE_FILE)
+    assert media_token.verify(file_token, scope=media_token.SCOPE_FILE) is not None
+    assert media_token.verify(file_token, scope=media_token.SCOPE_STREAM) is None
+    assert ttl <= config.MEDIA_TOKEN_TTL_SEC
+
+
+def test_file_route_takes_the_narrow_scope():
+    from src.api.routes import app
+
+    for route in app.routes:
+        if getattr(route, "path", None) == "/api/file/{job_id}":
+            names = {d.call.__name__ for d in route.dependant.dependencies if d.call}
+            assert names == {"dependency"}, names  # media_user_for(...), not media_user
+            return
+    raise AssertionError("route not found")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://attacker.example/pixel.png?u=victim",
+        "http://i.ytimg.com/vi/abc.jpg",
+        "https://evil.i.ytimg.com.attacker.net/x.png",
+        "javascript:alert(1)",
+    ],
+)
+def test_playlist_cover_rejects_a_third_party_beacon(url):
+    from pydantic import ValidationError
+
+    from src.api.routes import PlaylistUpdate
+
+    with pytest.raises(ValidationError):
+        PlaylistUpdate(cover_url=url)
+
+
+def test_playlist_cover_accepts_a_youtube_thumbnail():
+    from src.api.routes import PlaylistUpdate
+
+    ok = "https://i.ytimg.com/vi/abc/hqdefault.jpg"
+    assert PlaylistUpdate(cover_url=ok).cover_url == ok
+
+
+def test_error_text_loses_paths_and_signed_urls_but_keeps_the_message():
+    from src.api.routes import safe_error
+
+    assert safe_error("cookiefile /tmp/yt-cookies-ab12.txt not found") == (
+        "cookiefile <path> not found"
+    )
+    assert "googlevideo" not in safe_error(
+        "403 for url https://rr3---sn-x.googlevideo.com/videoplayback?sig=SECRET"
+    )
+    # The part the user needs must survive.
+    assert safe_error("Sign in to confirm you're not a bot") == (
+        "Sign in to confirm you're not a bot"
+    )
+    assert len(safe_error("x" * 5000)) <= 300

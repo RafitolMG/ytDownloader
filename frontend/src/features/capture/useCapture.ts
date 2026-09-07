@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, ensureMediaToken, wsUrl } from '@/shared/api/client'
+import { api, wsUrl } from '@/shared/api/client'
 import { saveUrlToDevice } from '@/shared/lib/fileSaver'
 import type {
   FormatInfo,
@@ -223,10 +223,9 @@ export function useCapture() {
               void (async () => {
                 try {
                   // /api/file is media-token authed and the native saver fetches
-                  // outside the WebView (no cookie jar) — mint the token first so
-                  // api.fileUrl carries it.
-                  await ensureMediaToken()
-                  await saveUrlToDevice(api.fileUrl(id), filename)
+                  // outside the WebView (no cookie jar), so the URL has to carry
+                  // a token — fileUrl mints the file-scoped one.
+                  await saveUrlToDevice(await api.fileUrl(id), filename)
                 } catch (e) {
                   setStatus('error')
                   setPhase('error')
