@@ -405,6 +405,13 @@ def search_albums(q: str, limit: int = 12) -> list[dict]:
     return cards
 
 
+def _album_copy(album: dict) -> dict:
+    """Copy of a cached album, with its own track list. The cache hands the same
+    dict to every request for 30 minutes, so a caller that reshapes what it gets
+    back would empty the album for everyone until the entry expires."""
+    return {**album, "tracks": list(album.get("tracks") or [])}
+
+
 def get_album(album_id: str) -> dict | None:
     """Full album: header + the ordered tracklist (shaped like search results)."""
     album_id = (album_id or "").strip()
@@ -413,7 +420,7 @@ def get_album(album_id: str) -> dict | None:
 
     cached = _ALBUM_CACHE.get(album_id)
     if cached is not None:
-        return cached
+        return _album_copy(cached)
 
     info = _extract_album_raw(album_id)
     if not info:
@@ -423,7 +430,7 @@ def get_album(album_id: str) -> dict | None:
 
     result = {**_album_header(album_id, info, entries), "tracks": tracks}
     _ALBUM_CACHE.set(album_id, result)
-    return result
+    return _album_copy(result)
 
 
 def resolve_album(

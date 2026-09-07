@@ -395,12 +395,21 @@ function LibraryAlbumView({
     () => new Set(album.tracks.map((t) => t.video_id)),
     [album.tracks],
   )
-  // Trust the resolved tracklist only if it contains *every* track we own —
-  // otherwise the merged view (which renders the resolved list) would silently
-  // drop an owned track that isn't in it. When coverage isn't complete we fall
-  // back to the owned-only list, which is correct, just without "missing" rows.
+  // Trust the resolved tracklist once a majority of the tracks we own are on it.
+  // Demanding *every* one was too strict: a track grabbed from plain YouTube
+  // carries a different video id than its YouTube Music twin, and one such id
+  // used to hide the missing-tracks view for the whole album. The owned tracks
+  // the edition doesn't list are rendered below it instead of being dropped.
   const matchedOwned = remoteTracks.filter((t) => ownedVids.has(t.video_id)).length
-  const confident = remoteTracks.length > 0 && matchedOwned === ownedVids.size
+  const confident = remoteTracks.length > 0 && matchedOwned * 2 > ownedVids.size
+
+  const remoteVids = useMemo(
+    () => new Set(remoteTracks.map((t) => t.video_id)),
+    [remoteTracks],
+  )
+  const strayOwned = confident
+    ? album.tracks.filter((t) => !remoteVids.has(t.video_id))
+    : []
 
   // The album's tracks not yet in the catalog — the "download missing" targets.
   const missingItems = confident
@@ -417,7 +426,7 @@ function LibraryAlbumView({
 
   const playAlbum = () =>
     confident && dbItems.length > 0
-      ? player.play(dbItems.map(toLibraryItem), 0)
+      ? player.play([...dbItems.map(toLibraryItem), ...strayOwned], 0)
       : player.play(album.tracks, 0)
 
   return (
@@ -428,7 +437,7 @@ function LibraryAlbumView({
         artist={album.artist}
         meta={[
           confident
-            ? `${ownedVids.size} of ${remoteTracks.length} tracks`
+            ? `${matchedOwned} of ${remoteTracks.length} tracks`
             : `${album.tracks.length} tracks`,
           album.year ? String(album.year) : null,
           missingCount > 0 ? `${missingCount} missing` : null,
@@ -459,38 +468,65 @@ function LibraryAlbumView({
         }
       />
 
-      {resolved.isLoading && (
+      {resolved.isFetching && (
         <div className="font-pixel text-ink-mid mb-3">
           ··· finding missing tracks ···
         </div>
       )}
 
+      {/* Say it out loud: without this the owned tracks read as the full album. */}
+      {!resolved.isFetching && !confident && (
+        <div className="font-pixel text-xs text-ink-lo mb-3 flex items-center gap-2 flex-wrap">
+          <span>
+            couldn't match this album on youtube music — showing the{' '}
+            {album.tracks.length} track{album.tracks.length === 1 ? '' : 's'} you
+            own, so some may be missing.
+          </span>
+          <button
+            type="button"
+            onClick={() => resolved.refetch()}
+            className="uppercase tracking-widest px-2 py-1 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+          >
+            ↻ retry
+          </button>
+        </div>
+      )}
+
       {confident ? (
-        <ul className="card-vapor rounded-sm divide-y divide-border">
-          {remoteTracks.map((t, idx) => {
-            const hit = dbById.get(t.video_id)
-            return hit ? (
-              <CatalogRow
-                key={t.video_id}
-                item={hit}
-                position={idx + 1}
-                allItems={dbItems}
-              />
-            ) : (
-              <ExternalRow key={t.video_id} item={t} position={idx + 1} />
-            )
-          })}
-        </ul>
+        <>
+          <ul className="card-vapor rounded-sm divide-y divide-border">
+            {remoteTracks.map((t, idx) => {
+              const hit = dbById.get(t.video_id)
+              return hit ? (
+                <CatalogRow
+                  key={t.video_id}
+                  item={hit}
+                  position={idx + 1}
+                  allItems={dbItems}
+                />
+              ) : (
+                <ExternalRow key={t.video_id} item={t} position={idx + 1} />
+              )
+            })}
+          </ul>
+          {strayOwned.length > 0 && (
+            <div className="mt-5">
+              <SectionHeader title="▤ also in your library" note="not on this edition" />
+              <OwnedTrackList tracks={strayOwned} />
+            </div>
+          )}
+        </>
       ) : (
-        <OwnedTrackList album={album} />
+        <OwnedTrackList tracks={album.tracks} />
       )}
     </section>
   )
 }
 
-/** The owned-only tracklist for a library album — shown while the full album
- * resolves, and as the fallback when it can't be matched. */
-function OwnedTrackList({ album }: { album: LibraryAlbum }) {
+/** A plain list of owned tracks — the whole library album while it resolves (or
+ * when it can't be matched), and the owned tracks the resolved edition doesn't
+ * list. */
+function OwnedTrackList({ tracks }: { tracks: LibraryItem[] }) {
   const player = useAudioPlayer()
   const isCurrentAlbum = (t: LibraryItem) =>
     player.current?.video_id === t.video_id &&
@@ -499,17 +535,17 @@ function OwnedTrackList({ album }: { album: LibraryAlbum }) {
 
   return (
     <ul className="card-vapor rounded-sm divide-y divide-border">
-      {album.tracks.map((t, idx) => (
+      {tracks.map((t, idx) => (
         <li
           key={`${t.video_id}/${t.codec}/${t.bitrate}`}
           role="button"
           tabIndex={0}
           aria-label={`play ${t.title ?? t.video_id}`}
-          onClick={() => player.play(album.tracks, idx)}
+          onClick={() => player.play(tracks, idx)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault()
-              player.play(album.tracks, idx)
+              player.play(tracks, idx)
             }
           }}
           className={`flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 cursor-pointer transition ${
@@ -601,13 +637,26 @@ function RemoteAlbumView({
         }
       />
 
-      {detail.isLoading && (
+      {detail.isFetching && (
         <div className="font-pixel text-ink-mid">··· loading album ···</div>
       )}
       {detail.isError && (
         <div className="font-pixel text-crit">
           couldn't load this album —{' '}
           {detail.error instanceof Error ? detail.error.message : 'unknown'}
+        </div>
+      )}
+
+      {!detail.isFetching && !detail.isError && tracks.length === 0 && (
+        <div className="card-vapor rounded-sm p-8 text-center font-pixel text-ink-lo">
+          this album came back without a tracklist.
+          <button
+            type="button"
+            onClick={() => detail.refetch()}
+            className="ml-3 uppercase tracking-widest text-xs px-2 py-1 border border-cool/60 text-cool hover:bg-cool/10 transition rounded-xs"
+          >
+            ↻ retry
+          </button>
         </div>
       )}
 

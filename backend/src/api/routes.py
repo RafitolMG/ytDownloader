@@ -1832,7 +1832,8 @@ def _album_payload(viewer_id: str, album: dict) -> dict:
     matched by exact video_id against the whole registry — not a popular top-N —
     so an owned track is never misfiled as "missing" just because the user's
     catalog is large."""
-    tracks = album.pop("tracks", [])
+    tracks = album.get("tracks") or []
+    header = {k: v for k, v in album.items() if k != "tracks"}
     ordered: list[dict] = []
     ids: list[str] = []
     seen: set[str] = set()
@@ -1845,7 +1846,7 @@ def _album_payload(viewer_id: str, album: dict) -> dict:
         ids.append(vid)
     by_id = {c["video_id"]: c for c in db.list_catalog_by_video_ids(viewer_id, ids)}
     db_items = [by_id[v] for v in ids if v in by_id]
-    return {"album": album, "tracks": ordered, "db": db_items}
+    return {"album": header, "tracks": ordered, "db": db_items}
 
 
 @app.get("/api/albums/resolve")
