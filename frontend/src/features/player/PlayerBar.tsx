@@ -194,7 +194,7 @@ export function PlayerBar() {
             onClick={() => setQueueOpen((v) => !v)}
             title="queue"
             aria-label="play queue"
-            className={`focus-vis font-pixel text-base w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center flex-shrink-0 transition rounded-xs border ${
+            className={`focus-vis font-pixel text-base w-10 h-10 sm:w-9 sm:h-9 flex items-center justify-center flex-shrink-0 transition rounded-xs border ${
               queueOpen
                 ? 'border-cool text-cool bg-cool/10 shadow-[var(--shadow-glow-cool)]'
                 : 'border-border text-ink-mid hover:text-cool hover:border-cool/70'
@@ -234,7 +234,7 @@ function PlayerButton({
     'focus-vis font-pixel text-sm sm:text-base flex items-center justify-center transition disabled:opacity-30 disabled:cursor-not-allowed rounded-xs border'
   const variant = primary
     ? 'w-10 h-10 sm:w-11 sm:h-11 border-hot bg-hot/15 text-ink-hi shadow-[var(--shadow-glow-hot)] hover:bg-hot/25'
-    : 'w-8 h-8 sm:w-9 sm:h-9 border-border text-ink-mid hover:text-cool hover:border-cool/70'
+    : 'w-10 h-10 sm:w-9 sm:h-9 border-border text-ink-mid hover:text-cool hover:border-cool/70'
   return (
     <button
       type="button"
@@ -347,7 +347,7 @@ function PlayQueuePanel({ onClose }: { onClose: () => void }) {
                 type="button"
                 onClick={() => p.removeFromQueueAt(orderPos)}
                 title="remove from queue"
-                className="font-pixel text-sm w-6 h-6 flex items-center justify-center text-ink-lo opacity-100 lg:opacity-0 lg:group-hover:opacity-100 hover:text-crit transition"
+                className="focus-vis font-pixel text-sm w-10 h-10 lg:w-8 lg:h-8 flex items-center justify-center text-ink-lo opacity-100 lg:opacity-0 lg:group-hover:opacity-100 hover:text-crit transition"
               >
                 ✕
               </button>
@@ -421,7 +421,7 @@ function SaveQueueButton() {
           type="submit"
           disabled={save.isPending}
           title={skipped > 0 ? `${skipped} preview track(s) will be skipped` : undefined}
-          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-hot text-hot hover:bg-hot/15 rounded-xs disabled:opacity-40 transition"
+          className="font-pixel text-xs uppercase tracking-widest px-2 py-1 border border-hot text-hot-ink hover:bg-hot/15 rounded-xs disabled:opacity-40 transition"
         >
           {save.isPending ? '···' : 'save'}
         </button>

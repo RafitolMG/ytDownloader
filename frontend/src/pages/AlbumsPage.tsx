@@ -331,7 +331,7 @@ function AlbumCover({
             }}
             title="play album"
             aria-label="play album"
-            className="absolute bottom-2 right-2 w-9 h-9 flex items-center justify-center rounded-full bg-hot/80 text-ink-hi shadow-[var(--shadow-glow-hot)] opacity-0 group-hover:opacity-100 transition hover:bg-hot"
+            className="absolute bottom-2 right-2 w-9 h-9 flex items-center justify-center rounded-full bg-hot/80 text-ink-hi shadow-[var(--shadow-glow-hot)] opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition hover:bg-hot"
           >
             ▶
           </button>

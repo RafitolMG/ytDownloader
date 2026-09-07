@@ -42,6 +42,9 @@ export function SideMenu({ open, onClose }: { open: boolean; onClose: () => void
         className={`fixed top-0 left-0 z-[60] h-full w-72 max-w-[85%] bg-page-mid border-r border-violet/40 shadow-[var(--shadow-glow-violet)] flex flex-col transition-transform duration-200 ease-out pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
+        // Off-screen is not closed: without this the panel's links stay
+        // focusable and screen readers announce a dialog that isn't open.
+        inert={!open}
       >
         <header className="flex items-center justify-between px-5 py-4 border-b border-border/60">
           <span className="font-pixel text-xs uppercase tracking-[0.3em] text-violet">

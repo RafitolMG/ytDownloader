@@ -15,14 +15,22 @@
   /* Ink (text) */
   --color-ink-hi: #fdf4ff;
   --color-ink-mid: #c9a4f0;
-  --color-ink-lo: #9a7fc0; /* was #7a5e9e (3.7:1, below AA); now 5.85:1 on --color-page */
+  /* Ratios below are against the *worst* backdrop these actually sit on: a
+     card-vapor panel over the sunset band (#4e2d4e), not the bare page. The
+     previous #9a7fc0 measured 5.85:1 on --color-page but only 3.41:1 there. */
+  --color-ink-lo: #ae99cd; /* 4.52:1 on a card over the sun band, 6.85:1 on the page */
 
   /* Accents */
   --color-hot: #ff2975;
+  /* Text-only sibling of --color-hot. The brand magenta is a fill/glow/border
+     colour and stays as it is — pale pink would flatten the whole Outrun look —
+     but at label sizes it only reaches 3.22:1, so small text uses this instead.
+     Large glyphs and headings keep --color-hot: AA large-text is 3:1. */
+  --color-hot-ink: #ff73a5; /* 4.53:1 on a card over the sun band */
   --color-violet: #b537f2;
   --color-cool: #00f0ff;
   --color-sun: #ffb13d;
-  --color-crit: #ff4d5e;
+  --color-crit: #ff7885; /* 4.54:1 there; was #ff4d5e at 3.55:1 */
 
   /* Type */
   --font-display: "Monoton", "Space Grotesk", system-ui, sans-serif;

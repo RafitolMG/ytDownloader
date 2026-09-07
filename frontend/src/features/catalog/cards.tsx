@@ -49,7 +49,7 @@ export function SuggestionCard({ item }: { item: ExternalCatalogItem }) {
             }
             title="preview without downloading"
             className={`absolute inset-0 flex items-center justify-center text-2xl text-ink-hi bg-page/40 transition ${
-              isPreviewing ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+              isPreviewing ? 'opacity-100' : 'opacity-100 lg:opacity-0 lg:group-hover:opacity-100'
             }`}
           >
             <span style={{ textShadow: '0 0 10px var(--color-hot)' }}>
@@ -141,7 +141,7 @@ export function RecentCard({
         ) : (
           <div className="absolute inset-0 bg-gradient-to-br from-violet/40 via-hot/20 to-cool/30" />
         )}
-        <span className="absolute inset-0 flex items-center justify-center text-2xl text-ink-hi opacity-0 group-hover:opacity-100 bg-page/40 transition">
+        <span className="absolute inset-0 flex items-center justify-center text-2xl text-ink-hi opacity-100 lg:opacity-0 lg:group-hover:opacity-100 bg-page/40 transition">
           ▶
         </span>
       </div>
@@ -219,7 +219,7 @@ export function DailyMixCard({ mix, onOpen }: { mix: DailyMix; onOpen: () => voi
             }}
             title="play this mix"
             aria-label="play this mix"
-            className="absolute bottom-2 right-2 w-9 h-9 flex items-center justify-center rounded-full bg-hot/80 text-ink-hi shadow-[var(--shadow-glow-hot)] opacity-0 group-hover:opacity-100 transition hover:bg-hot"
+            className="absolute bottom-2 right-2 w-9 h-9 flex items-center justify-center rounded-full bg-hot/80 text-ink-hi shadow-[var(--shadow-glow-hot)] opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition hover:bg-hot"
           >
             ▶
           </button>

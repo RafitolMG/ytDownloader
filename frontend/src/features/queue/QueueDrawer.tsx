@@ -42,6 +42,9 @@ export function QueueDrawer({
         className={`fixed top-0 right-0 z-50 h-full w-full sm:w-[30rem] max-w-full bg-page-mid border-l border-cool/40 shadow-[var(--shadow-glow-cool)] flex flex-col transition-transform duration-200 ease-out pt-[env(safe-area-inset-top)] ${
           open ? 'translate-x-0' : 'translate-x-full'
         }`}
+        // Off-screen is not closed: without this the panel's links stay
+        // focusable and screen readers announce a dialog that isn't open.
+        inert={!open}
       >
         <header className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-border/60">
           <div className="font-pixel text-xs text-ink-lo uppercase tracking-[0.2em]">
